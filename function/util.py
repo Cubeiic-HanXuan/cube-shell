@@ -326,3 +326,70 @@ def symbolic_to_octal(symbolic):
             calc_permission(group) * 10 +
             calc_permission(others)
     )
+
+
+def download_with_resume(sftp, remote_path, local_path, progress_callback):
+    """
+    断点续传下载服务器文件到本地
+    :param sftp:一个活动的SFTP客户端会话。
+    :param remote_path:远程文件的路径。
+    :param local_path:指向本地文件的路径。
+    :param progress_callback:更新进度的回调函数。
+    """
+    # 获取远程文件大小
+    remote_file_size = sftp.stat(remote_path).st_size
+
+    # 检查本地文件存在和大小
+    if os.path.exists(local_path):
+        local_file_size = os.path.getsize(local_path)
+    else:
+        local_file_size = 0
+
+    # 如果本地文件已经完整，直接返回
+    if local_file_size >= remote_file_size:
+        print("File already downloaded.")
+        return
+
+    # 打开远程文件，定位到断点处
+    with sftp.file(remote_path, 'r') as remote_file:
+        remote_file.prefetch(local_file_size)
+
+        # 打开本地文件
+        with open(local_path, 'ab') as local_file:
+            # 从断点处读取
+            remote_file.seek(local_file_size)
+            while True:
+                data = remote_file.read(32768)  # 每次读取32KB
+                if not data:
+                    break
+                local_file.write(data)
+                local_file_size += len(data)
+
+                # 更新进度条
+                progress_callback(local_file_size, remote_file_size)
+
+
+def resume_upload(sftp, local_path, remote_path, progress_callback):
+    """
+    上传文件到具有恢复功能的远程服务器。
+    :param sftp:-个活动的SFTP客户端会话。
+    :param local_path:指向本地文件的路径。
+    :param remote_path:远程文件的路径。
+    :param progress_callback:更新进度的回调函数。
+    """
+    file_size = os.path.getsize(local_path)
+    try:
+        remote_file_size = sftp.stat(remote_path).st_size
+    except FileNotFoundError:
+        remote_file_size = 0
+
+    with open(local_path, 'rb') as f:
+        f.seek(remote_file_size)
+        with sftp.file(remote_path, 'ab' if remote_file_size > 0 else 'wb') as remote_file:
+            while True:
+                data = f.read(32768)  # Read in chunks
+                if not data:
+                    break
+                remote_file.write(data)
+                remote_file_size += len(data)
+                progress_callback(int((remote_file_size / file_size) * 100))

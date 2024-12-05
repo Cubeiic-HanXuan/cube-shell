@@ -24,6 +24,8 @@ class SshClient(BaseBackend):
         self.buffer1 = ['▉', '']
         self.buffer3 = ''
         self.buffer_write = b''
+        # 下载文件大小
+        self.total_size = 0
         # 加载私钥
         if key_type == 'Ed25519Key':
             # ssh-ed25519

@@ -16,12 +16,12 @@ import PySide6
 import qdarktheme
 import toml
 from PySide6.QtCore import QTimer, Signal, Qt, QPoint, QRect, QEvent, QObject, Slot, QUrl, QCoreApplication, \
-    QTranslator, QSize, QTimerEvent
+    QTranslator, QSize, QTimerEvent, QThread
 from PySide6.QtGui import QIcon, QAction, QTextCursor, QCursor, QCloseEvent, QKeyEvent, QInputMethodEvent, QPixmap, \
     QDragEnterEvent, QDropEvent, QFont, QContextMenuEvent, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QDialog, QMessageBox, QTreeWidgetItem, \
     QInputDialog, QFileDialog, QTreeWidget, QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QTableWidgetItem, \
-    QHeaderView, QStyle, QTabBar, QTextBrowser, QLineEdit, QListWidget, QStyledItemDelegate
+    QHeaderView, QStyle, QTabBar, QTextBrowser, QLineEdit, QListWidget, QStyledItemDelegate, QProgressBar
 from deepdiff import DeepDiff
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
@@ -1813,12 +1813,33 @@ class MainDialog(QMainWindow):
                 sftp = ssh_conn.open_sftp()
                 for item in items:
                     item_text = item.text(0)
-                    sftp.get(ssh_conn.pwd + '/' + item_text, f'{directory}/{item_text}')
+
+                    # 获取远程文件大小
+                    remote_file_size = sftp.stat(ssh_conn.pwd + '/' + item_text).st_size
+                    self.ui.download_with_resume.setVisible(True)
+                    # 转换为 KB
+                    self.ui.download_with_resume.setMaximum(remote_file_size // 1024)
+
+                    # 设置 SSH 会话保持活跃
+                    # 每30秒发送一次保持活跃的消息
+                    ssh_conn.conn.get_transport().set_keepalive(30)
+
+                    # 使用断点续传下载文件
+                    util.download_with_resume(sftp, ssh_conn.pwd + '/' + item_text, f'{directory}/{item_text}',
+                                              self.download_update_progress_bar)
+
+                    self.ui.download_with_resume.setVisible(False)
+                    # sftp.get(ssh_conn.pwd + '/' + item_text, f'{directory}/{item_text}')
 
             self.success("下载文件")
         except Exception as e:
             print(e)
             self.alarm('无法下载文件，请确认！')
+
+    # 下载更新进度条
+    def download_update_progress_bar(self, current, total):
+        self.ui.download_with_resume.setValue(current // 1024)
+        QApplication.processEvents()  # 更新 GUI 事件循环
 
     # 上传文件
     def uploadFile(self):
@@ -1830,9 +1851,23 @@ class MainDialog(QMainWindow):
                     ssh_conn = self.ssh()
                     sftp = ssh_conn.open_sftp()
                     try:
-                        sftp.put(file_path, ssh_conn.pwd + '/' + os.path.basename(file_path))
+                        self.ui.download_with_resume.setVisible(True)
+                        # 转换为 KB
+                        self.upload_thread = UploadThread(sftp, file_path,
+                                                          ssh_conn.pwd + '/' + os.path.basename(file_path))
+                        self.upload_thread.start()
+                        self.upload_thread.progress.connect(self.upload_update_progress)
+                        # sftp.put(file_path, ssh_conn.pwd + '/' + os.path.basename(file_path))
                     except IOError as e:
                         print(f"Failed to upload file: {e}")
+            self.refreshDirs()
+
+    # 上传更新进度条
+    def upload_update_progress(self, value):
+        self.ui.download_with_resume.setValue(value)
+        # 设置进度条为完成
+        if value >= 100:
+            self.ui.download_with_resume.setVisible(False)
             self.refreshDirs()
 
     # 刷新
@@ -2290,6 +2325,20 @@ class Confirm(QDialog):
 class Communicate(QObject):
     # 定义一个无参数的信号，用于通知父窗口刷新
     refresh_parent = Signal()
+
+
+# 上传文件
+class UploadThread(QThread):
+    progress = Signal(int)
+
+    def __init__(self, sftp, local_path, remote_path):
+        super().__init__()
+        self.sftp = sftp
+        self.local_path = local_path
+        self.remote_path = remote_path
+
+    def run(self):
+        util.resume_upload(self.sftp, self.local_path, self.remote_path, self.progress.emit)
 
 
 class CustomWidget(QWidget):
