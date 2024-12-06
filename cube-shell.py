@@ -13,6 +13,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import PySide6
+import appdirs
 import qdarktheme
 import toml
 from PySide6.QtCore import QTimer, Signal, Qt, QPoint, QRect, QEvent, QObject, Slot, QUrl, QCoreApplication, \
@@ -96,6 +97,9 @@ class MainDialog(QMainWindow):
         self.Shell = None
         icon = QIcon(":index.png")
         self.ui.ShellTab.tabBar().setTabIcon(0, icon)
+
+        # 确保配置目录存在并迁移现有配置文件（仅首次运行时）
+        migrate_existing_configs(util.APP_NAME)
 
         # 保存所有 QLineEdit 的列表
         self.line_edits = []
@@ -202,7 +206,7 @@ class MainDialog(QMainWindow):
         local_port = self.ui.lineEdit_2.text()
         token = self.ui.lineEdit.text()
 
-        with open(abspath('config.dat'), 'rb') as c:
+        with open(get_config_path('config.dat'), 'rb') as c:
             conf = pickle.loads(c.read())[device]
             c.close()
 
@@ -217,7 +221,7 @@ class MainDialog(QMainWindow):
         if not util.check_server_accessibility(host.split(':')[0], int(host.split(':')[1])):
             # 删除当前的 tab 并显示警告消息
             self._delete_tab()
-            QMessageBox.warning(self, "连接超时", "服务器无法连接，请检查网络或服务器状态。")
+            QMessageBox.warning(self, self.tr("连接超时"), self.tr("服务器无法连接，请检查网络或服务器状态。"))
             return
 
         try:
@@ -303,7 +307,7 @@ class MainDialog(QMainWindow):
     def _delete_tab(self):  # 删除标签页
         current_index = self.ui.ShellTab.currentIndex()
         current_index1 = self.ui.ShellTab.tabText(current_index)
-        if current_index1 != "首页":
+        if current_index1 != self.tr("首页"):
             self.ui.ShellTab.removeTab(current_index)
 
     # 根据标签页名字删除标签页
@@ -443,12 +447,12 @@ class MainDialog(QMainWindow):
             this = self.ui.ShellTab.tabWhatsThis(current_index)
             if this:
                 ssh_conn = mux.backend_index[this]
-                if current_text == "首页":
+                if current_text == self.tr("首页"):
                     if ssh_conn:
                         ssh_conn.close_sig = 0
                     self.isConnected = False
                     self.ui.treeWidget.setColumnCount(1)
-                    self.ui.treeWidget.setHeaderLabels(["设备列表"])
+                    self.ui.treeWidget.setHeaderLabels([self.tr("设备列表")])
                     self.remove_last_line_edit()
                     self.ui.treeWidget.clear()
                     self.refreshConf()
@@ -459,10 +463,10 @@ class MainDialog(QMainWindow):
                         self.refreshDirs()
                         self.processInitUI()
             else:
-                if current_text == "首页":
+                if current_text == self.tr("首页"):
                     self.isConnected = False
                     self.ui.treeWidget.setColumnCount(1)
-                    self.ui.treeWidget.setHeaderLabels(["设备列表"])
+                    self.ui.treeWidget.setHeaderLabels([self.tr("设备列表")])
                     self.remove_last_line_edit()
                     self.ui.treeWidget.clear()
                     self.refreshConf()
@@ -471,13 +475,13 @@ class MainDialog(QMainWindow):
         if platform.system() == 'Darwin':
             pass
         else:
-            self.ui.label_7.setText("添加配置 Shift+Ctrl+A")
-            self.ui.label_9.setText("添加隧道 Shift+Ctrl+S")
-            self.ui.label_11.setText("帮助 Shift+Ctrl+H")
-            self.ui.label_12.setText("关于 Shift+Ctrl+B")
-            self.ui.label_13.setText("查找命令行 Shift+Ctrl+C")
-            self.ui.label_14.setText("导入配置 Shift+Ctrl+I")
-            self.ui.label_15.setText("导出配置 Shift+Ctrl+E")
+            self.ui.label_7.setText(self.tr("添加配置 Shift+Ctrl+A"))
+            self.ui.label_9.setText(self.tr("添加隧道 Shift+Ctrl+S"))
+            self.ui.label_11.setText(self.tr("帮助 Shift+Ctrl+H"))
+            self.ui.label_12.setText(self.tr("关于 Shift+Ctrl+B"))
+            self.ui.label_13.setText(self.tr("查找命令行 Shift+Ctrl+C"))
+            self.ui.label_14.setText(self.tr("导入配置 Shift+Ctrl+I"))
+            self.ui.label_15.setText(self.tr("导出配置 Shift+Ctrl+E"))
 
     # 进程列表初始化
     def processInitUI(self):
@@ -485,7 +489,8 @@ class MainDialog(QMainWindow):
         self.ui.result.setColumnCount(6)
         # 展示表头标签
         self.ui.result.horizontalHeader().setVisible(True)
-        self.ui.result.setHorizontalHeaderLabels(["PID", "用户", "内存", "CPU", "地址", "命令行"])
+        self.ui.result.setHorizontalHeaderLabels(
+            ["PID", self.tr("用户"), self.tr("内存"), "CPU", self.tr("地址"), self.tr("命令行")])
         header = self.ui.result.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
@@ -516,7 +521,7 @@ class MainDialog(QMainWindow):
 
         # 创建菜单
         menu = QMenu()
-        kill_action = QAction(QIcon(':kill.png'), 'Kill 进程', self)
+        kill_action = QAction(QIcon(':kill.png'), self.tr('Kill 进程'), self)
         menu.setCursor(QCursor(Qt.PointingHandCursor))
         kill_action.triggered.connect(lambda: self.kill_process(list(first_column_values)))
         menu.addAction(kill_action)
@@ -577,7 +582,7 @@ class MainDialog(QMainWindow):
             return process_list
 
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"连接或检索进程列表失败: {e}")
+            QMessageBox.critical(self, "Error", self.tr("连接或检索进程列表失败") + f": {e}")
             return []
 
     # kill 选中的进程数据
@@ -595,12 +600,12 @@ class MainDialog(QMainWindow):
             stdin, stdout, stderr = ssh_conn.conn.exec_command(timeout=10, command=command, get_pty=False)
             error = stderr.read().decode('utf-8').strip()
             if error:
-                QMessageBox.warning(self, "Warning", f"服务器结束以下进程出错 {pips}: {error}")
+                QMessageBox.warning(self, "Warning", self.tr("服务器结束以下进程出错") + f" {pips}: {error}")
             else:
-                QMessageBox.information(self, "Success", f"以下进程 {pips} 被成功 kill.")
+                QMessageBox.information(self, "Success", self.tr(f"以下进程 {pips} 被成功 kill."))
                 self.update_process_list()
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"kill 以下进程失败 {pips}: {e}")
+            QMessageBox.critical(self, "Error", self.tr(f"kill 以下进程失败 {pips}: {e}"))
 
     # 进程管理结束
 
@@ -679,7 +684,7 @@ class MainDialog(QMainWindow):
                 tunnel = Tunnel(name, self.data[name], self)
                 self.tunnels.append(tunnel)
                 self.ui.gridLayout_tunnel_tabs.addWidget(tunnel, i, 0)
-            self.kill_button = QPushButton('关闭所有隧道')
+            self.kill_button = QPushButton(self.tr("关闭所有隧道"))
             self.kill_button.setIcon(QIcon(ICONS.KILL_SSH))
             self.kill_button.setFocusPolicy(Qt.NoFocus)
             self.kill_button.clicked.connect(self.do_killall_ssh)
@@ -689,7 +694,7 @@ class MainDialog(QMainWindow):
     def nat_traversal(self):
         icon_ssh = QIcon()
         icon_ssh.addFile(u":icons8-ssh-48.png", QSize(), QIcon.Mode.Selected, QIcon.State.On)
-        with open(abspath('config.dat'), 'rb') as c:
+        with open(get_config_path('config.dat'), 'rb') as c:
             dic = pickle.loads(c.read())
             c.close()
         for k in dic.keys():
@@ -699,45 +704,45 @@ class MainDialog(QMainWindow):
         # 创建菜单栏
         menubar = self.menuBar()
 
-        file_menu = menubar.addMenu("文件")
+        file_menu = menubar.addMenu(self.tr("文件"))
         # 创建“设置”菜单
-        setting_menu = menubar.addMenu("设置")
+        setting_menu = menubar.addMenu(self.tr("设置"))
         # 创建“帮助”菜单
-        help_menu = menubar.addMenu("帮助")
+        help_menu = menubar.addMenu(self.tr("帮助"))
 
         # 创建“新建”动作
-        new_action = QAction(QIcon(":icons8-ssh-48.png"), "&新增配置", self)
+        new_action = QAction(QIcon(":icons8-ssh-48.png"), self.tr("&新增配置"), self)
         new_action.setIconVisibleInMenu(True)
         new_action.setShortcut("Shift+Ctrl+A")
-        new_action.setStatusTip("添加配置")
+        new_action.setStatusTip(self.tr("添加配置"))
         file_menu.addAction(new_action)
         new_action.triggered.connect(self.showAddConfig)
 
-        new_ssh_tunnel_action = QAction(QIcon(ICONS.TUNNEL), "&新增SSH隧道", self)
+        new_ssh_tunnel_action = QAction(QIcon(ICONS.TUNNEL), self.tr("&新增SSH隧道"), self)
         new_ssh_tunnel_action.setIconVisibleInMenu(True)
         new_ssh_tunnel_action.setShortcut("Shift+Ctrl+S")
-        new_ssh_tunnel_action.setStatusTip("新增SSH隧道")
+        new_ssh_tunnel_action.setStatusTip(self.tr("新增SSH隧道"))
         file_menu.addAction(new_ssh_tunnel_action)
         new_ssh_tunnel_action.triggered.connect(self.showAddSshTunnel)
 
-        export_configuration = QAction(QIcon(':export.png'), "&导出设备配置", self)
+        export_configuration = QAction(QIcon(':export.png'), self.tr("&导出设备配置"), self)
         export_configuration.setIconVisibleInMenu(True)
         export_configuration.setShortcut("Shift+Ctrl+E")
-        export_configuration.setStatusTip("导出设备配置")
+        export_configuration.setStatusTip(self.tr("导出设备配置"))
         file_menu.addAction(export_configuration)
         export_configuration.triggered.connect(self.export_configuration)
 
-        import_configuration = QAction(QIcon(':import.png'), "&导入设备配置", self)
+        import_configuration = QAction(QIcon(':import.png'), self.tr("&导入设备配置"), self)
         import_configuration.setIconVisibleInMenu(True)
         import_configuration.setShortcut("Shift+Ctrl+I")
-        import_configuration.setStatusTip("导入设备配置")
+        import_configuration.setStatusTip(self.tr("导入设备配置"))
         file_menu.addAction(import_configuration)
         import_configuration.triggered.connect(self.import_configuration)
 
         # 创建“主题设置”动作
-        theme_action = QAction(QIcon(":undo.png"), "&主题设置", self)
+        theme_action = QAction(QIcon(":undo.png"), self.tr("&主题设置"), self)
         theme_action.setShortcut("Shift+Ctrl+T")
-        theme_action.setStatusTip("设置主题")
+        theme_action.setStatusTip(self.tr("设置主题"))
         setting_menu.addAction(theme_action)
         theme_action.triggered.connect(self.theme)
         #
@@ -748,21 +753,21 @@ class MainDialog(QMainWindow):
         # setting_menu.addAction(redo_action)
 
         # 创建“关于”动作
-        about_action = QAction(QIcon(":about.png"), "&关于", self)
+        about_action = QAction(QIcon(":about.png"), self.tr("&关于"), self)
         about_action.setShortcut("Shift+Ctrl+B")
-        about_action.setStatusTip("cubeShell 有关信息")
+        about_action.setStatusTip(self.tr("cubeShell 有关信息"))
         help_menu.addAction(about_action)
         about_action.triggered.connect(self.about)
 
-        linux_action = QAction(QIcon(":about.png"), "&Linux常用命令", self)
+        linux_action = QAction(QIcon(":about.png"), self.tr("&Linux常用命令"), self)
         linux_action.setShortcut("Shift+Ctrl+P")
-        linux_action.setStatusTip("最常用的Linux命令查找")
+        linux_action.setStatusTip(self.tr("最常用的Linux命令查找"))
         help_menu.addAction(linux_action)
         linux_action.triggered.connect(self.linux)
 
-        help_action = QAction(QIcon(":about.png"), "&帮助", self)
+        help_action = QAction(QIcon(":about.png"), self.tr("&帮助"), self)
         help_action.setShortcut("Shift+Ctrl+H")
-        help_action.setStatusTip("cubeShell使用说明")
+        help_action.setStatusTip(self.tr("cubeShell使用说明"))
         help_menu.addAction(help_action)
         help_action.triggered.connect(self.help)
 
@@ -826,7 +831,7 @@ class MainDialog(QMainWindow):
         if source == self.ui.ShellTab.tabBar():
             if event.type() == QEvent.MouseButtonPress:
                 self.originalIndex = self.ui.ShellTab.tabBar().tabAt(event.position().toPoint())
-                if self.ui.ShellTab.tabText(self.originalIndex) == "首页":
+                if self.ui.ShellTab.tabText(self.originalIndex) == self.tr("首页"):
                     self.homeTabPressed = True
                 else:
                     self.homeTabPressed = False
@@ -871,11 +876,11 @@ class MainDialog(QMainWindow):
             """)
 
         # 创建复制和粘贴的 QAction 对象
-        copy_action = QAction(QIcon(":copy.png"), '复制', self)
+        copy_action = QAction(QIcon(":copy.png"), self.tr('复制'), self)
         copy_action.setIconVisibleInMenu(True)
-        paste_action = QAction(QIcon(":paste.png"), '粘贴', self)
+        paste_action = QAction(QIcon(":paste.png"), self.tr('粘贴'), self)
         paste_action.setIconVisibleInMenu(True)
-        clear_action = QAction(QIcon(":clear.png"), '清屏', self)
+        clear_action = QAction(QIcon(":clear.png"), self.tr('清屏'), self)
         clear_action.setIconVisibleInMenu(True)
 
         # 绑定槽函数到 QAction 对象
@@ -915,7 +920,7 @@ class MainDialog(QMainWindow):
         if focus != -1:
             name = self.ui.treeWidget.topLevelItem(focus).text(0)
 
-            with open(abspath('config.dat'), 'rb') as c:
+            with open(get_config_path('config.dat'), 'rb') as c:
                 conf = pickle.loads(c.read())[name]
                 c.close()
 
@@ -930,7 +935,7 @@ class MainDialog(QMainWindow):
             if not util.check_server_accessibility(host.split(':')[0], int(host.split(':')[1])):
                 # 删除当前的 tab 并显示警告消息
                 self._delete_tab()
-                QMessageBox.warning(self, "连接超时", "服务器无法连接，请检查网络或服务器状态。")
+                QMessageBox.warning(self, self.tr("连接超时"), self.tr("服务器无法连接，请检查网络或服务器状态"))
                 return
 
             try:
@@ -945,7 +950,7 @@ class MainDialog(QMainWindow):
                 print(str(e))
                 self.Shell.setPlaceholderText(str(e))
         else:
-            self.alarm('请选择一台设备！')
+            self.alarm(self.tr('请选择一台设备！'))
 
     # 获取当前标签页的backend
     def ssh(self):
@@ -1027,7 +1032,7 @@ class MainDialog(QMainWindow):
             text_browser.append("\n")
             text_browser.append("\n")
             text_browser.append("\n")
-            text_browser.append("服务器还没有安装docker容器")
+            text_browser.append(self.tr("服务器还没有安装docker容器"))
             # 设置内容居中对齐
             text_browser.setAlignment(Qt.AlignCenter)
             self.ui.gridLayout_7.addWidget(text_browser)
@@ -1097,7 +1102,7 @@ class MainDialog(QMainWindow):
         self.ui.kernelVersion.setText('')
 
         self.ui.treeWidget.setColumnCount(1)
-        self.ui.treeWidget.setHeaderLabels(["设备列表"])
+        self.ui.treeWidget.setHeaderLabels([self.tr("设备列表")])
         self.remove_last_line_edit()
         ssh_conn.pwd = ''
         self.ui.treeWidgetDocker.clear()
@@ -1124,7 +1129,7 @@ class MainDialog(QMainWindow):
     def disc_off(self):
         current_index = self.ui.ShellTab.currentIndex()
         name = self.ui.ShellTab.tabText(current_index)
-        if name != "首页":
+        if name != self.tr("首页"):
             self._off(name)
             self._remove_tab_by_name(name)
 
@@ -1279,11 +1284,11 @@ class MainDialog(QMainWindow):
                 }
             """)
             # 创建菜单选项对象
-            self.ui.action = QAction(QIcon(':addConfig.png'), '添加配置', self)
+            self.ui.action = QAction(QIcon(':addConfig.png'), self.tr('添加配置'), self)
             self.ui.action.setIconVisibleInMenu(True)
-            self.ui.action1 = QAction(QIcon(':addConfig.png'), '编辑配置', self)
+            self.ui.action1 = QAction(QIcon(':addConfig.png'), self.tr('编辑配置'), self)
             self.ui.action1.setIconVisibleInMenu(True)
-            self.ui.action2 = QAction(QIcon(':delConf.png'), '删除配置', self)
+            self.ui.action2 = QAction(QIcon(':delConf.png'), self.tr('删除配置'), self)
             self.ui.action2.setIconVisibleInMenu(True)
             # 把动作选项对象添加到菜单self.groupBox_menu上
             self.ui.tree_menu.addAction(self.ui.action)
@@ -1318,26 +1323,26 @@ class MainDialog(QMainWindow):
                 }
             """)
 
-            self.ui.action1 = QAction(QIcon(':Download.png'), '下载文件', self)
+            self.ui.action1 = QAction(QIcon(':Download.png'), self.tr('下载文件'), self)
             self.ui.action1.setIconVisibleInMenu(True)
-            self.ui.action2 = QAction(QIcon(':Upload.png'), '上传文件', self)
+            self.ui.action2 = QAction(QIcon(':Upload.png'), self.tr('上传文件'), self)
             self.ui.action2.setIconVisibleInMenu(True)
-            self.ui.action3 = QAction(QIcon(':Edit.png'), '编辑文本', self)
+            self.ui.action3 = QAction(QIcon(':Edit.png'), self.tr('编辑文本'), self)
             self.ui.action3.setIconVisibleInMenu(True)
-            self.ui.action4 = QAction(QIcon(':createdirector.png'), '创建文件夹', self)
+            self.ui.action4 = QAction(QIcon(':createdirector.png'), self.tr('创建文件夹'), self)
             self.ui.action4.setIconVisibleInMenu(True)
-            self.ui.action5 = QAction(QIcon(':createfile.png'), '创建文件', self)
+            self.ui.action5 = QAction(QIcon(':createfile.png'), self.tr('创建文件'), self)
             self.ui.action5.setIconVisibleInMenu(True)
-            self.ui.action6 = QAction(QIcon(':refresh.png'), '刷新', self)
+            self.ui.action6 = QAction(QIcon(':refresh.png'), self.tr('刷新'), self)
             self.ui.action6.setIconVisibleInMenu(True)
-            self.ui.action7 = QAction(QIcon(':remove.png'), '删除', self)
+            self.ui.action7 = QAction(QIcon(':remove.png'), self.tr('删除'), self)
             self.ui.action7.setIconVisibleInMenu(True)
-            self.ui.action8 = QAction(QIcon(':icons-rename-48.png'), '重命名', self)
+            self.ui.action8 = QAction(QIcon(':icons-rename-48.png'), self.tr('重命名'), self)
             self.ui.action8.setIconVisibleInMenu(True)
 
-            self.ui.action9 = QAction(QIcon(':icons-unzip-48.png'), '解压', self)
+            self.ui.action9 = QAction(QIcon(':icons-unzip-48.png'), self.tr('解压'), self)
             self.ui.action9.setIconVisibleInMenu(True)
-            self.ui.action10 = QAction(QIcon(':icons8-zip-48.png'), '新建压缩', self)
+            self.ui.action10 = QAction(QIcon(':icons8-zip-48.png'), self.tr('新建压缩'), self)
             self.ui.action10.setIconVisibleInMenu(True)
 
             self.ui.tree_menu.addAction(self.ui.action1)
@@ -1348,7 +1353,7 @@ class MainDialog(QMainWindow):
             self.ui.tree_menu.addAction(self.ui.action6)
 
             # 在子菜单中添加动作
-            file_action = QAction("权限", self)
+            file_action = QAction(self.tr("权限"), self)
             file_action.setIcon(QIcon(":permissions-48.png"))
             file_action.setIconVisibleInMenu(True)
             file_action.triggered.connect(self.show_auth)
@@ -1395,11 +1400,11 @@ class MainDialog(QMainWindow):
                     padding-right: 0px; /* 设置图标右侧的间距 */
                 }
             """)
-            self.ui.action1 = QAction(QIcon(':stop.png'), '停止', self)
+            self.ui.action1 = QAction(QIcon(':stop.png'), self.tr('停止'), self)
             self.ui.action1.setIconVisibleInMenu(True)
-            self.ui.action2 = QAction(QIcon(':restart.png'), '重启', self)
+            self.ui.action2 = QAction(QIcon(':restart.png'), self.tr('重启'), self)
             self.ui.action2.setIconVisibleInMenu(True)
-            self.ui.action3 = QAction(QIcon(':remove.png'), '删除', self)
+            self.ui.action3 = QAction(QIcon(':remove.png'), self.tr('删除'), self)
             self.ui.action3.setIconVisibleInMenu(True)
             # self.ui.action4 = QAction('日志', self)
 
@@ -1430,13 +1435,13 @@ class MainDialog(QMainWindow):
         # 检查是否有选中的项
         if selected_items:
             if len(selected_items) > 1:
-                QMessageBox.warning(self, '警告', '只能编辑一个设备')
+                QMessageBox.warning(self, self.tr('警告'), self.tr('只能编辑一个设备'))
                 return
             # 遍历选中的项
             for item in selected_items:
                 # 获取项的内容
                 name = item.text(0)
-                with open(abspath('config.dat'), 'rb') as c:
+                with open(get_config_path('config.dat'), 'rb') as c:
                     conf = pickle.loads(c.read())[name]
 
                 if len(conf) == 3:
@@ -1464,11 +1469,11 @@ class MainDialog(QMainWindow):
 
     # 导出配置
     def export_configuration(self):
-        src_path = abspath('config.dat')
+        src_path = get_config_path('config.dat')
         # 选择保存文件夹
         directory = QFileDialog.getExistingDirectory(
             None,  # 父窗口，这里为None表示没有父窗口
-            '选择保存文件夹',  # 对话框标题
+            self.tr('选择保存文件夹'),  # 对话框标题
             '',  # 默认打开目录
             QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks  # 显示选项
         )
@@ -1476,17 +1481,17 @@ class MainDialog(QMainWindow):
             os.makedirs(f'{directory}/config', exist_ok=True)
             # 复制文件
             shutil.copy2(str(src_path), f'{directory}/config/config.dat')
-            self.success("导出成功")
+            self.success(self.tr("导出成功"))
 
     # 导入配置
     def import_configuration(self):
-        config = abspath('config.dat')
+        config = get_config_path('config.dat')
 
         file_name, _ = QFileDialog.getOpenFileName(
             self,
-            "选择文件",
+            self.tr("选择文件"),
             "",
-            "所有文件 (*);;json 文件 (*.json)",
+            self.tr("所有文件 (*);;json 文件 (*.json)"),
         )
         if file_name:
             # 如果目标文件存在，则删除它
@@ -1499,7 +1504,7 @@ class MainDialog(QMainWindow):
 
     # 刷新设备列表
     def refreshConf(self):
-        config = abspath('config.dat')
+        config = get_config_path('config.dat')
         with open(config, 'rb') as c:
             dic = pickle.loads(c.read())
             c.close()
@@ -1548,7 +1553,8 @@ class MainDialog(QMainWindow):
         ssh_conn = self.ssh()
         ssh_conn.pwd, files = self.getDirNow()
         self.dir_tree_now = files[1:]
-        self.ui.treeWidget.setHeaderLabels(["文件名", "文件大小", "修改日期", "权限", "所有者/组"])
+        self.ui.treeWidget.setHeaderLabels(
+            [self.tr("文件名"), self.tr("文件大小"), self.tr("修改日期"), self.tr("权限"), self.tr("所有者/组")])
         self.add_line_edit(ssh_conn.pwd)  # 添加一个初始的 QLineEdit
         self.ui.treeWidget.clear()
         i = 0
@@ -1588,13 +1594,13 @@ class MainDialog(QMainWindow):
     def editFile(self):
         items = self.ui.treeWidget.selectedItems()
         if len(items) > 1:
-            self.alarm('只能编辑一个文件！')
+            self.alarm(self.tr('只能编辑一个文件！'))
             return
         focus = self.ui.treeWidget.currentIndex().row()
         if focus != -1 and self.dir_tree_now[focus][0].startswith('-'):
             self.file_name = self.ui.treeWidget.currentItem().text(0)
             if has_valid_suffix(self.file_name):
-                self.alarm('不支持编辑此文件！')
+                self.alarm(self.tr('不支持编辑此文件！'))
                 return
             ssh_conn = self.ssh()
             text = self.getData2('cat ' + ssh_conn.pwd + '/' + self.file_name)
@@ -1603,17 +1609,17 @@ class MainDialog(QMainWindow):
                 self.ui.addTextEditWin.show()
                 self.ui.addTextEditWin.save_tex.connect(self.getNewText)
             elif text == 'error' or text == '\n':
-                self.alarm('无法编辑文件，请确认！')
+                self.alarm(self.tr('无法编辑文件，请确认！'))
         elif focus != -1 and self.dir_tree_now[focus][0].startswith('lr'):
-            self.alarm('此文件不能直接编辑！')
+            self.alarm(self.tr('此文件不能直接编辑！'))
         else:
-            self.alarm('文件夹不能被编辑！')
+            self.alarm(self.tr('文件夹不能被编辑！'))
 
     def createDir(self):
         ssh_conn = self.ssh()
         dialog = QInputDialog(self)
-        dialog.setWindowTitle('创建文件夹')
-        dialog.setLabelText('文件夹名字:')
+        dialog.setWindowTitle(self.tr('创建文件夹'))
+        dialog.setLabelText(self.tr('文件夹名字:'))
         dialog.setFixedSize(400, 150)
 
         # 显示对话框并获取结果
@@ -1632,16 +1638,16 @@ class MainDialog(QMainWindow):
                     self.refreshDirs()
                 except Exception as create_error:
                     print(f"An error occurred: {create_error}")
-                    self.alarm('创建文件夹失败，请联系开发作者')
+                    self.alarm(self.tr('创建文件夹失败，请联系开发作者'))
             else:
-                self.alarm('文件夹已存在')
+                self.alarm(self.tr('文件夹已存在'))
 
     # 创建文件
     def createFile(self):
         ssh_conn = self.ssh()
         dialog = QInputDialog(self)
-        dialog.setWindowTitle('创建文件')
-        dialog.setLabelText('文件名字:')
+        dialog.setWindowTitle(self.tr('创建文件'))
+        dialog.setLabelText(self.tr('文件名字:'))
         dialog.setFixedSize(400, 150)
 
         # 显示对话框并获取结果
@@ -1657,7 +1663,7 @@ class MainDialog(QMainWindow):
                 self.refreshDirs()
             except IOError as e:
                 print(f"创建文件出现异常: {e}")
-                self.alarm('创建文件失败，请联系开发作者')
+                self.alarm(self.tr('创建文件失败，请联系开发作者'))
 
     # 获取返回信息，并保存文件
     def getNewText(self, new_list):
@@ -1678,15 +1684,15 @@ class MainDialog(QMainWindow):
     def delConf(self):
         # 创建消息框
         reply = QMessageBox()
-        reply.setWindowTitle('确认删除')
-        reply.setText(f'您确定要删除选中设备吗？这将无法恢复！')
+        reply.setWindowTitle(self.tr('确认删除'))
+        reply.setText(self.tr('您确定要删除选中设备吗？这将无法恢复！'))
         reply.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
 
         # 设置按钮文本为中文
         yes_button = reply.button(QMessageBox.Yes)
         no_button = reply.button(QMessageBox.No)
-        yes_button.setText("确定")
-        no_button.setText("取消")
+        yes_button.setText(self.tr("确定"))
+        no_button.setText(self.tr("取消"))
         # 显示对话框并等待用户响应
         reply.exec()
         if reply.clickedButton() == yes_button:
@@ -1697,7 +1703,7 @@ class MainDialog(QMainWindow):
                 for item in selected_items:
                     # 获取项的内容
                     name = item.text(0)
-                    config = abspath('config.dat')
+                    config = get_config_path('config.dat')
                     with open(config, 'rb') as c:
                         conf = pickle.loads(c.read())
                     with open(config, 'wb') as c:
@@ -1746,7 +1752,7 @@ class MainDialog(QMainWindow):
                 if 'Firmware Version' in system_info_dict:
                     self.ui.kernel.setText(system_info_dict['Firmware Version'])
                 else:
-                    self.ui.kernel.setText("无")
+                    self.ui.kernel.setText(self.tr("无"))
 
         else:
             self.ui.cpuRate.setValue(0)
@@ -1770,7 +1776,7 @@ class MainDialog(QMainWindow):
 
                 info = ssh_conn.docker_info
                 self.ui.treeWidgetDocker.clear()
-                self.ui.treeWidgetDocker.headerItem().setText(0, 'docker容器管理：')
+                self.ui.treeWidgetDocker.headerItem().setText(0, self.tr("docker容器管理") + '：')
                 if len(info) != 0:
                     i = 0
                     for n in info:
@@ -1791,11 +1797,11 @@ class MainDialog(QMainWindow):
                         self.ui.treeWidgetDocker.resizeColumnToContents(i)
                 else:
                     self.ui.treeWidgetDocker.addTopLevelItem(QTreeWidgetItem(0))
-                    self.ui.treeWidgetDocker.topLevelItem(0).setText(0, '服务器还没有安装docker容器')
+                    self.ui.treeWidgetDocker.topLevelItem(0).setText(0, self.tr('服务器还没有安装docker容器'))
         else:
             self.ui.treeWidgetDocker.clear()
             self.ui.treeWidgetDocker.addTopLevelItem(QTreeWidgetItem(0))
-            self.ui.treeWidgetDocker.topLevelItem(0).setText(0, '没有可用的docker容器')
+            self.ui.treeWidgetDocker.topLevelItem(0).setText(0, self.tr('没有可用的docker容器'))
 
     # 下载文件
     def downloadFile(self):
@@ -1803,7 +1809,7 @@ class MainDialog(QMainWindow):
             # 选择保存文件夹
             directory = QFileDialog.getExistingDirectory(
                 None,  # 父窗口，这里为None表示没有父窗口
-                '选择保存文件夹',  # 对话框标题
+                self.tr('选择保存文件夹'),  # 对话框标题
                 '',  # 默认打开目录
                 QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks  # 显示选项
             )
@@ -1831,10 +1837,10 @@ class MainDialog(QMainWindow):
                     self.ui.download_with_resume.setVisible(False)
                     # sftp.get(ssh_conn.pwd + '/' + item_text, f'{directory}/{item_text}')
 
-            self.success("下载文件")
+            self.success(self.tr("下载文件"))
         except Exception as e:
             print(e)
-            self.alarm('无法下载文件，请确认！')
+            self.alarm(self.tr('无法下载文件，请确认！'))
 
     # 下载更新进度条
     def download_update_progress_bar(self, current, total):
@@ -1844,7 +1850,7 @@ class MainDialog(QMainWindow):
     # 上传文件
     def uploadFile(self):
         # 打开文件对话框让用户选择文件
-        files, _ = QFileDialog.getOpenFileNames(self, "选择文件", "", "所有文件 (*)")
+        files, _ = QFileDialog.getOpenFileNames(self, self.tr("选择文件"), "", self.tr("所有文件 (*)"))
         if files:
             for file_path in files:
                 if os.path.isfile(file_path):
@@ -1900,15 +1906,15 @@ class MainDialog(QMainWindow):
         ssh_conn = self.ssh()
         # 创建消息框
         reply = QMessageBox()
-        reply.setWindowTitle('确认删除')
-        reply.setText(f'确定删除选中项目吗？这将无法恢复！')
+        reply.setWindowTitle(self.tr('确认删除'))
+        reply.setText(self.tr('确定删除选中项目吗？这将无法恢复！'))
         reply.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
 
         # 设置按钮文本为中文
         yes_button = reply.button(QMessageBox.Yes)
         no_button = reply.button(QMessageBox.No)
-        yes_button.setText("是")
-        no_button.setText("否")
+        yes_button.setText(self.tr("是"))
+        no_button.setText(self.tr("否"))
         # 显示对话框并等待用户响应
         reply.exec()
 
@@ -1959,7 +1965,8 @@ class MainDialog(QMainWindow):
         selected_items = self.ui.treeWidget.selectedItems()
         for item in selected_items:
             item_text = item.text(0)
-            new_name = QInputDialog.getText(self, '重命名', '请输入新的文件名：', QLineEdit.Normal, item_text)
+            new_name = QInputDialog.getText(self, self.tr('重命名'), self.tr('请输入新的文件名') + '：',
+                                            QLineEdit.Normal, item_text)
             if new_name[1]:
                 new_name = new_name[0]
                 ssh_conn.exec(f'mv {ssh_conn.pwd}/{item_text} {ssh_conn.pwd}/{new_name}')
@@ -2057,7 +2064,7 @@ class MainDialog(QMainWindow):
         创建一个错误消息框，并设置自定义图标
         """
         msg_box = QMessageBox(self)
-        msg_box.setWindowTitle('操作失败')
+        msg_box.setWindowTitle(self.tr('操作失败'))
         msg_box.setText(f'{alart}')
 
         # 加载自定义图标
@@ -2076,8 +2083,8 @@ class MainDialog(QMainWindow):
         创建一个成功消息框，并设置自定义图标
         """
         msg_box = QMessageBox(self)
-        msg_box.setWindowTitle('操作成功')
-        msg_box.setText(f'{alart}成功')
+        msg_box.setWindowTitle(self.tr('操作成功'))
+        msg_box.setText(f'{alart}' + self.tr('成功'))
 
         # 加载自定义图标
         custom_icon = QIcon(':icons8-success-48.png')  # 替换为你的图标路径
@@ -2207,17 +2214,17 @@ class AddConfigUi(QDialog):
             self.dial.protEdit.text(), self.dial.lineEdit.text(), self.dial.comboBox.currentText()
 
         if name == '':
-            self.alarm('配置名称不能为空！')
+            self.alarm(self.tr('配置名称不能为空！'))
         elif username == '':
-            self.alarm('用户名不能为空！')
+            self.alarm(self.tr('用户名不能为空！'))
         elif password == '' and private_key_type == '':
-            self.alarm('密码或者密钥必须提供一个！')
+            self.alarm(self.tr('密码或者密钥必须提供一个！'))
         elif private_key_type != '' and private_key_file == '':
-            self.alarm('请上传私钥文件！')
+            self.alarm(self.tr('请上传私钥文件！'))
         elif ip == '':
-            self.alarm('ip地址不能为空！')
+            self.alarm(self.tr('ip地址不能为空！'))
         else:
-            config = abspath('config.dat')
+            config = get_config_path('config.dat')
             with open(config, 'rb') as c:
                 conf = pickle.loads(c.read())
                 c.close()
@@ -2230,9 +2237,9 @@ class AddConfigUi(QDialog):
     def addKeyFile(self):
         file_name, _ = QFileDialog.getOpenFileName(
             self,
-            "选择文件",
+            self.tr("选择文件"),
             "",
-            "所有文件 (*);;Python 文件 (*.py);;文本文件 (*.txt)",
+            self.tr("所有文件 (*);;Python 文件 (*.py);;文本文件 (*.txt)"),
         )
         if file_name:
             self.dial.lineEdit.setText(file_name)
@@ -2250,7 +2257,7 @@ class AddConfigUi(QDialog):
         self.dial.alarmbox = QMessageBox()
         self.dial.alarmbox.setWindowIcon(QIcon("Resources/icon.ico"))
         self.dial.alarmbox.setText(alart)
-        self.dial.alarmbox.setWindowTitle('错误提示')
+        self.dial.alarmbox.setWindowTitle(self.tr('错误提示'))
         self.dial.alarmbox.show()
 
 
@@ -2364,13 +2371,13 @@ class CustomWidget(QWidget):
         ack = ssh_conn.exec(cmd=cmd, pty=False)
         if not ack:
             # 安装按钮
-            self.install_button = QPushButton("安装", self)
+            self.install_button = QPushButton(self.tr("安装"), self)
             self.install_button.setCursor(QCursor(Qt.PointingHandCursor))
             self.install_button.clicked.connect(lambda: self.installAction(item, ssh_conn))
             self.button_layout.addWidget(self.install_button)
         else:
             # 安装按钮
-            self.install_button = QPushButton("已安装", self)
+            self.install_button = QPushButton(self.tr("已安装"), self)
             self.install_button.setCursor(QCursor(Qt.PointingHandCursor))
             self.install_button.setStyleSheet("background-color: rgb(102, 221, 121);")
             self.install_button.setDisabled(True)
@@ -2435,7 +2442,7 @@ class CustomWidget(QWidget):
 
     def refresh(self, item, ssh_conn):
         # 安装按钮
-        self.install_button.setText("已安装")
+        self.install_button.setText(self.tr("已安装"))
         self.install_button.setStyleSheet("background-color: rgb(102, 221, 121);")
         self.install_button.setDisabled(True)
 
@@ -2541,7 +2548,7 @@ class TunnelConfig(QDialog):
 
         icon_ssh = QIcon()
         icon_ssh.addFile(u":icons8-ssh-48.png", QSize(), QIcon.Mode.Selected, QIcon.State.On)
-        with open(abspath('config.dat'), 'rb') as c:
+        with open(get_config_path('config.dat'), 'rb') as c:
             dic = pickle.loads(c.read())
             c.close()
         for k in dic.keys():
@@ -2576,7 +2583,7 @@ class TunnelConfig(QDialog):
         ssh = self.ui.comboBox_ssh.currentText()
         username, password, host, key_type, key_file = open_data(ssh)
         if not util.check_server_accessibility(host.split(':')[0], int(host.split(':')[1])):
-            QMessageBox.warning(self, "连接超时", "服务器无法连接，请检查网络或服务器状态。")
+            QMessageBox.warning(self, self.tr("连接超时"), self.tr("服务器无法连接，请检查网络或服务器状态"))
             return
 
         ssh_command = (f"ssh -L {int(text.split(':')[1])}:{self.ui.remote_bind_address_edit.text()} "
@@ -2612,7 +2619,7 @@ class AddTunnelConfig(QDialog):
 
         icon_ssh = QIcon()
         icon_ssh.addFile(u":icons8-ssh-48.png", QSize(), QIcon.Mode.Selected, QIcon.State.On)
-        with open(abspath('config.dat'), 'rb') as c:
+        with open(get_config_path('config.dat'), 'rb') as c:
             dic = pickle.loads(c.read())
             c.close()
         for k in dic.keys():
@@ -2627,23 +2634,23 @@ class AddTunnelConfig(QDialog):
         remote = self.tunnel.remote_bind_address_edit.text()
         tunnel_type = self.tunnel.comboBox_tunnel_type.currentText()
         if remote == '' and tunnel_type != '动态':
-            QMessageBox.critical(self, "警告", "请填写远程绑定地址")
+            QMessageBox.critical(self, self.tr("警告"), self.tr("请填写远程绑定地址"))
             return
         split = remote.split(':')
         if len(split) != 2 and tunnel_type != '动态':
-            QMessageBox.critical(self, "警告", "远程绑定地址格式不正确，请检查")
+            QMessageBox.critical(self, self.tr("警告"), self.tr("远程绑定地址格式不正确，请检查"))
             return
 
         local = self.tunnel.local_bind_address_edit.text()
         if local == '':
-            QMessageBox.critical(self, "警告", "请填写本地绑定地址")
+            QMessageBox.critical(self, self.tr("警告"), self.tr("请填写本地绑定地址"))
             return
         local_split = local.split(':')
         if len(local_split) != 2:
-            QMessageBox.critical(self, "警告", "本地绑定地址格式不正确，请检查")
+            QMessageBox.critical(self, self.tr("警告"), self.tr("本地绑定地址格式不正确，请检查"))
             return
         if self.tunnel.ssh_tunnel_name.text() == '':
-            QMessageBox.critical(self, "警告", "请填写隧道名称")
+            QMessageBox.critical(self, self.tr("警告"), self.tr("请填写隧道名称"))
             return
 
         dic = {
@@ -2654,7 +2661,7 @@ class AddTunnelConfig(QDialog):
             KEYS.LOCAL_BIND_ADDRESS: self.tunnel.local_bind_address_edit.text(),
         }
 
-        file_path = abspath('tunnel.json')
+        file_path = get_config_path('tunnel.json')
         # 读取 JSON 文件内容
         data = util.read_json(file_path)
         data[self.tunnel.ssh_tunnel_name.text()] = dic
@@ -2796,21 +2803,21 @@ class Tunnel(QWidget):
 
         # 创建消息框
         reply = QMessageBox()
-        reply.setWindowTitle('确认删除')
-        reply.setText(f'您确定要删除此隧道吗？这将无法恢复！')
+        reply.setWindowTitle(self.tr('确认删除'))
+        reply.setText(self.tr('您确定要删除此隧道吗？这将无法恢复！'))
         reply.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
 
         # 设置按钮文本为中文
         yes_button = reply.button(QMessageBox.Yes)
         no_button = reply.button(QMessageBox.No)
-        yes_button.setText("确定")
-        no_button.setText("取消")
+        yes_button.setText(self.tr("确定"))
+        no_button.setText(self.tr("取消"))
         # 显示对话框并等待用户响应
         reply.exec()
 
         if reply.clickedButton() == yes_button:
             name_text = self.ui.name.text()
-            file_path = abspath('tunnel.json')
+            file_path = get_config_path('tunnel.json')
             # 读取 JSON 文件内容
             data = util.read_json(file_path)
             del data[name_text]
@@ -2836,7 +2843,7 @@ class CommandDelegate(QStyledItemDelegate):
 
 
 def open_data(ssh):
-    with open(abspath('config.dat'), 'rb') as c:
+    with open(get_config_path('config.dat'), 'rb') as c:
         conf = pickle.loads(c.read())[ssh]
     username, password, host, key_type, key_file = '', '', '', '', ''
     if len(conf) == 3:
@@ -2847,7 +2854,7 @@ def open_data(ssh):
 
 # 初始化配置文件
 def init_config():
-    config = abspath('config.dat')
+    config = get_config_path('config.dat')
     if not os.path.exists(config):
         with open(config, 'wb') as c:
             start_dic = {}
@@ -2855,13 +2862,59 @@ def init_config():
             c.close()
 
 
+def get_config_directory(app_name):
+    """
+     获取用户配置目录并创建它（如果不存在）
+    :param app_name: 应用名字
+    :return:
+    """
+    # 使用 appdirs 获取跨平台的配置目录
+    config_dir = appdirs.user_config_dir(app_name, appauthor=False)
+
+    # 创建配置目录（如果不存在）
+    os.makedirs(config_dir, exist_ok=True)
+
+    return config_dir
+
+
+def migrate_existing_configs(app_name):
+    """
+    迁移现有配置文件（初次运行）
+    :param app_name: 应用名字
+    :return:
+    """
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    new_conf_dir = get_config_directory(app_name)
+
+    # 列出要迁移的文件
+    files_to_migrate = ["config.dat", "tunnel.json"]
+
+    for file_name in files_to_migrate:
+        old_file_path = os.path.join(current_dir, 'conf', file_name)
+        new_file_path = os.path.join(new_conf_dir, file_name)
+
+        if os.path.exists(old_file_path) and not os.path.exists(new_file_path):
+            print(f"Copying {old_file_path} to {new_file_path}")
+            shutil.copy2(old_file_path, new_file_path)  # 使用 copy2 复制文件并保留元数据
+
+
+def get_config_path(file_name):
+    """
+    获取配置文件
+    :param file_name: 文件名
+    :return:
+    """
+    return os.path.join(get_config_directory(util.APP_NAME), file_name)
+
+
 if __name__ == '__main__':
     print("PySide6 version:", PySide6.__version__)
     qdarktheme.enable_hi_dpi()
     app = QApplication(sys.argv)
+
     translator = QTranslator()
     # 加载编译后的 .qm 文件
-    translator.load("translations.qm")
+    translator.load("app_zh_CN.qm")
 
     # 安装翻译
     app.installTranslator(translator)

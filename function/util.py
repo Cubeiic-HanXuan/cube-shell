@@ -26,6 +26,9 @@ BANNER = """
 # 主题
 THEME = None
 
+# 应用名
+APP_NAME = "cube-shell"
+
 
 def get_default_folder_icon():
     """

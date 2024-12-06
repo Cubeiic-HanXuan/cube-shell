@@ -6,3 +6,4 @@ pyte~=0.8.2
 deepdiff~=8.0.1
 pyqtdarktheme~=2.1.0
 toml~=0.10.2
+appdirs~=1.4.4
