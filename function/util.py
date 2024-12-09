@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import socket
+import logging
 
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QFileIconProvider
@@ -28,6 +29,9 @@ THEME = None
 
 # 应用名
 APP_NAME = "cube-shell"
+
+# 日志记录
+logger = logging.getLogger(__name__)
 
 
 def get_default_folder_icon():

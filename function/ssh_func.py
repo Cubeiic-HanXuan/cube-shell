@@ -4,7 +4,7 @@ import paramiko
 
 from core.backend import BaseBackend
 from core.mux import mux
-from function import parse_data
+from function import parse_data, util
 
 
 class SshClient(BaseBackend):
@@ -49,20 +49,29 @@ class SshClient(BaseBackend):
         """
         建立 SSH 连接的方法。
         """
-        try:
-            if self.private_key:
-                self.conn.connect(hostname=self.host, port=self.port,
-                                  username=self.username, pkey=self.private_key, timeout=10)
-            else:
-                self.conn.connect(hostname=self.host, port=self.port,
-                                  username=self.username, password=self.password, timeout=10)
-        except paramiko.ssh_exception.AuthenticationException:
-            print("Authentication failed.")
-        except Exception as e:
-            print(f"Connection error: {e}")
+        max_retries = 3
+        retry_count = 0
+        while retry_count < max_retries:
+            try:
+                if self.private_key:
+                    self.conn.connect(hostname=self.host, port=self.port,
+                                      username=self.username, pkey=self.private_key, timeout=2)
+                else:
+                    self.conn.connect(hostname=self.host, port=self.port,
+                                      username=self.username, password=self.password, timeout=2)
+                break
+            except paramiko.ssh_exception.AuthenticationException:
+                util.logger.error("Authentication failed.")
+                raise
+            except Exception as e:
+                util.logger.error(f"Connection error: {e}")
+                retry_count += 1
+                if retry_count >= max_retries:
+                    util.logger.error("Max retries reached. Giving up.")
+                    raise
 
         self.channel = self.conn.get_transport().open_session()
-        self.channel.get_pty(width=200, height=400)
+        self.channel.get_pty(width=100, height=200)
         self.channel.invoke_shell()
         mux.add_backend(self)
 
@@ -93,7 +102,7 @@ class SshClient(BaseBackend):
                 output = self.channel.recv(4096)
                 self.write_to_screen(output)
         except Exception as e:
-            print(f"Error while reading from channel: {e}")
+            util.logger.error(f"Error while reading from channel: {e}")
 
     def close(self):
         """
@@ -220,10 +229,10 @@ class SshClient(BaseBackend):
 
                 # time.sleep(1)
             except EOFError as e:
-                print(f"EOFError: {e}")
+                util.logger.error(f"EOFError: {e}")
             except Exception as e:
-                print(f"Unexpected error: {e}")
-                print(f"连接已经关闭")
+                util.logger.error(f"Unexpected error: {e}")
+                util.logger.info("连接已经关闭")
 
 
 if __name__ == '__main__':

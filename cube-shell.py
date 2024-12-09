@@ -17,7 +17,7 @@ import appdirs
 import qdarktheme
 import toml
 from PySide6.QtCore import QTimer, Signal, Qt, QPoint, QRect, QEvent, QObject, Slot, QUrl, QCoreApplication, \
-    QTranslator, QSize, QTimerEvent, QThread
+    QTranslator, QSize, QTimerEvent, QThread, QMetaObject, Q_ARG
 from PySide6.QtGui import QIcon, QAction, QTextCursor, QCursor, QCloseEvent, QKeyEvent, QInputMethodEvent, QPixmap, \
     QDragEnterEvent, QDropEvent, QFont, QContextMenuEvent, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QDialog, QMessageBox, QTreeWidgetItem, \
@@ -285,7 +285,7 @@ class MainDialog(QMainWindow):
             self.NAT_lod()
             ssh_conn.close()
         except Exception as e:
-            print(str(e))
+            util.logger.error(str(e))
 
     # 刷新内网穿透页面
     def NAT_lod(self):
@@ -947,7 +947,7 @@ class MainDialog(QMainWindow):
                 self.ssh_username, self.ssh_password, self.ssh_ip, self.key_type, self.key_file = username, password, \
                     host, key_type, key_file
             except Exception as e:
-                print(str(e))
+                util.logger.error(str(e))
                 self.Shell.setPlaceholderText(str(e))
         else:
             self.alarm(self.tr('请选择一台设备！'))
@@ -968,12 +968,23 @@ class MainDialog(QMainWindow):
             loop.close()
 
     async def async_connect_ssh(self, ssh_conn):
-        # 创建一个线程池执行器
-        executor = ThreadPoolExecutor(max_workers=1)
-
-        # 在线程池中执行同步的 connect 方法
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(executor, ssh_conn.connect)
+        try:
+            # 使用上下文管理器创建线程池执行器，动态调整线程池大小
+            max_workers = min(32, (os.cpu_count() or 1) * 5)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # 在线程池中执行同步的 connect 方法
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(executor, ssh_conn.connect)
+        except Exception as e:
+            # 处理连接失败的情况
+            util.logger.error(f"SSH connection failed: {e}")
+            # 删除当前的 tab 并显示警告消息
+            self._delete_tab()
+            # 在主线程中显示消息框
+            QMetaObject.invokeMethod(self, "warning", Qt.QueuedConnection, Q_ARG(str, self.tr("拒绝连接")),
+                                     Q_ARG(str, self.tr("请检查服务器用户名、密码或密钥是否正确"))
+                                     )
+            return
 
         current_index = self.ui.ShellTab.currentIndex()
         ssh_conn.Shell = self.Shell
@@ -981,6 +992,10 @@ class MainDialog(QMainWindow):
 
         # 异步初始化 SFTP
         self.initSftpSignal.emit()
+
+    @Slot(str, str)  # 将其标记为槽
+    def warning(self, title, message):
+        QMessageBox.warning(self, self.tr(title), self.tr(message))
 
     # 初始化sftp和控制面板
     def initSftp(self):
@@ -1637,7 +1652,7 @@ class MainDialog(QMainWindow):
                     sftp.mkdir(pwd_text)
                     self.refreshDirs()
                 except Exception as create_error:
-                    print(f"An error occurred: {create_error}")
+                    util.logger.error(f"An error occurred: {create_error}")
                     self.alarm(self.tr('创建文件夹失败，请联系开发作者'))
             else:
                 self.alarm(self.tr('文件夹已存在'))
@@ -1662,7 +1677,7 @@ class MainDialog(QMainWindow):
                     pass  # 不写入任何内容
                 self.refreshDirs()
             except IOError as e:
-                print(f"创建文件出现异常: {e}")
+                util.logger.error(f"An error occurred: {e}")
                 self.alarm(self.tr('创建文件失败，请联系开发作者'))
 
     # 获取返回信息，并保存文件
@@ -1839,7 +1854,7 @@ class MainDialog(QMainWindow):
 
             self.success(self.tr("下载文件"))
         except Exception as e:
-            print(e)
+            util.logger.error("Failed to download file:" + str(e))
             self.alarm(self.tr('无法下载文件，请确认！'))
 
     # 下载更新进度条
@@ -1865,7 +1880,7 @@ class MainDialog(QMainWindow):
                         self.upload_thread.progress.connect(self.upload_update_progress)
                         # sftp.put(file_path, ssh_conn.pwd + '/' + os.path.basename(file_path))
                     except IOError as e:
-                        print(f"Failed to upload file: {e}")
+                        util.logger.error(f"Failed to upload file: {e}")
             self.refreshDirs()
 
     # 上传更新进度条
@@ -1934,7 +1949,7 @@ class MainDialog(QMainWindow):
                     else:
                         sftp.remove(ssh_conn.pwd + '/' + key)
                 except IOError as e:
-                    print(f"Failed to remove file: {e}")
+                    util.logger.error(f"Failed to remove file: {e}")
             rm_dict.clear()
             self.refreshDirs()
 
@@ -1996,7 +2011,7 @@ class MainDialog(QMainWindow):
             # 取出前12位字符串
             container_id = text[:12]
             data_ = self.getData2('docker stop ' + container_id)
-            print('stop----', data_)
+            util.logger.info('stop----', data_)
             time.sleep(1)  # 延迟一秒
             self.refreshDokerInfo()
 
@@ -2008,7 +2023,7 @@ class MainDialog(QMainWindow):
             # 取出前12位字符串
             container_id = text[:12]
             data_ = self.getData2('docker restart ' + container_id)
-            print('restart----', data_)
+            util.logger.info('restart----', data_)
             time.sleep(1)  # 延迟一秒
             self.refreshDokerInfo()
 
@@ -2020,7 +2035,7 @@ class MainDialog(QMainWindow):
             # 取出前12位字符串
             container_id = text[:12]
             data_ = self.getData2('docker rm ' + container_id)
-            print('rm----', data_)
+            util.logger.info('rm----', data_)
             time.sleep(1)  # 延迟一秒
             self.refreshDokerInfo()
 
@@ -2035,7 +2050,7 @@ class MainDialog(QMainWindow):
                 sftp.rmdir(ssh_conn.pwd + '/' + text)
                 self.refreshDirs()
             except IOError as e:
-                print(f"Failed to remove directory: {e}")
+                util.logger.error(f"Failed to remove directory: {e}")
         pass
 
     def dragEnterEvent(self, event: QDragEnterEvent):
@@ -2055,7 +2070,7 @@ class MainDialog(QMainWindow):
                     try:
                         sftp.put(file_path, ssh_conn.pwd + '/' + os.path.basename(file_path))
                     except IOError as e:
-                        print(f"Failed to upload file: {e}")
+                        util.logger.error(f"Failed to upload file: {e}")
             self.refreshDirs()
 
     # 信息提示窗口
@@ -2096,9 +2111,8 @@ class MainDialog(QMainWindow):
         # 显示消息框
         msg_box.exec()
 
-    def inputMethodQuery(self, a0):
-        pass
-        # print(a0)
+    # def inputMethodQuery(self, a0):
+    #     pass
 
     # 设置主题
     def setDarkTheme(self):
@@ -2184,7 +2198,6 @@ class Auth(QDialog):
             # 合并命令
             combined_command = " && ".join(decompress_commands)
             ssh_conn.exec(combined_command)
-            print("更新了--------------")
         self.close()
         self.parent().refreshDirs()
 
@@ -2528,9 +2541,8 @@ class InstallDocker(QDialog):
             self.dial.textBrowserDockerInout.append(highlighted)
 
         except Exception as e:
-            print(f"安装失败：{e}")
+            util.logger.error(f"安装失败：{e}")
             return 'error'
-        print("安装成功")
 
 
 class TunnelConfig(QDialog):
@@ -2730,12 +2742,12 @@ class Tunnel(QWidget):
             try:
                 self.stop_tunnel()
             except Exception as e:
-                print(f"Error stopping tunnel: {e}")
+                util.logger.error(f"Error stopping tunnel: {e}")
         else:
             try:
                 self.start_tunnel()
             except Exception as e:
-                print(f"Error starting tunnel: {e}")
+                util.logger.error(f"Error starting tunnel: {e}")
         # Ensure UI is updated after the tunnel operation completes
         self.update_ui()
 
@@ -2795,7 +2807,7 @@ class Tunnel(QWidget):
             self.process = False
 
         except Exception as e:
-            print(f"Error stopping process: {e}")
+            util.logger.error(f"Error stopping process: {e}")
         self.ui.action_tunnel.setIcon(QIcon(ICONS.START))
 
     # 删除隧道
@@ -2894,7 +2906,7 @@ def migrate_existing_configs(app_name):
         new_file_path = os.path.join(new_conf_dir, file_name)
 
         if os.path.exists(old_file_path) and not os.path.exists(new_file_path):
-            print(f"Copying {old_file_path} to {new_file_path}")
+            util.logger.info(f"Copying {old_file_path} to {new_file_path}")
             shutil.copy2(old_file_path, new_file_path)  # 使用 copy2 复制文件并保留元数据
 
 
@@ -2909,7 +2921,6 @@ def get_config_path(file_name):
 
 if __name__ == '__main__':
     print("PySide6 version:", PySide6.__version__)
-    qdarktheme.enable_hi_dpi()
     app = QApplication(sys.argv)
 
     translator = QTranslator()
