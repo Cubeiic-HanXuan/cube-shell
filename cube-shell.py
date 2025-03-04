@@ -106,39 +106,6 @@ class MainDialog(QMainWindow):
 
         init_config()
 
-        # TODO 添加命令提示，还没有实现--start--
-        # 自动完成提示命令行工具
-        self.commands = None
-        self.command_list = QListWidget(self)
-        self.command_list.hide()  # 初始时隐藏
-        # 示例命令
-        self.commands = [
-            # 文件和目录操作
-            "ls", "cd", "mkdir", "rmdir", "rm", "cp", "mv", "chmod", "chown", "chgrp", "find",
-            # 文本处理
-            "grep", "sed", "awk", "cat", "less", "head", "tail", "cut", "paste", "sort", "uniq", "wc", "tr", "rev",
-            "join", "split", "diff", "patch",
-            # 编辑器
-            "nano", "vim", "vi",
-            # 系统信息
-            "ps", "top", "htop", "kill", "pkill", "killall", "date", "cal", "uptime", "who", "w", "last", "lastlog",
-            # 网络工具
-            "ping", "ssh", "scp", "rsync", "netstat", "ss", "ifconfig", "ip", "route", "traceroute", "mtr", "nslookup",
-            "dig", "host",
-            # 文件压缩与解压
-            "tar", "zip", "unzip", "gzip", "bzip2", "xz",
-            # 环境配置
-            "echo", "printenv", "export", "unset", "source", "alias", "unalias", "history", "source ~/.bashrc",
-            "open ~/.bashrc", "nano ~/.bashrc", "vim ~/.bashrc", "vi ~/.bashrc",
-            # Git 操作
-            "git", "git clone", "git pull", "git push", "git add", "git commit", "git status", "git branch",
-            "git checkout", "git merge", "git log", "git diff",
-            # 其他
-            "man", "info", "whatis", "apropos", "which", "whereis", "curl", "wget", "lynx", "telnet", "ftp", "df", "du",
-            "mount", "umount"]
-        self.command_list.installEventFilter(self)
-        # TODO 添加命令提示，还没有实现--end--
-
         self.setDarkTheme()  # 默认设置为暗主题
         self.index_pwd()
 
@@ -361,55 +328,6 @@ class MainDialog(QMainWindow):
                 self.ui.ShellTab.tabBar().setTabButton(tab_index, QTabBar.LeftSide, close_button)
             else:
                 self.ui.ShellTab.tabBar().setTabButton(tab_index, QTabBar.LeftSide, None)
-
-    # TODO 添加命令提示，还没有实现--start--
-    def on_text_changed(self, text):
-        # 更新命令列表
-        if text:
-            self.command_list.clear()
-            for command in self.commands:
-                if command.startswith(text):
-                    self.command_list.addItem(command)
-            if self.command_list.count() > 0:
-                self.command_list.setCurrentRow(0)  # 选中第一个
-                self.show_command_list()
-            else:
-                self.command_list.hide()
-        else:
-            self.command_list.hide()
-
-    def show_command_list(self):
-        current_index = self.ui.ShellTab.currentIndex()
-        shell = self.get_text_browser_from_tab(current_index)
-
-        # 假设 ssh_conn.screen 提供了光标的坐标
-        ssh_conn = self.ssh()
-        screen = ssh_conn.screen
-        # 使用 filter() 函数过滤空行
-        # 添加光标表示
-        cursor_x = screen.cursor.x
-        cursor_y = screen.cursor.y
-
-        # 将局部坐标转换为全局坐标
-        pos = shell.mapToGlobal(QPoint(cursor_x, cursor_y + 20 + shell.fontMetrics().height()))
-
-        # 移动命令列表到计算的位置
-        self.command_list.move(pos)
-        max_height = min(self.command_list.sizeHint().height(), 200)  # 最大高度设为200像素
-        self.command_list.resize(100, 100)
-        self.command_list.show()
-        shell.setFocus()  # 确保输入框始终有焦点
-
-    def hide_command_list(self):
-        self.command_list.hide()
-
-    def select_command(self):
-        # current_item = self.command_list.currentItem()
-        # if current_item:
-        #     self.input_box.setText(current_item.text())
-        self.hide_command_list()
-
-    # TODO 添加命令提示，还没有实现--end--
 
     # 生成标签名
     def generate_unique_tab_name(self, base_name):
@@ -674,7 +592,11 @@ class MainDialog(QMainWindow):
 
     # 隧道刷新
     def tunnel_refresh(self):
-        self.data = util.read_json(abspath(CONF_FILE))
+        #self.data = util.read_json(abspath(CONF_FILE))
+        file_path = get_config_path('tunnel.json')
+        # 读取 JSON 文件内容
+        self.data = util.read_json(file_path)
+
         self.tunnels = []
 
         # 展示ssh隧道列表
