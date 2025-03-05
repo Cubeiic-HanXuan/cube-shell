@@ -71,7 +71,11 @@ class SshClient(BaseBackend):
                     raise
 
         self.channel = self.conn.get_transport().open_session()
-        self.channel.get_pty(width=100, height=200)
+        self.channel.get_pty(
+            term="xterm-256color",
+            width=100, 
+            height=200
+            )
         self.channel.invoke_shell()
         mux.add_backend(self)
 
@@ -127,7 +131,7 @@ class SshClient(BaseBackend):
     def send(self, data):
         """
         发送字符
-        :param data:
+        :param data: 要发送的数据，可以是字符串或字节
         :return:
         """
         self.channel.send(data)
@@ -136,7 +140,7 @@ class SshClient(BaseBackend):
     def open_sftp(self) -> paramiko.sftp_client:
         """
         在SSH服务器上打开一个SFTP会话
-        :return: 一个新的“.SFTPClient”会话对象
+        :return: 一个新的"SFTPClient"会话对象
         """
         sftp_client = self.conn.open_sftp()
         return sftp_client

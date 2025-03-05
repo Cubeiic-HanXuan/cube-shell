@@ -107,6 +107,8 @@ def get_default_file_icon(qt_str):
         return QIcon(':icons-log-48.png')
     elif qt_str.endswith('.toml'):
         return QIcon(':icons-toml-48.png')
+    elif qt_str.endswith('.xml'):
+        return QIcon(':xml-48.png')
 
     return icon_provider.icon(QFileIconProvider.File)
 

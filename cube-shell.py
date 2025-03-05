@@ -1154,53 +1154,57 @@ class MainDialog(QMainWindow):
             os.system(CMDS.SSH_KILL_NIX)
 
     def closeEvent(self, event):
-        # 关闭定时起动器
-        if self.timer_id is not None:
-            self.killTimer(self.timer_id)
-            self.timer_id = None
-        """
-         窗口关闭事件 当存在通道的时候关闭通道
-         不存在时结束多路复用器的监听
-        :param event: 关闭事件
-        :return: None
-        """
-        # ssh_conn = self.ssh()
-        # if mux.backend_index:
-        #     for key, ssh_conn in mux.backend_index.items():
-        #         if ssh_conn:
-        #             ssh_conn.close()
-        mux.stop()
+        try:
+            # 关闭定时起动器
+            if self.timer_id is not None:
+                self.killTimer(self.timer_id)
+                self.timer_id = None
+            """
+             窗口关闭事件 当存在通道的时候关闭通道
+             不存在时结束多路复用器的监听
+            :param event: 关闭事件
+            :return: None
+            """
+            # ssh_conn = self.ssh()
+            # if mux.backend_index:
+            #     for key, ssh_conn in mux.backend_index.items():
+            #         if ssh_conn:
+            #             ssh_conn.close()
+            mux.stop()
 
-        """
-        该函数处理窗口关闭事件，主要功能包括：
-        遍历所有隧道（tunnel）并收集其配置信息。
-        检查收集到的配置与原始数据是否有差异。
-        如果有差异，则备份当前配置文件，并将新配置写入。
-        限制备份文件数量不超过10个，多余备份将被删除。
-        最终接受关闭事件。
-        :param event:
-        :return:
-        """
-        data = {}
-        for tunnel in self.tunnels:
-            name = tunnel.ui.name.text()
-            data[name] = tunnel.tunnelconfig.as_dict()
+            """
+            该函数处理窗口关闭事件，主要功能包括：
+            遍历所有隧道（tunnel）并收集其配置信息。
+            检查收集到的配置与原始数据是否有差异。
+            如果有差异，则备份当前配置文件，并将新配置写入。
+            限制备份文件数量不超过10个，多余备份将被删除。
+            最终接受关闭事件。
+            :param event:
+            :return:
+            """
+            data = {}
+            for tunnel in self.tunnels:
+                name = tunnel.ui.name.text()
+                data[name] = tunnel.tunnelconfig.as_dict()
 
-        # DeepDiff 库用于比较两个复杂数据结构（如字典、列表、集合等）之间的差异，
-        # 能够识别并报告添加、删除或修改的数据项。
-        # 它支持多级嵌套结构的深度比较，适用于调试或数据同步场景。
-        changed = DeepDiff(self.data, data, ignore_order=True)
-        if changed:
-            timestamp = int(time.time())
-            tunnel_json_path = abspath(CONF_FILE)
-            shutil.copy(tunnel_json_path, F"{tunnel_json_path}-{timestamp}")
-            with open(tunnel_json_path, "w") as fp:
-                json.dump(data, fp)
-            backup_configs = glob.glob(F"{tunnel_json_path}-*")
-            if len(backup_configs) > 10:
-                for config in sorted(backup_configs, reverse=True)[10:]:
-                    os.remove(config)
-        event.accept()
+            # DeepDiff 库用于比较两个复杂数据结构（如字典、列表、集合等）之间的差异，
+            # 能够识别并报告添加、删除或修改的数据项。
+            # 它支持多级嵌套结构的深度比较，适用于调试或数据同步场景。
+            changed = DeepDiff(self.data, data, ignore_order=True)
+            if changed:
+                timestamp = int(time.time())
+                tunnel_json_path = abspath(CONF_FILE)
+                shutil.copy(tunnel_json_path, F"{tunnel_json_path}-{timestamp}")
+                with open(tunnel_json_path, "w") as fp:
+                    json.dump(data, fp)
+                backup_configs = glob.glob(F"{tunnel_json_path}-*")
+                if len(backup_configs) > 10:
+                    for config in sorted(backup_configs, reverse=True)[10:]:
+                        os.remove(config)
+        except Exception as e:
+            util.logger.error(f"Error during close: {e}")
+        finally:
+            event.accept()
 
     def inputMethodEvent(self, a0: QInputMethodEvent) -> None:
         cmd = a0.commitString()
@@ -1487,31 +1491,37 @@ class MainDialog(QMainWindow):
 
     # 当前目录列表刷新
     def refreshDirs(self):
-        ssh_conn = self.ssh()
-        ssh_conn.pwd, files = self.getDirNow()
-        self.dir_tree_now = files[1:]
-        self.ui.treeWidget.setHeaderLabels(
-            [self.tr("文件名"), self.tr("文件大小"), self.tr("修改日期"), self.tr("权限"), self.tr("所有者/组")])
-        self.add_line_edit(ssh_conn.pwd)  # 添加一个初始的 QLineEdit
-        self.ui.treeWidget.clear()
-        i = 0
-        for n in files[1:]:
-            self.ui.treeWidget.addTopLevelItem(QTreeWidgetItem(0))
-            self.ui.treeWidget.topLevelItem(i).setText(0, n[8])
-            size_in_bytes = int(n[4].replace(",", ""))
-            self.ui.treeWidget.topLevelItem(i).setText(1, format_file_size(size_in_bytes))
-            self.ui.treeWidget.topLevelItem(i).setText(2, n[5] + ' ' + n[6] + ' ' + n[7])
-            self.ui.treeWidget.topLevelItem(i).setText(3, n[0])
-            self.ui.treeWidget.topLevelItem(i).setText(4, n[3])
-            # 设置图标
-            if n[0].startswith('d'):
-                # 获取默认的文件夹图标
-                folder_icon = util.get_default_folder_icon()
-                self.ui.treeWidget.topLevelItem(i).setIcon(0, folder_icon)
-            elif n[0][0] in ['l', '-', 's']:
-                file_icon = util.get_default_file_icon(n[8])
-                self.ui.treeWidget.topLevelItem(i).setIcon(0, file_icon)
-            i += 1
+        try:
+            # 先删除旧项目释放内存
+            while self.ui.treeWidget.topLevelItemCount() > 0:
+                self.ui.treeWidget.takeTopLevelItem(0)
+            ssh_conn = self.ssh()
+            ssh_conn.pwd, files = self.getDirNow()
+            self.dir_tree_now = files[1:]
+            self.ui.treeWidget.setHeaderLabels(
+                [self.tr("文件名"), self.tr("文件大小"), self.tr("修改日期"), self.tr("权限"), self.tr("所有者/组")])
+            self.add_line_edit(ssh_conn.pwd)  # 添加一个初始的 QLineEdit
+            self.ui.treeWidget.clear()
+            i = 0
+            for n in files[1:]:
+                self.ui.treeWidget.addTopLevelItem(QTreeWidgetItem(0))
+                self.ui.treeWidget.topLevelItem(i).setText(0, n[8])
+                size_in_bytes = int(n[4].replace(",", ""))
+                self.ui.treeWidget.topLevelItem(i).setText(1, format_file_size(size_in_bytes))
+                self.ui.treeWidget.topLevelItem(i).setText(2, n[5] + ' ' + n[6] + ' ' + n[7])
+                self.ui.treeWidget.topLevelItem(i).setText(3, n[0])
+                self.ui.treeWidget.topLevelItem(i).setText(4, n[3])
+                # 设置图标
+                if n[0].startswith('d'):
+                    # 获取默认的文件夹图标
+                    folder_icon = util.get_default_folder_icon()
+                    self.ui.treeWidget.topLevelItem(i).setIcon(0, folder_icon)
+                elif n[0][0] in ['l', '-', 's']:
+                    file_icon = util.get_default_file_icon(n[8])
+                    self.ui.treeWidget.topLevelItem(i).setIcon(0, file_icon)
+                i += 1
+        except Exception as e:
+            util.logger.error(f"Error refreshing directories: {e}")
 
     # 获取当前目录列表
     def getDirNow(self):
@@ -1649,13 +1659,30 @@ class MainDialog(QMainWindow):
                 self.refreshConf()
 
     # 定时刷新设备状态信息
-    def flushSysInfo(self):
-        ssh_conn = self.ssh()
+    # def flushSysInfo(self):
+    #     ssh_conn = self.ssh()
+    #
+    #     timer1 = QTimer()
+    #     timer1.start(1000)
+    #     ssh_conn.timer1 = timer1
+    #     ssh_conn.timer1.timeout.connect(self.refreshSysInfo)
 
-        timer1 = QTimer()
-        timer1.start(1000)
-        ssh_conn.timer1 = timer1
-        ssh_conn.timer1.timeout.connect(self.refreshSysInfo)
+    # 建议修改为
+    def flushSysInfo(self):
+        try:
+            ssh_conn = self.ssh()
+            # 使用单个定时器更新多个信息
+            if not hasattr(self, 'update_timer'):
+                ssh_conn.timer1 = QTimer()
+                ssh_conn.timer1.timeout.connect(self.refreshAllInfo)
+                ssh_conn.timer1.start(1000)
+        except Exception as e:
+            util.logger.error(f"Error setting up system info update: {e}")
+
+    def refreshAllInfo(self):
+        # 批量更新所有信息
+        self.refreshSysInfo()
+        self.refreshDokerInfo()
 
     # 刷新设备状态信息功能
     def refreshSysInfo(self):
@@ -1990,9 +2017,18 @@ class MainDialog(QMainWindow):
                     self.fileEvent = file_path
                     sftp = ssh_conn.open_sftp()
                     try:
-                        sftp.put(file_path, ssh_conn.pwd + '/' + os.path.basename(file_path))
-                    except IOError as e:
+                        self.ui.download_with_resume.setVisible(True)
+
+                        # 转换为 KB
+                        self.upload_thread = UploadThread(sftp, file_path,
+                                                          ssh_conn.pwd + '/' + os.path.basename(file_path))
+                        self.upload_thread.start()
+                        self.upload_thread.progress.connect(self.upload_update_progress)
+                        # sftp.put(file_path, ssh_conn.pwd + '/' + os.path.basename(file_path))
+                        #sftp.put(file_path, os.path.join(ssh_conn.pwd, os.path.basename(file_path)))
+                    except (IOError, OSError) as e:
                         util.logger.error(f"Failed to upload file: {e}")
+                        QMessageBox.critical(self, self.tr("上传失败"), self.tr(f"文件上传失败: {e}"))
             self.refreshDirs()
 
     # 信息提示窗口

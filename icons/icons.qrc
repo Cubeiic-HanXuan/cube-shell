@@ -76,5 +76,6 @@
     <file>icons-toml-48.png</file>
     <file>icons-rename-48.png</file>
     <file>docs-log.png</file>
+    <file>xml-48.png</file>
 </qresource>
 </RCC>
