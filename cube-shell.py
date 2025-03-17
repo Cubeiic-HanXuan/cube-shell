@@ -1612,19 +1612,27 @@ class MainDialog(QMainWindow):
                 util.logger.error(f"An error occurred: {e}")
                 self.alarm(self.tr('创建文件失败，请联系开发作者'))
 
+    # 保存内容到远程文件
+    def save_file(self, path, content):
+        try:
+            sftp = self.ssh().open_sftp()
+            with sftp.file(path, 'w') as f:
+                f.write(content.encode('utf-8'))
+            return True, ""
+        except Exception as e:
+            return False, str(e)
+
     # 获取返回信息，并保存文件
     def getNewText(self, new_list):
         ssh_conn = self.ssh()
         nt, sig = new_list[0], new_list[1]
-        # 将双引号转义为转义字符
-        escaped_string = nt.replace("\"", '\\"')
         if sig == 0:
-            self.getData2('echo -e "' + escaped_string + '" > ' + ssh_conn.pwd + '/' + self.file_name)
+            self.save_file(ssh_conn.pwd + '/' + self.file_name, nt)
             self.ui.addTextEditWin.new_text = self.ui.addTextEditWin.old_text
             self.ui.addTextEditWin.te.chk.close()
             self.ui.addTextEditWin.close()
         elif sig == 1:
-            self.getData2('echo -e "' + escaped_string + '" > ' + ssh_conn.pwd + '/' + self.file_name)
+            self.save_file(ssh_conn.pwd + '/' + self.file_name, nt)
             self.ui.addTextEditWin.old_text = nt
 
     # 删除设备配置文件
