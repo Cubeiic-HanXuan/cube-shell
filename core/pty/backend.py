@@ -1,7 +1,7 @@
 import uuid
 
-from core.screen import QTerminalScreen
-from core.stream import QTerminalStream
+from core.pty.screen import QTerminalScreen
+from core.pty.stream import QTerminalStream
 
 
 class BaseBackend(object):

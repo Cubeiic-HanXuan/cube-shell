@@ -45,19 +45,14 @@
     <file>logo.icns</file>
     <file>logo.ico</file>
     <file>minio.png</file>
-    <file>minio_256.png</file>
     <file>nacos-copy.png</file>
-    <file>nacos_256.png</file>
     <file>nginx.png</file>
-    <file>nginx_256.png</file>
     <file>off.png</file>
     <file>on-off.png</file>
     <file>open.png</file>
     <file>paste.png</file>
     <file>postgresql.png</file>
-    <file>postgresql_256.png</file>
     <file>Redis.png</file>
-    <file>redis_256.png</file>
     <file>refresh.png</file>
     <file>remote.png</file>
     <file>remove.png</file>
@@ -77,5 +72,17 @@
     <file>icons-rename-48.png</file>
     <file>docs-log.png</file>
     <file>xml-48.png</file>
+    <file>nginx_128.png</file>
+    <file>postgresql_128.png</file>
+    <file>nacos_128.png</file>
+    <file>elasticsearch_128.png</file>
+    <file>kafka_128.png</file>
+    <file>kibana_128.png</file>
+    <file>logstash_128.png</file>
+    <file>minio_128.png</file>
+    <file>rmqbroker_128.png</file>
+    <file>rmqnamesrv_128.png</file>
+    <file>zookeeper_128.png</file>
+    <file>redis_128.png</file>
 </qresource>
 </RCC>

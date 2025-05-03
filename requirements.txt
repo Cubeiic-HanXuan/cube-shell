@@ -7,3 +7,4 @@ deepdiff~=8.0.1
 pyqtdarktheme~=2.1.0
 toml~=0.10.2
 appdirs~=1.4.4
+PyYAML>=6.0

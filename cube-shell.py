@@ -10,7 +10,9 @@ import subprocess
 import sys
 import threading
 import time
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from socket import socket
 
 import PySide6
 import appdirs
@@ -19,28 +21,28 @@ import toml
 from PySide6.QtCore import QTimer, Signal, Qt, QPoint, QRect, QEvent, QObject, Slot, QUrl, QCoreApplication, \
     QTranslator, QSize, QTimerEvent, QThread, QMetaObject, Q_ARG
 from PySide6.QtGui import QIcon, QAction, QTextCursor, QCursor, QCloseEvent, QKeyEvent, QInputMethodEvent, QPixmap, \
-    QDragEnterEvent, QDropEvent, QFont, QContextMenuEvent, QDesktopServices, QGuiApplication
+    QDragEnterEvent, QDropEvent, QFont, QContextMenuEvent, QDesktopServices, QGuiApplication, QPalette, QColor
 from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QDialog, QMessageBox, QTreeWidgetItem, \
     QInputDialog, QFileDialog, QTreeWidget, QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QTableWidgetItem, \
-    QHeaderView, QStyle, QTabBar, QTextBrowser, QLineEdit, QListWidget, QStyledItemDelegate, QProgressBar
+    QHeaderView, QStyle, QTabBar, QTextBrowser, QLineEdit, QScrollArea, QGridLayout
 from deepdiff import DeepDiff
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import PythonLexer
 
-from core.forwarder import ForwarderManager
+from core.docker.docker_compose_editor import DockerComposeEditor
 from core.frequently_used_commands import TreeSearchApp
-from core.mux import mux
+from core.pty.forwarder import ForwarderManager
+from core.pty.mux import mux
 from core.vars import ICONS, CONF_FILE, CMDS, KEYS
-from function import util, about, theme, traversal
+from function import util, about, theme, traversal, parse_data
 from function.ssh_func import SshClient
 from function.util import format_file_size, has_valid_suffix
-from style.style import updateColor
+from style.style import updateColor, InstalledButtonStyle, InstallButtonStyle
 from ui import add_config, text_editor, confirm, main, docker_install, auth
 from ui.add_tunnel_config import Ui_AddTunnelConfig
 from ui.tunnel import Ui_Tunnel
 from ui.tunnel_config import Ui_TunnelConfig
-import icons.icons
 
 keymap = {
     Qt.Key_Backspace: chr(127).encode(),
@@ -84,6 +86,8 @@ def abspath(path):
 # 主界面逻辑
 class MainDialog(QMainWindow):
     initSftpSignal = Signal()
+    finished = Signal(str, str)  # 信号：成功结果 (命令, 输出)
+    error = Signal(str, str)  # 信号：错误 (命令, 错误信息)
 
     def __init__(self, qt_app):
         super().__init__()
@@ -132,13 +136,13 @@ class MainDialog(QMainWindow):
         self.file_name = ''
         self.fileEvent = ''
 
-        # self.ssh_username, self.ssh_password, self.ssh_ip, self.key_type, self.key_file = None, None, None, None, None
-
         self.ui.discButton.clicked.connect(self.disc_off)
         self.ui.theme.clicked.connect(self.toggleTheme)
         self.ui.treeWidget.customContextMenuRequested.connect(self.treeRight)
         self.ui.treeWidget.doubleClicked.connect(self.cd)
         self.ui.ShellTab.currentChanged.connect(self.shell_tab_current_changed)
+        # 连接信号
+        self.ui.tabWidget.currentChanged.connect(self.on_tab_changed)
         # 设置选择模式为多选模式
         self.ui.treeWidget.setSelectionMode(QTreeWidget.ExtendedSelection)
         # 添加事件过滤器
@@ -161,6 +165,8 @@ class MainDialog(QMainWindow):
         self.timer_id = self.startTimer(50)
         # 连接信号和槽
         self.initSftpSignal.connect(self.on_initSftpSignal)
+        #  操作docker 成功,发射信号
+        self.finished.connect(self.on_ssh_docker_finished)
 
         self.NAT = False
         self.NAT_lod()
@@ -193,7 +199,8 @@ class MainDialog(QMainWindow):
 
         try:
             current_dir = os.path.dirname(os.path.abspath(__file__))
-            ssh_conn = SshClient(host.split(':')[0], int(host.split(':')[1]), username, password, key_type, key_file)
+            ssh_conn = SshClient(host.split(':')[0], int(host.split(':')[1]), username, password, key_type, key_file,
+                                 )
             ssh_conn.connect()
             # 上传文件
             sftp = ssh_conn.open_sftp()
@@ -592,7 +599,7 @@ class MainDialog(QMainWindow):
 
     # 隧道刷新
     def tunnel_refresh(self):
-        #self.data = util.read_json(abspath(CONF_FILE))
+        # self.data = util.read_json(abspath(CONF_FILE))
         file_path = get_config_path('tunnel.json')
         # 读取 JSON 文件内容
         self.data = util.read_json(file_path)
@@ -668,11 +675,12 @@ class MainDialog(QMainWindow):
         setting_menu.addAction(theme_action)
         theme_action.triggered.connect(self.theme)
         #
-        # # 创建“重做”动作
-        # redo_action = QAction(QIcon(":redo.png"), "&Redo", self)
-        # redo_action.setShortcut("Ctrl+Y")
-        # redo_action.setStatusTip("Redo last undone action")
-        # setting_menu.addAction(redo_action)
+        # 创建“重做”动作
+        # docker_action = QAction(QIcon(":redo.png"), "&容器编排", self)
+        # docker_action.setShortcut("Shift+Ctrl+D")
+        # docker_action.setStatusTip(self.tr("容器编排"))
+        # setting_menu.addAction(docker_action)
+        # docker_action.triggered.connect(self.container_orchestration)
 
         # 创建“关于”动作
         about_action = QAction(QIcon(":about.png"), self.tr("&关于"), self)
@@ -866,8 +874,8 @@ class MainDialog(QMainWindow):
 
                 # 启动一个线程来异步执行 SSH 连接
                 threading.Thread(target=self.connect_ssh_thread, args=(ssh_conn,), daemon=True).start()
-                self.ssh_username, self.ssh_password, self.ssh_ip, self.key_type, self.key_file = username, password, \
-                    host, key_type, key_file
+                # self.ssh_username, self.ssh_password, self.ssh_ip, self.key_type, self.key_file = username, password, \
+                #     host, key_type, key_file
             except Exception as e:
                 util.logger.error(str(e))
                 self.Shell.setPlaceholderText(str(e))
@@ -929,50 +937,7 @@ class MainDialog(QMainWindow):
         self.ui.theme.setEnabled(True)
         threading.Thread(target=ssh_conn.get_datas, daemon=True).start()
         self.flushSysInfo()
-        self.refreshDokerInfo()
-        self.flushDokerInfo()
         self.refreshDirs()
-
-        # 检测服务器是否安装了docker，如果没有安装就不展示常用容器
-        data_ = ssh_conn.exec('docker --version')
-        if data_:
-            # 读取json文件
-            items = util.read_json_file(abspath('docker.json'))
-            # 每行最多四个小块
-            max_columns = 6
-            # 遍历列表，创建小块并添加到网格布局中
-            for index, item in enumerate(items):
-                row = index // max_columns
-                col = index % max_columns
-
-                # 创建外部容器
-                container_widget = QWidget()
-                container_layout = QVBoxLayout()
-                container_widget.setLayout(container_layout)
-                container_layout.setContentsMargins(0, 0, 0, 0)  # 去掉布局的内边距
-                container_widget.setStyleSheet("background-color: rgb(187, 232, 221);")
-
-                # 创建自定义小块并添加到外部容器
-                widget = CustomWidget(item, ssh_conn)
-                container_layout.addWidget(widget)
-
-                self.ui.gridLayout_7.addWidget(container_widget, row, col)
-        else:
-            # 创建外部容器
-            container_widget = QWidget()
-            container_layout = QVBoxLayout()
-            container_widget.setLayout(container_layout)
-            container_layout.setContentsMargins(0, 0, 0, 0)  # 去掉布局的内边距
-            container_widget.setStyleSheet("background-color: rgb(187, 232, 221);")
-
-            text_browser = QTextBrowser(container_widget)
-            text_browser.append("\n")
-            text_browser.append("\n")
-            text_browser.append("\n")
-            text_browser.append(self.tr("服务器还没有安装docker容器"))
-            # 设置内容居中对齐
-            text_browser.setAlignment(Qt.AlignCenter)
-            self.ui.gridLayout_7.addWidget(text_browser)
 
         # 进程管理
         self.processInitUI()
@@ -981,14 +946,39 @@ class MainDialog(QMainWindow):
         self.initSftp()
 
     # 后台获取信息，不打印至程序界面
+    @Slot(str, bool)
     def getData2(self, cmd='', pty=False):
         try:
             ssh_conn = self.ssh()
             ack = ssh_conn.exec(cmd=cmd, pty=pty)
+            # 发送成功信号
+            self.finished.emit(cmd, ack)
             return ack
+        except socket.timeout:
+            self.error.emit(cmd, "Error: Connection or execution timeout.")
         except Exception as e:
-            self.ui.result.append(e)
+            # self.ui.result.append(e)
             return 'error'
+
+    #  操作docker 成功
+    def on_ssh_docker_finished(self, cmd, output):
+        print("")
+        # self.refreshDokerInfo()
+        # self.refresh_docker_common_containers()
+
+    def on_tab_changed(self, index):
+        """标签切换事件处理"""
+        if index == 0:
+            # self.handle_tab1()
+            self.refreshDokerInfo()
+        elif index == 1:
+            self.refresh_docker_common_containers()
+        elif index == 2:
+            print("")
+
+    def start_async_task(self, cmd):
+        thread = threading.Thread(target=self.getData2, args=(cmd,))
+        thread.start()
 
     # 选择文件夹
     def cd(self):
@@ -1027,7 +1017,6 @@ class MainDialog(QMainWindow):
         ssh_conn = mux.backend_index[this]
 
         ssh_conn.timer1.stop()
-        ssh_conn.timer2.stop()
         ssh_conn.term_data = b''
         ssh_conn.close()
         self.isConnected = False
@@ -1054,8 +1043,8 @@ class MainDialog(QMainWindow):
         self.ui.diskRate.setValue(0)
         self.ui.memRate.setValue(0)
 
-        ssh_conn.close()
         self.refreshConf()
+        mux.remove_and_close(ssh_conn)
 
     # 断开服务器并删除tab
     def off(self, index, name):
@@ -1330,8 +1319,11 @@ class MainDialog(QMainWindow):
             self.ui.tree_menu.popup(QCursor.pos())
 
     # 创建docker列表树右键菜单函数
-    def treeDocker(self):
+    def treeDocker(self, position):
         if self.isConnected:
+            # 获取点击位置的项
+            item = self.ui.treeWidgetDocker.itemAt(position)
+
             self.ui.tree_menu = QMenu(self)
             self.ui.tree_menu.setStyleSheet("""
                 QMenu::item {
@@ -1354,10 +1346,26 @@ class MainDialog(QMainWindow):
             self.ui.tree_menu.addAction(self.ui.action3)
             # self.ui.tree_menu.addAction(self.ui.action4)
 
-            self.ui.action1.triggered.connect(self.stopDockerContainer)
-            self.ui.action2.triggered.connect(self.restartDockerContainer)
-            self.ui.action3.triggered.connect(self.rmDockerContainer)
+            # 鼠标右键获取 treeWidgetDocker 上的容器Id
+            # 判断是父级还是子级
+            if item.parent() is None:  # 父级
+                # 获取父级下的所有容器ID
+                container_ids = []
+                for i in range(item.childCount()):
+                    child = item.child(i)
+                    container_id = child.text(1)  # 容器ID在第二列
+                    if container_id:
+                        container_ids.append(container_id)
+
+                self.ui.action1.triggered.connect(lambda: self.stopDockerContainer(container_ids))
+                self.ui.action2.triggered.connect(lambda: self.restartDockerContainer(container_ids))
+                self.ui.action3.triggered.connect(lambda: self.rmDockerContainer(container_ids))
             # self.ui.action4.triggered.connect(self.rmDockerContainer)
+            else:  # 子级
+                container_id = item.text(1)  # 容器ID在第二列
+                self.ui.action1.triggered.connect(lambda: self.stopDockerContainer([container_id]))
+                self.ui.action2.triggered.connect(lambda: self.restartDockerContainer([container_id]))
+                self.ui.action3.triggered.connect(lambda: self.rmDockerContainer([container_id]))
 
             # 声明当鼠标在groupBox控件上右击时，在鼠标位置显示右键菜单,exec_,popup两个都可以，
             self.ui.tree_menu.popup(QCursor.pos())
@@ -1584,8 +1592,11 @@ class MainDialog(QMainWindow):
                     sftp.mkdir(pwd_text)
                     self.refreshDirs()
                 except Exception as create_error:
-                    util.logger.error(f"An error occurred: {create_error}")
-                    self.alarm(self.tr('创建文件夹失败，请联系开发作者'))
+                    if "Permission denied" in str(create_error):
+                        self.alarm(self.tr('当前文件夹权限不足，请设置权限之后再操作'))
+                    else:
+                        util.logger.error(f"An error occurred: {create_error}")
+                        self.alarm(self.tr('创建文件夹失败，请联系开发作者'))
             else:
                 self.alarm(self.tr('文件夹已存在'))
 
@@ -1609,8 +1620,11 @@ class MainDialog(QMainWindow):
                     pass  # 不写入任何内容
                 self.refreshDirs()
             except IOError as e:
-                util.logger.error(f"An error occurred: {e}")
-                self.alarm(self.tr('创建文件失败，请联系开发作者'))
+                if "Permission denied" in str(e):
+                    self.alarm(self.tr('当前文件夹权限不足，请设置权限之后再操作'))
+                else:
+                    util.logger.error(f"An error occurred: {e}")
+                    self.alarm(self.tr('创建文件失败，请联系开发作者'))
 
     # 保存内容到远程文件
     def save_file(self, path, content):
@@ -1666,15 +1680,6 @@ class MainDialog(QMainWindow):
                         c.write(pickle.dumps(conf))
                 self.refreshConf()
 
-    # 定时刷新设备状态信息
-    # def flushSysInfo(self):
-    #     ssh_conn = self.ssh()
-    #
-    #     timer1 = QTimer()
-    #     timer1.start(1000)
-    #     ssh_conn.timer1 = timer1
-    #     ssh_conn.timer1.timeout.connect(self.refreshSysInfo)
-
     # 建议修改为
     def flushSysInfo(self):
         try:
@@ -1690,7 +1695,6 @@ class MainDialog(QMainWindow):
     def refreshAllInfo(self):
         # 批量更新所有信息
         self.refreshSysInfo()
-        self.refreshDokerInfo()
 
     # 刷新设备状态信息功能
     def refreshSysInfo(self):
@@ -1731,49 +1735,202 @@ class MainDialog(QMainWindow):
             self.ui.memRate.setValue(0)
             self.ui.diskRate.setValue(0)
 
-    def flushDokerInfo(self):
+    # 获取容器列表
+    def compose_container_list(self):
         ssh_conn = self.ssh()
+        groups = defaultdict(list)
+        # 获取 compose 项目和配置文件列表
+        ls = ssh_conn.exec("docker compose ls -a")
+        lines = ls.strip().splitlines()
 
-        timer2 = QTimer()
-        timer2.start(5000)
-        ssh_conn.timer2 = timer2
-        ssh_conn.timer2.timeout.connect(self.refreshDokerInfo)
+        # 获取compose 项目下的所有容器
+        for compose_ls in lines[1:]:
+            # 从右边开始分割，比如 rsplit，只分割最后一次空格
+            # 这样最后一列可以拿出来
+            parts = compose_ls.rsplit(None, 1)  # 从右边切一次空白字符
+            config = parts[-1]
+            ps_cmd = f"docker compose --file {config} ps -a --format '{{{{json .}}}}'"
+            # 执行docker compose ps
+            conn_exec = ssh_conn.exec(ps_cmd)
+            container_list = []
+            for ps in conn_exec.strip().splitlines():
+                if ps.strip():
+                    data = json.loads(ps)
+                    container_list.append(data)
+
+            for item in container_list:
+                # 使用项目进行分组
+                project_name = item.get('Project', '未知')  # 取值，如果没有则使用'未知'
+                groups[project_name].append(item)
+
+        return groups
+
+    # 获取docker容器列表
+    # compose 获取不到数据的时候使用此方法获取容器数据
+    def docker_container_list(self):
+        ssh_conn = self.ssh()
+        conn_exec = ssh_conn.exec("docker ps -a --format '{{json .}}'")
+        container_list = []
+        for ps in conn_exec.strip().splitlines():
+            if ps.strip():
+                data = json.loads(ps)
+                container_list.append(data)
+
+        return container_list
 
     def refreshDokerInfo(self):
         if self.isConnected:
             current_index = self.ui.ShellTab.currentIndex()
             this = self.ui.ShellTab.tabWhatsThis(current_index)
             if this:
-                ssh_conn = mux.backend_index[this]
-
-                info = ssh_conn.docker_info
                 self.ui.treeWidgetDocker.clear()
                 self.ui.treeWidgetDocker.headerItem().setText(0, self.tr("docker容器管理") + '：')
-                if len(info) != 0:
-                    i = 0
-                    for n in info:
-                        self.ui.treeWidgetDocker.addTopLevelItem(QTreeWidgetItem(0))
-                        self.ui.treeWidgetDocker.topLevelItem(i).setText(0, n)
-                        if i != 0:
-                            self.ui.treeWidgetDocker.topLevelItem(i).setIcon(0, QIcon(":icons8-docker-48.png"))
-                        # 设置字体为加粗
-                        if i == 0:
-                            bold_font = QFont()
-                            bold_font.setBold(True)  # 设置字体为加粗
-                            self.ui.treeWidgetDocker.topLevelItem(i).setFont(0, bold_font)
+                self.ui.treeWidgetDocker.setHeaderLabels(
+                    [self.tr("#"), self.tr("容器ID"), self.tr("容器"), self.tr("镜像"), self.tr("状态"),
+                     self.tr("启动命令"), self.tr("创建时间"), self.tr("端口")
+                     ])
 
-                        i += 1
+                # 设置表头居中
+                header = self.ui.treeWidgetDocker.header()
+                header.setDefaultAlignment(Qt.AlignCenter)
+                # 允许表头拖动
+                header.setSectionsMovable(True)
+                # 允许调整列宽
+                header.setSectionResizeMode(QHeaderView.Interactive)
 
-                    # 设置列宽为自适应内容
-                    for i in range(self.ui.treeWidgetDocker.columnCount()):
-                        self.ui.treeWidgetDocker.resizeColumnToContents(i)
+                groups = self.compose_container_list()
+                if len(groups) != 0:
+                    # 有项目的情况
+                    for project, containers in groups.items():
+                        # 创建项目顶层节点
+                        project_item = QTreeWidgetItem()
+                        project_item.setText(0, project)
+                        bold_font = QFont()
+                        bold_font.setBold(True)
+                        project_item.setFont(0, bold_font)
+                        # 设置项目名称居中
+                        for i in range(self.ui.treeWidgetDocker.columnCount()):
+                            project_item.setTextAlignment(i, Qt.AlignCenter)
+                        self.ui.treeWidgetDocker.addTopLevelItem(project_item)
+
+                        if containers:  # 有容器，添加子节点
+                            for c in containers:
+                                container_item = QTreeWidgetItem()
+                                container_item.setText(1, c.get('ID', ""))
+                                container_item.setText(2, c.get('Name', ""))
+                                container_item.setText(3, c.get('Image', ""))
+                                container_item.setText(4, c.get('State', ""))
+                                container_item.setText(5, c.get('Command', ""))
+                                container_item.setText(6, c.get('CreatedAt', ""))
+                                container_item.setText(7, c.get('Ports', ""))
+                                container_item.setIcon(0, QIcon(":icons8-docker-48.png"))
+                                # 设置容器信息居中
+                                # container_item.setTextAlignment(4, Qt.AlignCenter)
+                                # 设置项目名称居中
+                                for i in range(self.ui.treeWidgetDocker.columnCount()):
+                                    container_item.setTextAlignment(i, Qt.AlignCenter)
+                                project_item.addChild(container_item)
+                elif len(groups) == 0:
+                    container_list = self.docker_container_list()
+                    # 只有容器的情况
+                    for c in container_list:
+                        container_item = QTreeWidgetItem()
+                        container_item.setText(1, c.get('ID', ""))
+                        container_item.setText(2, c.get('Names', ""))
+                        container_item.setText(3, c.get('Image', ""))
+                        container_item.setText(4, c.get('State', ""))
+                        container_item.setText(5, c.get('Command', ""))
+                        container_item.setText(6, c.get('CreatedAt', ""))
+                        container_item.setText(7, c.get('Ports', ""))
+                        container_item.setIcon(0, QIcon(":icons8-docker-48.png"))
+                        # 设置容器信息居中
+                        for i in range(self.ui.treeWidgetDocker.columnCount()):
+                            container_item.setTextAlignment(i, Qt.AlignCenter)
+                        self.ui.treeWidgetDocker.addTopLevelItem(container_item)
                 else:
                     self.ui.treeWidgetDocker.addTopLevelItem(QTreeWidgetItem(0))
                     self.ui.treeWidgetDocker.topLevelItem(0).setText(0, self.tr('服务器还没有安装docker容器'))
+
+                # 展开所有节点
+                self.ui.treeWidgetDocker.expandAll()
+
         else:
             self.ui.treeWidgetDocker.clear()
             self.ui.treeWidgetDocker.addTopLevelItem(QTreeWidgetItem(0))
             self.ui.treeWidgetDocker.topLevelItem(0).setText(0, self.tr('没有可用的docker容器'))
+
+    # 刷新docker常用容器信息
+    def refresh_docker_common_containers(self):
+        if self.isConnected:
+            ssh_conn = self.ssh()
+            util.clear_grid_layout(self.ui.gridLayout_7)
+            # 检测服务器是否安装了docker，如果没有安装就不展示常用容器
+            data_ = ssh_conn.exec('docker --version')
+            if data_:
+                services = util.get_compose_service(abspath('docker-compose-full.yml'))
+                # 每行最多四个小块
+                max_columns = 8
+
+                # 创建滚动区域
+                scroll_area = QScrollArea()
+                scroll_area.setWidgetResizable(True)  # 允许内容自适应大小
+                scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)  # 始终显示垂直滚动条
+
+                # 创建滚动内容容器
+                scroll_content = QWidget()
+                scroll_area.setWidget(scroll_content)
+
+                # 使用网格布局管理滚动内容
+                grid_layout = QGridLayout(scroll_content)
+                grid_layout.setContentsMargins(0, 0, 0, 0)  # 设置布局边距
+                grid_layout.setHorizontalSpacing(2)  # 设置水平间距
+                grid_layout.setVerticalSpacing(2)  # 设置垂直间距
+
+                # 将滚动区域添加到原布局位置（替换原来的gridLayout_7）
+                self.ui.gridLayout_7.addWidget(scroll_area)
+
+                conn_exec = ssh_conn.exec("docker ps -a --format '{{json .}}'")
+                container_list = []
+                for ps in conn_exec.strip().splitlines():
+                    if ps.strip():
+                        data = json.loads(ps)
+                        container_list.append(data)
+
+                services_config = util.update_has_attribute(services, container_list)
+
+                # 遍历列表创建小块
+                for index, (key, item) in enumerate(services_config.items()):
+                    row = index // max_columns
+                    col = index % max_columns
+
+                    # 创建外层容器
+                    container_widget = QWidget()
+                    container_widget.setFixedSize(95, 143)  # 固定每个小块的尺寸
+                    container_layout = QVBoxLayout(container_widget)
+                    container_layout.setContentsMargins(0, 0, 0, 0)  # 移除内边距
+
+                    # 创建自定义组件
+                    widget = CustomWidget(key, item, ssh_conn)
+                    container_layout.addWidget(widget)
+
+                    # 添加到网格布局
+                    grid_layout.addWidget(container_widget, row, col)
+            else:
+                # 创建外部容器
+                container_widget = QWidget()
+                container_layout = QVBoxLayout()
+                container_widget.setLayout(container_layout)
+                container_layout.setContentsMargins(0, 0, 0, 0)  # 去掉布局的内边距
+                container_widget.setStyleSheet("background-color: rgb(187, 232, 221);")
+
+                text_browser = QTextBrowser(container_widget)
+                text_browser.append("\n")
+                text_browser.append("\n")
+                text_browser.append("\n")
+                text_browser.append(self.tr("服务器还没有安装docker容器"))
+                # 设置内容居中对齐
+                text_browser.setAlignment(Qt.AlignCenter)
+                self.ui.gridLayout_7.addWidget(text_browser)
 
     # 下载文件
     def downloadFile(self):
@@ -1961,40 +2118,22 @@ class MainDialog(QMainWindow):
         self.refreshDirs()
 
     # 停止docker容器
-    def stopDockerContainer(self):
-        focus = self.ui.treeWidgetDocker.currentIndex().row()
-        if focus != -1:
-            text = self.ui.treeWidgetDocker.topLevelItem(focus).text(0)
-            # 取出前12位字符串
-            container_id = text[:12]
-            data_ = self.getData2('docker stop ' + container_id)
-            util.logger.info('stop----', data_)
-            time.sleep(1)  # 延迟一秒
-            self.refreshDokerInfo()
+    def stopDockerContainer(self, container_ids):
+        if container_ids:
+            for container_id in container_ids:
+                self.start_async_task('docker stop ' + container_id)
 
     # 重启docker容器
-    def restartDockerContainer(self):
-        focus = self.ui.treeWidgetDocker.currentIndex().row()
-        if focus != -1:
-            text = self.ui.treeWidgetDocker.topLevelItem(focus).text(0)
-            # 取出前12位字符串
-            container_id = text[:12]
-            data_ = self.getData2('docker restart ' + container_id)
-            util.logger.info('restart----', data_)
-            time.sleep(1)  # 延迟一秒
-            self.refreshDokerInfo()
+    def restartDockerContainer(self, container_ids):
+        if container_ids:
+            for container_id in container_ids:
+                self.start_async_task('docker restart ' + container_id)
 
     # 删除docker容器
-    def rmDockerContainer(self):
-        focus = self.ui.treeWidgetDocker.currentIndex().row()
-        if focus != -1:
-            text = self.ui.treeWidgetDocker.topLevelItem(focus).text(0)
-            # 取出前12位字符串
-            container_id = text[:12]
-            data_ = self.getData2('docker rm ' + container_id)
-            util.logger.info('rm----', data_)
-            time.sleep(1)  # 延迟一秒
-            self.refreshDokerInfo()
+    def rmDockerContainer(self, container_ids):
+        if container_ids:
+            for container_id in container_ids:
+                self.start_async_task('docker rm ' + container_id)
 
     # 删除文件夹
     def removeDir(self):
@@ -2033,7 +2172,7 @@ class MainDialog(QMainWindow):
                         self.upload_thread.start()
                         self.upload_thread.progress.connect(self.upload_update_progress)
                         # sftp.put(file_path, ssh_conn.pwd + '/' + os.path.basename(file_path))
-                        #sftp.put(file_path, os.path.join(ssh_conn.pwd, os.path.basename(file_path)))
+                        # sftp.put(file_path, os.path.join(ssh_conn.pwd, os.path.basename(file_path)))
                     except (IOError, OSError) as e:
                         util.logger.error(f"Failed to upload file: {e}")
                         QMessageBox.critical(self, self.tr("上传失败"), self.tr(f"文件上传失败: {e}"))
@@ -2328,7 +2467,7 @@ class UploadThread(QThread):
 
 
 class CustomWidget(QWidget):
-    def __init__(self, item, ssh_conn, parent=None):
+    def __init__(self, key, item, ssh_conn, parent=None):
         super().__init__(parent)
 
         self.docker = None
@@ -2337,8 +2476,9 @@ class CustomWidget(QWidget):
 
         # 创建图标标签
         icon_label = QLabel(self)
-        icon = QIcon(item['icon'])  # 替换为你的图标路径
-        pixmap = icon.pixmap(100, 100)  # 获取图标的 QPixmap
+        icon = f":{key}_128.png"
+        icon = QIcon(icon)  # 替换为你的图标路径
+        pixmap = icon.pixmap(60, 60)  # 获取图标的 QPixmap
         icon_label.setPixmap(pixmap)
         icon_label.setAlignment(Qt.AlignCenter)
         self.layout.addWidget(icon_label)
@@ -2346,19 +2486,19 @@ class CustomWidget(QWidget):
         # 创建按钮布局
         self.button_layout = QHBoxLayout()
 
-        cmd = "docker ps -a | grep " + item['containerName']
-        ack = ssh_conn.exec(cmd=cmd, pty=False)
-        if not ack:
+        if not item['has']:
             # 安装按钮
             self.install_button = QPushButton(self.tr("安装"), self)
             self.install_button.setCursor(QCursor(Qt.PointingHandCursor))
-            self.install_button.clicked.connect(lambda: self.installAction(item, ssh_conn))
+            # self.install_button.clicked.connect(lambda: self.show_install_docker_window(item, ssh_conn))
+            self.install_button.clicked.connect(lambda: self.container_orchestration(ssh_conn))
+            self.install_button.setStyleSheet(InstallButtonStyle)
             self.button_layout.addWidget(self.install_button)
         else:
             # 安装按钮
             self.install_button = QPushButton(self.tr("已安装"), self)
             self.install_button.setCursor(QCursor(Qt.PointingHandCursor))
-            self.install_button.setStyleSheet("background-color: rgb(102, 221, 121);")
+            self.install_button.setStyleSheet(InstalledButtonStyle)
             self.install_button.setDisabled(True)
             self.button_layout.addWidget(self.install_button)
 
@@ -2374,16 +2514,16 @@ class CustomWidget(QWidget):
             QPushButton {
                 background-color: rgb(50,115,245);
                 border-radius: 5px;
-                padding: 10px;
+                padding: 5px;
             }
             QPushButton:pressed {
                 background-color: darkgray;
             }
         """)
 
-    def installAction(self, item, ssh_conn):
+    def show_install_docker_window(self, item, ssh_conn):
         """
-        点击安装按钮，安装docker容器
+        点击安装按钮，展示安装docker窗口
         :param item: 数据对象
         :param ssh_conn: ssh 连接对象
         :return:
@@ -2418,6 +2558,10 @@ class CustomWidget(QWidget):
 
         self.docker.communicate.refresh_parent.connect(lambda: self.refresh(item, ssh_conn))
         self.docker.show()
+
+    def container_orchestration(self, ssh_conn):
+        compose = DockerComposeEditor(ssh=ssh_conn)
+        compose.show()
 
     def refresh(self, item, ssh_conn):
         # 安装按钮
@@ -2807,17 +2951,6 @@ class Tunnel(QWidget):
             parent.tunnel_refresh()
         else:
             pass
-
-
-class CommandDelegate(QStyledItemDelegate):
-    def paint(self, painter, option, index):
-        if option.state & QStyle.State_Selected:
-            painter.fillRect(option.rect, option.palette.highlight())
-            painter.setPen(option.palette.highlightedText().color())
-        else:
-            painter.setPen(option.palette.text().color())
-
-        painter.drawText(option.rect, Qt.AlignLeft | Qt.AlignVCenter, index.data())
 
 
 def open_data(ssh):

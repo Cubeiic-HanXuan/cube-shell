@@ -46,6 +46,42 @@ WarningButtonStyle = createButtonStyle(def_bg_color="#e6a23c", h_bg_color="#ebb5
 DangerButtonStyle = createButtonStyle(def_bg_color="#f56c6c", h_bg_color="#f78989",
                                       c_bg_color="#f78989", p_bg_color="#dd6161")
 
+InstallButtonStyle = """
+    QPushButton {
+                    color: white;         /* 设置字体颜色 */
+                    background-color: #007BFF; /* 可选：设置背景色提高对比度 */
+                    border-radius: 5px;   /* 可选：圆角效果 */
+                    padding: 8px 16px;    /* 可选：内边距 */
+                }
+                
+                /* 设置不同状态下的颜色 */
+                QPushButton:hover {
+                    background-color: #0056b3;
+                }
+                
+                QPushButton:pressed {
+                    background-color: #003d80;
+                }
+"""
+
+InstalledButtonStyle = """
+    QPushButton {
+                    color: white;         /* 设置字体颜色 */
+                    background-color: #00f260; /* 可选：设置背景色提高对比度 */
+                    border-radius: 5px;   /* 可选：圆角效果 */
+                    padding: 8px 16px;    /* 可选：内边距 */
+                }
+                
+                /* 设置不同状态下的颜色 */
+                QPushButton:hover {
+                    background-color: #0056b3;
+                }
+                
+                QPushButton:pressed {
+                    background-color: #003d80;
+                }
+"""
+
 
 def createDisabledButtonStyle(style_color='#a0cfff', color='#fff', radius='10px'):
     QP = 'QPushButton{'

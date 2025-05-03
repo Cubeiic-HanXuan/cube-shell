@@ -4,8 +4,9 @@ import shutil
 import socket
 import logging
 
+import yaml
 from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QFileIconProvider
+from PySide6.QtWidgets import QFileIconProvider, QMessageBox
 
 # 小于展示字节，大于或等于展示KB
 MAX_BYTES_SIZE = 1024
@@ -176,6 +177,67 @@ def read_json_file(file_path):
         print(f"An unexpected error occurred: {e}")
 
     return None
+
+
+def load_yml_config(file_path):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return yaml.safe_load(f) or {
+                'version': '3.8',
+                'services': {},
+                'volumes': {},
+                'networks': {}
+            }
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+
+
+def get_compose_service(file_path):
+    """
+    从YAML文件中获取服务名称列表
+    :param file_path: YAML文件路径
+    :return: 服务名称列表
+    """
+    try:
+        with open(file_path, 'r') as f:
+            compose_data = yaml.safe_load(f) or {
+                'version': '3.8',
+                'services': {},
+                'volumes': {},
+                'networks': {}
+            }
+
+        # 获取 services 字典的所有键（服务名称）
+        return compose_data.get('services', {})
+
+    except FileNotFoundError:
+        print(f"错误：文件 {file_path} 不存在")
+        return []
+    except yaml.YAMLError as e:
+        print(f"YAML 解析错误: {str(e)}")
+        return []
+    except Exception as e:
+        print(f"未知错误: {str(e)}")
+        return []
+
+
+def update_has_attribute(services_dict, containers):
+    """
+    根据容器 Names 字段是否包含服务键名，动态添加 has 属性
+
+    :param services_dict: 服务配置字典（格式如问题描述）
+    :param containers: 容器数据列表（必须包含 Names 字段）
+    :return: 修改后的服务配置字典
+    """
+    # 提取所有容器的 Names 字段（过滤无效数据）
+    names_list = [str(c.get('Names', '')).strip() for c in containers if c.get('Names')]
+
+    # 遍历服务配置字典
+    for service_key, config in services_dict.items():
+        # 检查是否存在包含键名的 Names
+        config['has'] = any(service_key in name for name in names_list)
+
+    return services_dict
 
 
 # 函数：清空QGridLayout中的所有widget
