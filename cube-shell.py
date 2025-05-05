@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from socket import socket
@@ -24,7 +25,7 @@ from PySide6.QtGui import QIcon, QAction, QTextCursor, QCursor, QCloseEvent, QKe
     QDragEnterEvent, QDropEvent, QFont, QContextMenuEvent, QDesktopServices, QGuiApplication, QPalette, QColor
 from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QDialog, QMessageBox, QTreeWidgetItem, \
     QInputDialog, QFileDialog, QTreeWidget, QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QTableWidgetItem, \
-    QHeaderView, QStyle, QTabBar, QTextBrowser, QLineEdit, QScrollArea, QGridLayout
+    QHeaderView, QStyle, QTabBar, QTextBrowser, QLineEdit, QScrollArea, QGridLayout, QProgressBar
 from deepdiff import DeepDiff
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
@@ -34,6 +35,8 @@ from core.docker.docker_compose_editor import DockerComposeEditor
 from core.frequently_used_commands import TreeSearchApp
 from core.pty.forwarder import ForwarderManager
 from core.pty.mux import mux
+from core.uploader.progress_adapter import ProgressAdapter
+from core.uploader.sftp_uploader_core import SFTPUploaderCore
 from core.vars import ICONS, CONF_FILE, CMDS, KEYS
 from function import util, about, theme, traversal, parse_data
 from function.ssh_func import SshClient
@@ -1951,9 +1954,9 @@ class MainDialog(QMainWindow):
 
                     # 获取远程文件大小
                     remote_file_size = sftp.stat(ssh_conn.pwd + '/' + item_text).st_size
-                    self.ui.download_with_resume.setVisible(True)
+                    self.ui.download_with_resume1.setVisible(True)
                     # 转换为 KB
-                    self.ui.download_with_resume.setMaximum(remote_file_size // 1024)
+                    self.ui.download_with_resume1.setMaximum(remote_file_size // 1024)
 
                     # 设置 SSH 会话保持活跃
                     # 每30秒发送一次保持活跃的消息
@@ -1963,8 +1966,7 @@ class MainDialog(QMainWindow):
                     util.download_with_resume(sftp, ssh_conn.pwd + '/' + item_text, f'{directory}/{item_text}',
                                               self.download_update_progress_bar)
 
-                    self.ui.download_with_resume.setVisible(False)
-                    # sftp.get(ssh_conn.pwd + '/' + item_text, f'{directory}/{item_text}')
+                    self.ui.download_with_resume1.setVisible(False)
 
             self.success(self.tr("下载文件"))
         except Exception as e:
@@ -1973,29 +1975,133 @@ class MainDialog(QMainWindow):
 
     # 下载更新进度条
     def download_update_progress_bar(self, current, total):
-        self.ui.download_with_resume.setValue(current // 1024)
+        self.ui.download_with_resume1.setValue(current // 1024)
         QApplication.processEvents()  # 更新 GUI 事件循环
 
     # 上传文件
     def uploadFile(self):
+        ssh_conn = self.ssh()
+        # 保存进度条字典，用于在上传完成后隐藏
+        self.progress_bars = {}  # file_id -> progress_bar
+
+        # 跟踪正在上传的文件数量和状态
+        self.active_uploads = set()  # 跟踪正在上传的文件ID
+        self.completed_uploads = set()  # 跟踪已完成的文件ID
+        self.failed_uploads = set()  # 跟踪失败的文件ID
+
         # 打开文件对话框让用户选择文件
         files, _ = QFileDialog.getOpenFileNames(self, self.tr("选择文件"), "", self.tr("所有文件 (*)"))
         if files:
-            for file_path in files:
-                if os.path.isfile(file_path):
-                    ssh_conn = self.ssh()
-                    sftp = ssh_conn.open_sftp()
-                    try:
-                        self.ui.download_with_resume.setVisible(True)
-                        # 转换为 KB
-                        self.upload_thread = UploadThread(sftp, file_path,
-                                                          ssh_conn.pwd + '/' + os.path.basename(file_path))
-                        self.upload_thread.start()
-                        self.upload_thread.progress.connect(self.upload_update_progress)
-                        # sftp.put(file_path, ssh_conn.pwd + '/' + os.path.basename(file_path))
-                    except IOError as e:
-                        util.logger.error(f"Failed to upload file: {e}")
+            # 创建上传器核心
+            self.uploader = SFTPUploaderCore(ssh_conn.open_sftp())
+
+            # 创建进度适配器
+            self.progress_adapter = ProgressAdapter()
+            self.progress_adapter.connect_signals(self.uploader)
+
+            # 监听完成和失败信号，用于关闭进度条
+            self.uploader.upload_completed.connect(self.on_upload_completed)
+            self.uploader.upload_failed.connect(self.on_upload_failed)
+
+            # 上传每个文件
+            for local_path in files:
+                file_id = str(uuid.uuid4())
+                filename = os.path.basename(local_path)
+                remote_path = f"{ssh_conn.pwd}/{filename}"  # 根据实际需要修改远程路径
+
+                # 添加到正在上传的集合
+                self.active_uploads.add(file_id)
+
+                # 创建进度条控件
+                progress_group = QWidget()
+                progress_layout = QHBoxLayout(progress_group)
+
+                # 文件信息标签
+                label = QLabel(f"{filename}")
+                progress_layout.addWidget(label, 1)
+
+                # 进度条
+                progress_bar = QProgressBar()
+                progress_bar.setRange(0, 100)
+                progress_bar.setValue(0)
+                progress_layout.addWidget(progress_bar, 2)
+
+                # 添加到主布局
+                self.ui.download_with_resume.addWidget(progress_group)
+
+                # 保存到字典中
+                self.progress_bars[file_id] = progress_bar
+
+                # 注册进度条到适配器
+                self.progress_adapter.register_pyside_progress_bar(file_id, progress_bar, label)
+
+                # 开始上传
+                self.uploader.upload_file(file_id, local_path, remote_path)
             self.refreshDirs()
+
+    def on_upload_completed(self, file_id, filename):
+        """上传完成时隐藏进度条"""
+        if file_id in self.progress_bars:
+            # 获取进度条对象
+            progress_bar = self.progress_bars[file_id]
+
+            # 设置完成状态
+            progress_bar.setValue(100)
+            progress_bar.setFormat("完成")
+
+            # 更新文件状态
+            if file_id in self.active_uploads:
+                self.active_uploads.remove(file_id)
+                self.completed_uploads.add(file_id)
+
+            # 检查是否所有文件都完成了
+            self.check_all_uploads_completed()
+            self.refreshDirs()
+
+    def on_upload_failed(self, file_id, filename, error):
+        """上传失败时标记进度条为失败状态"""
+        if file_id in self.progress_bars:
+            # 获取进度条对象
+            progress_bar = self.progress_bars[file_id]
+
+            # 设置失败状态
+            progress_bar.setFormat("失败")
+            progress_bar.setStyleSheet("""
+                QProgressBar {
+                    border: 1px solid #bdc3c7;
+                    border-radius: 3px;
+                    background-color: #ecf0f1;
+                    text-align: center;
+                }
+                
+                QProgressBar::chunk {
+                    background-color: #e74c3c; /* 红色 */
+                    border-radius: 2px;
+                }
+            """)
+
+            # 更新文件状态
+            if file_id in self.active_uploads:
+                self.active_uploads.remove(file_id)
+                self.failed_uploads.add(file_id)
+
+            # 检查是否所有文件都完成了
+            self.check_all_uploads_completed()
+
+    def check_all_uploads_completed(self):
+        """检查是否所有上传都已完成，如果是则清理界面"""
+        if not self.active_uploads and (self.completed_uploads or self.failed_uploads):
+            # 所有上传都已完成或失败，延迟一段时间后清理界面
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(1500, self.clear_all_progress)  # 1.5秒后清理
+
+    def clear_all_progress(self):
+        """清除所有进度条和相关组件"""
+        util.clear_grid_layout(self.ui.download_with_resume)
+        # 重置状态
+        self.active_uploads.clear()
+        self.completed_uploads.clear()
+        self.failed_uploads.clear()
 
     # 上传更新进度条
     def upload_update_progress(self, value):
@@ -2122,18 +2228,21 @@ class MainDialog(QMainWindow):
         if container_ids:
             for container_id in container_ids:
                 self.start_async_task('docker stop ' + container_id)
+            self.refreshDokerInfo()
 
     # 重启docker容器
     def restartDockerContainer(self, container_ids):
         if container_ids:
             for container_id in container_ids:
                 self.start_async_task('docker restart ' + container_id)
+            self.refreshDokerInfo()
 
     # 删除docker容器
     def rmDockerContainer(self, container_ids):
         if container_ids:
             for container_id in container_ids:
                 self.start_async_task('docker rm ' + container_id)
+            self.refreshDokerInfo()
 
     # 删除文件夹
     def removeDir(self):
@@ -2181,8 +2290,8 @@ class MainDialog(QMainWindow):
     # 信息提示窗口
     def alarm(self, alart):
         """
-        创建一个错误消息框，并设置自定义图标
-        """
+            创建一个错误消息框，并设置自定义图标
+            """
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle(self.tr('操作失败'))
         msg_box.setText(f'{alart}')
@@ -2507,27 +2616,37 @@ class CustomWidget(QWidget):
 
         # 设置样式表为小块添加边框
         self.setStyleSheet("""
-            QWidget {
-                border-radius: 5px;
-                padding: 5px;
+            QWidget
+            {
+                border - radius: 5px;
+            padding: 5
+            px;
             }
-            QPushButton {
-                background-color: rgb(50,115,245);
-                border-radius: 5px;
-                padding: 5px;
+            QPushButton
+            {
+                background - color: rgb(50, 115, 245);
+            border - radius: 5
+            px;
+            padding: 5
+            px;
             }
-            QPushButton:pressed {
-                background-color: darkgray;
+            QPushButton: pressed
+            {
+                background - color: darkgray;
             }
-        """)
+            """)
 
     def show_install_docker_window(self, item, ssh_conn):
         """
         点击安装按钮，展示安装docker窗口
-        :param item: 数据对象
-        :param ssh_conn: ssh 连接对象
-        :return:
-        """
+        : param
+        item: 数据对象
+        :param
+        ssh_conn: ssh
+        连接对象
+        :
+    return:
+    """
 
         self.docker = InstallDocker(item, ssh_conn)
         self.docker.dial.lineEdit_containerName.setText(item['containerName'])
@@ -2657,6 +2776,7 @@ class InstallDocker(QDialog):
 
 class TunnelConfig(QDialog):
     """
+
     初始化配置对话框并设置UI元素值；
     监听UI变化以更新SSH命令；
     提供复制SSH命令和
@@ -2975,8 +3095,9 @@ def init_config():
 
 def get_config_directory(app_name):
     """
-     获取用户配置目录并创建它（如果不存在）
-    :param app_name: 应用名字
+    获取用户配置目录并创建它（如果不存在）
+    :param
+    app_name: 应用名字
     :return:
     """
     # 使用 appdirs 获取跨平台的配置目录
@@ -2991,7 +3112,8 @@ def get_config_directory(app_name):
 def migrate_existing_configs(app_name):
     """
     迁移现有配置文件（初次运行）
-    :param app_name: 应用名字
+    :param
+    app_name: 应用名字
     :return:
     """
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -3012,7 +3134,8 @@ def migrate_existing_configs(app_name):
 def get_config_path(file_name):
     """
     获取配置文件
-    :param file_name: 文件名
+    :param
+    file_name: 文件名
     :return:
     """
     return os.path.join(get_config_directory(util.APP_NAME), file_name)

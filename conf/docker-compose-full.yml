@@ -14,6 +14,23 @@ services:
     volumes:
     - ./logs/nacos/:/home/nacos/logs
     - ./data/nacos/:/home/nacos/data
+  seata:
+    labels:
+      description: "Seata 是阿里巴巴开源的一个分布式事务解决方案，致力于解决跨服务的事务一致性问题"
+    image: seataio/seata-server:2.0.0
+    ports:
+      - "7091:7091"
+      - "8091:8091"
+    environment:
+      - STORE_MODE=db
+      # 以SEATA_IP作为host注册seata server
+      - SEATA_IP=10.0.0.74
+      - SEATA_PORT=8091
+    volumes:
+      - "/usr/share/zoneinfo/Asia/Shanghai:/etc/localtime"        #设置系统时区
+      - "/usr/share/zoneinfo/Asia/Shanghai:/etc/timezone"  #设置时区
+      # 假设我们通过docker cp命令把资源文件拷贝到相对路径`./seata-server/resources`中
+      - "./resources/application.yml:/seata-server/resources/application.yml"
   redis:
     labels:
       description: "Redis 是一个开源的、基于内存的数据结构存储系统，通常用作数据库、缓存和消息代理"
@@ -195,6 +212,92 @@ services:
       retries: 30
     ports:
       - '${EXPOSE_DB_PORT:-5432}:5432'
+  mysql:
+    labels:
+      description: "MySQL 是一种开源的关系型数据库管理系统，它是目前世界上最流行的数据库之一"
+    image: mysql:8.0.37
+    container_name: mysql8-server  # 明确指定容器名称
+    restart: unless-stopped       # 更灵活的自动重启策略
+    environment:
+      - MYSQL_ROOT_PASSWORD=your_strong_password_here  # 实际密码需替换
+      - MYSQL_USER=app_user                            # 创建应用用户
+      - MYSQL_PASSWORD=app_password
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./data:/var/lib/mysql
+      - ./conf:/etc/mysql/conf.d
+      - ./logs:/var/log/mysql
+    ports:
+      - "3306:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --lower_case_table_names=1
+      - --explicit_defaults_for_timestamp=1
+  dmdb:
+    labels:
+      description: "达梦数据库（简称 DM，英文名 DaMeng Database）是一款由中国企业自主研发的国产高性能关系型数据库管理系统（RDBMS）"
+    image: dm8:dm8_20241230_rev255012_x86_rh6_64  # 使用达梦数据库的官方镜像或自定义镜像
+    container_name: dmdb8
+    ports:
+      - "5236:5236"  # 达梦数据库默认端口
+    restart: always
+    environment:
+      - TZ=Asia/Shanghai
+      - PAGE_SIZE=4
+      - LD_LIBRARY_PATH=/opt/dmdbms/bin
+      - INSTANCE_NAME=dm8
+      - CASE_SENSITIVE=0
+      - UNICODE_FLAG=1
+      - COMPATIBLE_MODE=4
+      - ORDER_BY_NULLS_FLAG=2
+      - SYSDBA_PWD=123456789
+      - MY_STRICT_TABLES=1
+    volumes:
+      - /data/nt_cloud/dmdb/data:/opt/dmdbms/data  # 挂载数据目录到宿主机
+      - /data/nt_cloud/dmdb/logs:/opt/dmdbms/log   # 挂载日志目录到宿主机
+  kingbase:
+    labels:
+      description: "KingBase 是一款由kingbase软件公司开发的开源关系型数据库管理系统"
+    image: kingbase/kingbase_docker:latest
+    container_name: kingbase_container
+    environment:
+      - POSTGRES_PASSWORD=your_password  # 设置数据库密码
+    volumes:
+      - kingbase_data:/var/lib/postgresql/data  # 持久化数据卷
+    ports:
+      - "5432:5432"  # 映射端口，默认人大金库使用5432端口
+    restart: always
+  opengauss:
+    labels:
+      description: "OpenGauss 是一个开源的关系型数据库管理系统"
+    image: opengausstech/open-gauss
+    container_name: opengauss_db
+    environment:
+      POSTGRES_USER: gaussdb
+      POSTGRES_PASSWORD: yourpassword
+      POSTGRES_DB: mydatabase
+    ports:
+      - "5432:5432"
+    volumes:
+      - opengauss_data:/var/lib/postgresql/12/main
+    restart: unless-stopped
+  oceanbase:
+    labels:
+      description: "OceanBase 是一个开源的关系型数据库管理系统"
+    container_name: obstandalone
+    image: quay.io/oceanbase/oceanbase-ce:latest
+    ports:
+      - 2881:2881
+    restart: always
+    hostname: obstandalone
+    volumes:
+      - /home/oceanbase/ob:/root/ob
+      - /home/oceanbase/obd/cluster:/root/.obd/cluster
+    environment:
+      # 部署 mini 的独立实例
+      - MODE=MINI
+      - OB_TENANT_PASSWORD=Lu234567
   nginx:
     labels:
       description: "Nginx 是一个高性能的 HTTP 和反向代理服务器，同时也作为 IMAP/POP3/SMTP 等协议服务器"
@@ -292,12 +395,52 @@ services:
     container_name: mongodb   # 容器名字
     restart: unless-stopped   # 容器异常停止后自动重启
     ports:
-      - "27017:27017"         # 映射主机27017端口到容器27017端口
+      - 27017:27017         # 映射主机27017端口到容器27017端口
     environment:
+      TZ: Asia/Shanghai
       MONGO_INITDB_ROOT_USERNAME: root   # 设置MongoDB root用户
       MONGO_INITDB_ROOT_PASSWORD: examplepassword # 设置密码
     volumes:
     - ./data/mongodb:/data/db # 持久化数据
+  consul:
+    labels:
+      description: "Consul 是一个开源的分布式配置中心"
+    container_name: consul
+    image: "consul:1.15.4"
+    network_mode: "host"
+    restart: always
+    ports:
+      - "8500:8500"
+      - "8600:8600/udp"
+    volumes:
+      - /data/docker/consul/data:/consul/data
+      - /data/docker/consul/config:/consul/config
+    command: consul agent -server -ui -bootstrap-expect=1 -data-dir=/consul/data -client=0.0.0.0 -bind=当前服务器IP地址（ip addr查看） -node=consul-node-1
+  etcd:
+    labels:
+      description: "Etcd 是一个开源的分布式键值存储"
+    image: quay.srebro.site/coreos/etcd:v3.3.8
+    container_name: etcd
+    ports:
+      - 2379:2379
+      - 2380:2380
+    restart: always
+    environment:
+      - ETCD_NAME=etcd
+      - ETCD_DATA_DIR=/var/etcd
+      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+      - ETCD_ADVERTISE_CLIENT_URLS=http://172.22.33.213:2379
+      - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
+      - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://172.22.33.213:2380
+      - ETCD_INITIAL_CLUSTER_TOKEN=etcd-cluster
+      - ETCD_INITIAL_CLUSTER=etcd=http://172.22.33.213:2380
+      - ETCD_INITIAL_CLUSTER_STATE=new
+      - ETCD_LOGGER=zap
+      - ETCD_LOG_LeveL=info
+    volumes:
+      - /home/application/etcd/data:/var/etcd
+      - /etc/localtime:/etc/localtime:ro
+
 networks:
   zz-test:
     driver: bridge

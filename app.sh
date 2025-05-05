@@ -20,6 +20,7 @@ nuitka \
   --include-module=pygments \
   --include-module=paramiko \
   --include-module=pyte \
+  --include-module=yaml \
   --include-module=pygments.formatters.html \
   --include-module=pygments.lexers.python \
   --include-package=core,function,style,ui,icons \

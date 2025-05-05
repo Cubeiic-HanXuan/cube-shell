@@ -52,13 +52,20 @@ class Ui_MainWindow(object):
 
         self.gridLayout.addWidget(self.treeWidget, 1, 0, 1, 1)
 
-        self.download_with_resume = QProgressBar(self.gridLayoutWidget)
-        self.download_with_resume.setObjectName(u"download_with_resume")
-        self.download_with_resume.setVisible(False)
-        self.download_with_resume.setMaximumSize(QSize(16777215, 10))
-        self.download_with_resume.setValue(0)
+        self.download_with_resume1 = QProgressBar(self.gridLayoutWidget)
+        self.download_with_resume1.setObjectName(u"download_with_resume")
+        self.download_with_resume1.setVisible(False)
+        self.download_with_resume1.setMaximumSize(QSize(16777215, 10))
+        self.download_with_resume1.setValue(0)
 
-        self.gridLayout.addWidget(self.download_with_resume, 2, 0, 1, 1)
+        self.gridLayout.addWidget(self.download_with_resume1, 2, 0, 1, 1)
+
+        self.download_with_resume = QVBoxLayout()
+
+        self.download_with_resume.setObjectName(u"download_with_resume")
+        self.download_with_resume.setContentsMargins(0, 0, 0, 0)
+
+        self.gridLayout.addLayout(self.download_with_resume, 2, 0, 1, 1)
 
         self.splitter_3.addWidget(self.gridLayoutWidget)
         self.splitter_255 = QSplitter(self.splitter_3)

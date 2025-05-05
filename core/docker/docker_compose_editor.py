@@ -1,12 +1,12 @@
 import os
 
 import yaml
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtCore import Qt, Signal, QSize
+from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import (QWidget, QVBoxLayout,
                                QHBoxLayout, QPushButton, QTreeWidget,
                                QTreeWidgetItem, QLabel, QMessageBox, QLineEdit,
-                               QFormLayout, QScrollArea, QSplitter, QDialog, QDialogButtonBox, QTextEdit)
+                               QFormLayout, QScrollArea, QSplitter, QDialog, QDialogButtonBox, QTextEdit, QComboBox)
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import get_lexer_by_name
@@ -58,15 +58,40 @@ class ServiceConfigWidget(QWidget):
         self.container_name_edit.setMinimumWidth(300)
         form_layout.addRow("容器名称:", self.container_name_edit)
 
-        # 重启策略
-        self.restart_edit = QLineEdit(self.config.get('restart', ''))
-        self.restart_edit.setMinimumWidth(300)
-        self.restart_edit.setPlaceholderText("例如: always, unless-stopped, on-failure")
-        form_layout.addRow("重启策略:", self.restart_edit)
+        # 重启策略（下拉选择）
+        self.restart_combo = QComboBox()
+        self.restart_combo.setMinimumWidth(300)
+        # 添加常用的重启策略选项
+        restart_options = [
+            "",
+            "no",
+            "always",
+            "on-failure",
+            "unless-stopped"
+        ]
+        self.restart_combo.addItems(restart_options)
+        # 设置当前值
+        current_restart = self.config.get('restart', '')
+        index = self.restart_combo.findText(current_restart)
+        if index >= 0:
+            self.restart_combo.setCurrentIndex(index)
+        # 添加提示
+        self.restart_combo.setToolTip(
+            "no: 不自动重启\n"
+            "always: 总是重启\n"
+            "on-failure: 非正常退出时重启\n"
+            "unless-stopped: 除非手动停止，否则总是重启"
+        )
+        form_layout.addRow("重启策略:", self.restart_combo)
 
-        # 命令
-        self.command_edit = QLineEdit(self.config.get('command', ''))
+        # 命令 - 支持字符串或列表类型
+        command = self.config.get('command', '')
+        # 如果是列表类型，转换为字符串
+        if isinstance(command, list):
+            command = ' '.join(command)
+        self.command_edit = QLineEdit(command)
         self.command_edit.setMinimumWidth(300)
+        self.command_edit.setPlaceholderText("例如: nginx -g 'daemon off;'")
         form_layout.addRow("命令:", self.command_edit)
 
         # 依赖服务
@@ -397,7 +422,7 @@ class ServiceConfigWidget(QWidget):
         self.config = {
             'image': self.image_edit.text(),
             'container_name': self.container_name_edit.text() or None,
-            'restart': self.restart_edit.text() or None,
+            'restart': self.restart_combo.currentText() or None,
             'build': build_config if build_config else None,
             'ports': [port.text() for port in self.ports_list if port.text()],
             'environment': env_dict,
@@ -534,12 +559,66 @@ class DockerComposeEditor(QWidget):
         left_layout = QVBoxLayout()
         left_widget.setLayout(left_layout)
 
+        # 添加服务列表标题
+        services_title = QLabel("服务列表")
+        services_title.setStyleSheet("""
+            font-size: 16px; 
+            font-weight: bold; 
+            color: #333; 
+            padding: 5px;
+            background-color: #f0f0f0;
+            border-bottom: 1px solid #ccc;
+        """)
+        services_title.setAlignment(Qt.AlignCenter)
+        left_layout.addWidget(services_title)
+
         self.services_tree = QTreeWidget()
-        self.services_tree.setHeaderLabels(["服务"])
+        self.services_tree.setHeaderHidden(True)  # 隐藏表头
+        self.services_tree.setAlternatingRowColors(True)  # 交替行颜色
+        self.services_tree.setAnimated(True)  # 展开/折叠动画
+        self.services_tree.setStyleSheet("""
+            QTreeWidget {
+                # background-color: #f8f8f8;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                padding: 5px;
+            }
+            QTreeWidget::item {
+                padding: 10px;
+                border-bottom: 1px solid #eee;
+            }
+            QTreeWidget::item:selected {
+                background-color: #0078d7;
+                color: white;
+            }
+            QTreeWidget::item:hover {
+                background-color: #e5f1fb;
+            }
+        """)
+        self.services_tree.setFont(QFont("Arial", 11))
+        self.services_tree.setIconSize(QSize(24, 24))
+        # self.services_tree.setHeaderLabels(["服务"])
         self.services_tree.itemClicked.connect(self.on_service_selected)
         left_layout.addWidget(self.services_tree)
 
         add_service_btn = QPushButton("添加服务")
+        add_service_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                font-weight: bold;
+                border: none;
+                padding: 8px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+            QPushButton:pressed {
+                background-color: #3d8b40;
+            }
+        """)
+        add_service_btn.setCursor(Qt.PointingHandCursor)
         add_service_btn.clicked.connect(self.add_service)
         left_layout.addWidget(add_service_btn)
 
@@ -804,6 +883,20 @@ class DockerComposeEditor(QWidget):
         self.services_tree.clear()
         for service_name in self.config.get('services', {}).keys():
             item = QTreeWidgetItem([service_name])
+
+            # 设置图标
+            item.setIcon(0, QIcon(f":{service_name}_128.png"))
+
+            # 设置提示信息
+            service_info = self.config.get('services', {}).get(service_name, {})
+            tooltip = f"服务: {service_name}\n"
+            if 'image' in service_info:
+                tooltip += f"镜像: {service_info['image']}\n"
+            if 'ports' in service_info and service_info['ports']:
+                tooltip += f"端口: {', '.join(service_info['ports'])}\n"
+
+            item.setToolTip(0, tooltip)
+
             self.services_tree.addTopLevelItem(item)
 
     def on_service_selected(self, item):

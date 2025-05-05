@@ -84,5 +84,17 @@
     <file>rmqnamesrv_128.png</file>
     <file>zookeeper_128.png</file>
     <file>redis_128.png</file>
+    <file>jenkins_128.png</file>
+    <file>grafana_128.png</file>
+    <file>clickhouse_128.png</file>
+    <file>mongodb_128.png</file>
+    <file>consul_128.png</file>
+    <file>etcd_128.png</file>
+    <file>mysql_128.png</file>
+    <file>seata_128.png</file>
+    <file>dmdb_128.png</file>
+    <file>kingbase_128.png</file>
+    <file>opengauss_128.png</file>
+    <file>oceanbase_128.png</file>
 </qresource>
 </RCC>
