@@ -32,6 +32,7 @@ from pygments.formatters import HtmlFormatter
 from pygments.lexers import PythonLexer
 
 from core.docker.docker_compose_editor import DockerComposeEditor
+from core.docker.docker_installer_ui import DockerInstallerWidget
 from core.frequently_used_commands import TreeSearchApp
 from core.pty.forwarder import ForwarderManager
 from core.pty.mux import mux
@@ -1933,7 +1934,17 @@ class MainDialog(QMainWindow):
                 text_browser.append(self.tr("服务器还没有安装docker容器"))
                 # 设置内容居中对齐
                 text_browser.setAlignment(Qt.AlignCenter)
-                self.ui.gridLayout_7.addWidget(text_browser)
+
+                install_button = QPushButton("服务器还没有安装docker容器，开始安装")
+                install_button.clicked.connect(self.start_installation)
+
+                self.ui.gridLayout_7.addWidget(install_button)
+
+    def start_installation(self):
+        docker_installer = DockerInstallerWidget(self.ssh())
+        self.ui.tabWidget.addTab(docker_installer, self.tr('docker安装'))
+        # 切换到Docker安装器标签页
+        self.ui.tabWidget.setCurrentWidget(docker_installer)
 
     # 下载文件
     def downloadFile(self):

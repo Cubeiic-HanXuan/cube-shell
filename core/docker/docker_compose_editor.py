@@ -480,14 +480,13 @@ class ServiceSearchDialog(QDialog):
         self.update_service_list()
 
     def load_predefined_services(self):
+        # 内置配置文件
+        config_file = "conf/docker-compose-full.yml"
         services = {}
         try:
-            # 获取当前文件所在目录
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            # 读取预定义服务配置文件
-            config_path = os.path.join(current_dir, 'docker-compose.yml')
-            if os.path.exists("conf/docker-compose-full.yml"):
-                with open("conf/docker-compose-full.yml", 'r') as f:
+            # 读取配置文件
+            if os.path.exists(config_file):
+                with open(config_file, 'r') as f:
                     config = yaml.safe_load(f) or {}
                     for name, service_config in config.get('services', {}).items():
                         # 从配置中提取描述信息
@@ -527,15 +526,15 @@ class DockerComposeEditor(QWidget):
     def __init__(self, parent=None, ssh=None):
         super().__init__(parent)
         self.setWindowTitle("Docker Compose 可视化编辑器")
-        # self.setMinimumSize(1200, 800)
 
         # SSH客户端
         self.ssh = ssh
 
+        self.file_name = "docker-compose.yml"
         # 如果不是超级管理员账户，则切换到用户目录
-        self.file_path = "/home/app/docker-compose.yml"
+        self.dirs = "/home/app/"
         if self.ssh.username != "root":
-            self.file_path = f"/home/{self.ssh.username}/app/docker-compose.yml"
+            self.dirs = f"/home/{self.ssh.username}/app/"
 
         # 添加日志查看控制变量
         self.logs_running = False
@@ -597,7 +596,6 @@ class DockerComposeEditor(QWidget):
         """)
         self.services_tree.setFont(QFont("Arial", 11))
         self.services_tree.setIconSize(QSize(24, 24))
-        # self.services_tree.setHeaderLabels(["服务"])
         self.services_tree.itemClicked.connect(self.on_service_selected)
         left_layout.addWidget(self.services_tree)
 
@@ -651,17 +649,12 @@ class DockerComposeEditor(QWidget):
         ps_btn = QPushButton("查看状态")
         ps_btn.clicked.connect(lambda: self.execute_command("ps"))
         logs_btn = QPushButton("查看日志")
-        # logs_btn.clicked.connect(lambda: self.execute_command("logs -f"))
         logs_btn.clicked.connect(self.toggle_logs)
-        # stop_logs_btn = QPushButton("停止日志")
-        # stop_logs_btn.clicked.connect(self.stop_logs)
-
         button_layout.addWidget(up_btn)
         button_layout.addWidget(down_btn)
         button_layout.addWidget(restart_btn)
         button_layout.addWidget(ps_btn)
         button_layout.addWidget(logs_btn)
-        # button_layout.addWidget(stop_logs_btn)
         command_layout.addLayout(button_layout)
 
         # 输出显示区域
@@ -713,7 +706,7 @@ class DockerComposeEditor(QWidget):
 
         try:
             # 构建完整的docker-compose命令
-            full_command = f"docker compose -f {self.file_path} {command}"
+            full_command = f"docker compose -f {self.dirs}{self.file_name} {command}"
 
             # 执行命令并获取输出
             stdin, stdout, stderr = self.ssh.conn.exec_command(full_command)
@@ -761,7 +754,7 @@ class DockerComposeEditor(QWidget):
             self.output_text.clear()
 
             # 执行日志命令
-            stdin, stdout, stderr = self.ssh.conn.exec_command(f"docker compose -f {self.file_path} logs -f")
+            stdin, stdout, stderr = self.ssh.conn.exec_command(f"docker compose -f {self.dirs}{self.file_name} logs -f")
 
             # 创建线程来读取输出
             def read_logs():
@@ -830,31 +823,35 @@ class DockerComposeEditor(QWidget):
             return
 
         try:
-            # 检查文件是否存在
-            try:
-                # 使用paramiko的SFTP方法读取文件
-                with self.ssh.open_sftp().open(self.file_path, 'r') as f:
-                    content = f.read().decode('utf-8')
-            except Exception as e:
-                # 如果文件不存在，创建新的docker-compose.yml
-                default_config = {
-                    'version': '3.8',
-                    'services': {},
-                    'volumes': {},
-                    'networks': {}
-                }
-                content = yaml.dump(default_config, default_flow_style=False, sort_keys=False)
-                # 使用paramiko的SFTP方法写入文件
-                with self.ssh.open_sftp().open(self.file_path, 'w') as f:
-                    f.write(content.encode('utf-8'))
-                QMessageBox.information(self, "提示", "已创建新的docker-compose.yml文件")
 
-            self.config = yaml.safe_load(content) or {
+            default_config = {
                 'version': '3.8',
                 'services': {},
                 'volumes': {},
                 'networks': {}
             }
+
+            # 检查文件是否存在
+            try:
+                # 使用paramiko的SFTP方法读取文件
+                with self.ssh.open_sftp().open(f"{self.dirs}{self.file_name}", 'r') as f:
+                    content = f.read().decode('utf-8')
+            except Exception as e:
+
+                # 如果文件不存在，检查目录是否存在
+                try:
+                    self.ssh.open_sftp().stat(self.dirs)
+                except FileNotFoundError:
+                    self.ssh.open_sftp().mkdir(self.dirs)
+
+                # 如果文件不存在，创建新的docker-compose.yml
+                content = yaml.dump(default_config, default_flow_style=False, sort_keys=False)
+                # 使用paramiko的SFTP方法写入文件
+                with self.ssh.open_sftp().open(f"{self.dirs}{self.file_name}", 'w') as f:
+                    f.write(content.encode('utf-8'))
+                # QMessageBox.information(self, "提示", "已创建新的docker-compose.yml文件")
+
+            self.config = yaml.safe_load(content) or default_config
             self.update_services_tree()
 
             # 默认选择第一个服务
@@ -873,9 +870,9 @@ class DockerComposeEditor(QWidget):
         try:
             content = yaml.dump(self.config, default_flow_style=False, sort_keys=False)
             # 使用paramiko的SFTP方法写入文件
-            with self.ssh.open_sftp().open(self.file_path, 'w') as f:
+            with self.ssh.open_sftp().open(f"{self.dirs}{self.file_name}", 'w') as f:
                 f.write(content.encode('utf-8'))
-            QMessageBox.information(self, "成功", "配置已保存")
+            # QMessageBox.information(self, "成功", "配置已保存")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"保存配置时出错: {str(e)}")
 
