@@ -481,7 +481,10 @@ class ServiceSearchDialog(QDialog):
 
     def load_predefined_services(self):
         # 内置配置文件
-        config_file = "conf/docker-compose-full.yml"
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.abspath(os.path.join(current_dir, '../../'))
+        config_file = os.path.join(project_root, 'conf', 'docker-compose-full.yml')
+
         services = {}
         try:
             # 读取配置文件
