@@ -35,8 +35,8 @@ nuitka --windows-console-mode=disable --windows-icon-from-ico=icons/logo.ico ^
   --include-data-dir=frp=frp ^
   --company-name=HanXuan ^
   --product-name="cubeShell" ^
-  --file-version=1.7.0.0 ^
-  --product-version=1.7.0 ^
+  --file-version=1.7.1.0 ^
+  --product-version=1.7.1 ^
   --file-description="A powerful shell application" ^
   cube-shell.py
 

@@ -12,6 +12,7 @@ pywin32-ctypes = "*"
 pyqtdarktheme = "*"
 toml = "*"
 appdirs = "*"
+PyYAML = "*"
 
 [dev-packages]
 
