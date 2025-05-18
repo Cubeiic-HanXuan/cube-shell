@@ -17,15 +17,18 @@ from socket import socket
 
 import PySide6
 import appdirs
+import pyte
 import qdarktheme
 import toml
 from PySide6.QtCore import QTimer, Signal, Qt, QPoint, QRect, QEvent, QObject, Slot, QUrl, QCoreApplication, \
     QTranslator, QSize, QTimerEvent, QThread, QMetaObject, Q_ARG
 from PySide6.QtGui import QIcon, QAction, QTextCursor, QCursor, QCloseEvent, QKeyEvent, QInputMethodEvent, QPixmap, \
-    QDragEnterEvent, QDropEvent, QFont, QContextMenuEvent, QDesktopServices, QGuiApplication, QPalette, QColor
+    QDragEnterEvent, QDropEvent, QFont, QContextMenuEvent, QDesktopServices, QGuiApplication, QPalette, QColor, \
+    QSyntaxHighlighter, QTextCharFormat
 from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QDialog, QMessageBox, QTreeWidgetItem, \
     QInputDialog, QFileDialog, QTreeWidget, QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QTableWidgetItem, \
-    QHeaderView, QStyle, QTabBar, QTextBrowser, QLineEdit, QScrollArea, QGridLayout, QProgressBar
+    QHeaderView, QStyle, QTabBar, QTextBrowser, QLineEdit, QScrollArea, QGridLayout, QProgressBar, QPlainTextEdit, \
+    QTextEdit
 from deepdiff import DeepDiff
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
@@ -311,7 +314,8 @@ class MainDialog(QMainWindow):
             self.verticalLayout_shell = QVBoxLayout()
             self.verticalLayout_shell.setObjectName(u"verticalLayout_shell")
 
-            self.Shell = QTextBrowser(self.tab)
+            # self.Shell = QTextBrowser(self.tab)
+            self.Shell = TerminalWidget(self.tab)
             self.Shell.setReadOnly(True)
             self.Shell.setObjectName(u"Shell")
             self.verticalLayout_shell.addWidget(self.Shell)
@@ -321,11 +325,6 @@ class MainDialog(QMainWindow):
             self.ui.ShellTab.setCurrentIndex(tab_index)
             self.Shell.setAttribute(Qt.WA_InputMethodEnabled, True)
             self.Shell.setAttribute(Qt.WA_KeyCompression, True)
-            # 重写 contextMenuEvent 方法
-            self.Shell.contextMenuEvent = self.showCustomContextMenu
-
-            # 连接信号和槽
-            # self.Shell.cursorPositionChanged.connect(self.show_command_list)
 
             if tab_index > 0:
                 close_button = QPushButton(self)
@@ -364,7 +363,7 @@ class MainDialog(QMainWindow):
     def get_text_browser_from_tab(self, index):
         tab = self.ui.ShellTab.widget(index)
         if tab:
-            return tab.findChild(QTextBrowser, "Shell")
+            return tab.findChild(TerminalWidget, "Shell")
         return None
 
     # 监听标签页切换
@@ -560,30 +559,17 @@ class MainDialog(QMainWindow):
                     self.send(s)
 
         # self.on_text_changed(text)
-        event.accept()
+        # event.accept()
+        super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event: QKeyEvent):
         if mux.backend_index:
             text = str(event.text())
             key = event.key()
-            ssh_conn = self.ssh()
+            # ssh_conn = self.ssh()
 
-            if text and key == Qt.Key_Space:
+            if text and key == Qt.Key_Tab:
                 self.send(text.encode("utf-8"))
-            elif text and key == Qt.Key_Tab:
-                self.send(text.encode("utf-8"))
-            elif key == Qt.Key_Up:
-                # 点击上键查询历史命令
-                self.send(b'\x1b[A')
-            elif key == Qt.Key_Down:
-                # 点击下键查询历史命令
-                self.send(b'\x1b[B')
-            elif key == Qt.Key_Left:
-                ssh_conn.buffer_write = b'\x1b[D'
-                self.send(b'\x1b[D')
-            elif key == Qt.Key_Right:
-                ssh_conn.buffer_write = b'\x1b[C'
-                self.send(b'\x1b[C')
 
     def showEvent(self, event):
         self.center()
@@ -778,6 +764,9 @@ class MainDialog(QMainWindow):
                     # 恢复原始位置
                     self.ui.ShellTab.tabBar().moveTab(self.ui.ShellTab.currentIndex(), self.originalIndex)
                 self.homeTabPressed = False
+        if event.type() == QEvent.KeyPress:
+            print("测试以下")
+            return True
 
         return super().eventFilter(source, event)
 
@@ -795,58 +784,6 @@ class MainDialog(QMainWindow):
             item = self.ui.treeWidget.topLevelItem(i)
             if self.ui.treeWidget.visualItemRect(item).intersects(rect):
                 item.setSelected(True)
-
-    # 自定义右键菜单
-    def showCustomContextMenu(self, event: QContextMenuEvent):
-        # 创建一个 QMenu 对象
-        menu = QMenu(self.Shell)
-        menu.setStyleSheet("""
-                QMenu::item {
-                    padding-left: 5px;  /* 调整图标和文字之间的间距 */
-                }
-                QMenu::icon {
-                    padding-right: 0px; /* 设置图标右侧的间距 */
-                }
-            """)
-
-        # 创建复制和粘贴的 QAction 对象
-        copy_action = QAction(QIcon(":copy.png"), self.tr('复制'), self)
-        copy_action.setIconVisibleInMenu(True)
-        paste_action = QAction(QIcon(":paste.png"), self.tr('粘贴'), self)
-        paste_action.setIconVisibleInMenu(True)
-        clear_action = QAction(QIcon(":clear.png"), self.tr('清屏'), self)
-        clear_action.setIconVisibleInMenu(True)
-
-        # 绑定槽函数到 QAction 对象
-        copy_action.triggered.connect(self.copy)
-        paste_action.triggered.connect(self.paste)
-        clear_action.triggered.connect(self.clear)
-
-        # 将 QAction 对象添加到菜单中
-        menu.addAction(copy_action)
-        menu.addAction(paste_action)
-        menu.addAction(clear_action)
-
-        # 显示菜单
-        menu.exec(event.globalPos())
-
-    # 复制文本
-    def copy(self):
-        ssh_conn = self.ssh()
-        # 获取当前选中的文本，并复制到剪贴板
-        selected_text = ssh_conn.Shell.textCursor().selectedText()
-        clipboard = QApplication.clipboard()
-        clipboard.setText(selected_text)
-
-    # 粘贴文本
-    def paste(self):
-        # 从剪贴板获取文本，并粘贴到 QTextBrowser
-        clipboard = QApplication.clipboard()
-        clipboard_text = clipboard.text()
-        self.send(clipboard_text.encode('utf8'))
-
-    def clear(self):
-        self.send('clear'.encode('utf8') + b'\n')
 
     # 连接服务器
     def run(self):
@@ -878,8 +815,6 @@ class MainDialog(QMainWindow):
 
                 # 启动一个线程来异步执行 SSH 连接
                 threading.Thread(target=self.connect_ssh_thread, args=(ssh_conn,), daemon=True).start()
-                # self.ssh_username, self.ssh_password, self.ssh_ip, self.key_type, self.key_file = username, password, \
-                #     host, key_type, key_file
             except Exception as e:
                 util.logger.error(str(e))
                 self.Shell.setPlaceholderText(str(e))
@@ -1001,6 +936,14 @@ class MainDialog(QMainWindow):
             self.add_new_tab()
             self.run()
 
+            current_index = self.ui.ShellTab.currentIndex()
+            shell = self.get_text_browser_from_tab(current_index)
+
+            try:
+                shell.termKeyPressed.connect(lambda data: self.send(data))
+            except Exception as e:
+                util.logger.error(str(e))
+
     # 回车获取目录
     def on_return_pressed(self):
         # 获取布局中小部件的数量
@@ -1067,20 +1010,17 @@ class MainDialog(QMainWindow):
         if event.timerId() == self.timer_id:
             try:
                 ssh_conn = self.ssh()
-                if not ssh_conn.screen.dirty:
-                    if ssh_conn.buffer_write:
-                        self.updateTerminal(ssh_conn)
-                        ssh_conn.buffer_write = b''
-                    return
-                self.updateTerminal(ssh_conn)
-                self.update()
+                if ssh_conn.screen.dirty or ssh_conn.need_refresh_flags:
+                    self.updateTerminal(ssh_conn)
+                    ssh_conn.need_refresh_flags = False
+                # self.updateTerminal(ssh_conn)
+                # self.update()
             except Exception as e:
                 pass
         else:
             # 确保处理其他定时器事件
             super().timerEvent(event)
 
-    # 更新终端输出
     def updateTerminal(self, ssh_conn):
         current_index = self.ui.ShellTab.currentIndex()
         shell = self.get_text_browser_from_tab(current_index)
@@ -1098,10 +1038,10 @@ class MainDialog(QMainWindow):
         # 添加光标表示
         cursor_x = screen.cursor.x
         cursor_y = screen.cursor.y
-        lines = screen.display
+        lines = screen.display.copy()
         if cursor_y < len(lines):
             line = lines[cursor_y]
-            lines[cursor_y] = line[:cursor_x] + '▉' + line[cursor_x:]
+            lines[cursor_y] = line[:cursor_x] + '[[CURSOR]]' + line[cursor_x:]
         filtered_lines = list(filter(lambda x: x.strip(), lines))
 
         terminal_str = '\n'.join(filtered_lines)
@@ -1120,15 +1060,22 @@ class MainDialog(QMainWindow):
         # 第一次打开渲染banner
         if "Last login:" in terminal_str:
             # 高亮代码
-            highlighted2 = highlight(util.BANNER + replace, PythonLexer(), formatter)
+            highlighted2 = highlight(util.BANNER + special_lines, PythonLexer(), formatter)
         else:
             # 高亮代码
-            highlighted2 = highlight(replace, PythonLexer(), formatter)
+            highlighted2 = highlight(special_lines, PythonLexer(), formatter)
 
-        # 将HTML插入QTextBrowser
         shell.setHtml(highlighted2)
 
-        shell.moveCursor(QTextCursor.End)
+        # 将光标移动到 pyte 的真实位置
+        shell.moveCursor(QTextCursor.Start)
+        if shell.find('[[CURSOR]]'):
+            cursor = shell.textCursor()
+            # 删除标记（选中后直接删除）
+            cursor.removeSelectedText()
+            cursor.insertText('▉')
+            shell.setTextCursor(cursor)
+            shell.ensureCursorVisible()
 
         # 如果没有这串代码，执行器就会疯狂执行代码
         ssh_conn.screen.dirty.clear()
@@ -1137,6 +1084,9 @@ class MainDialog(QMainWindow):
         if mux.backend_index:
             ssh_conn = self.ssh()
             ssh_conn.write(data)
+            # 如果是方向键，设置刷新标志
+            if data in ['\x1b[D', '\x1b[C', '\x1b[A', '\x1b[B']:
+                ssh_conn.need_refresh_flags = True
 
     def do_killall_ssh(self):
         for tunnel in self.tunnels:
@@ -3082,6 +3032,121 @@ class Tunnel(QWidget):
             parent.tunnel_refresh()
         else:
             pass
+
+
+class TerminalHighlighter(QSyntaxHighlighter):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 你可以在这里定义高亮规则，比如关键字、颜色等
+
+    def highlightBlock(self, text):
+        # 这里可以自定义高亮规则，比如高亮命令、路径、错误等
+        # 示例：高亮以 $ 开头的行
+        if text.strip().startswith("$"):
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor("#00FF00"))
+            self.setFormat(0, len(text), fmt)
+
+
+class TerminalWidget(QTextEdit):
+    """
+    自定义终端
+    """
+    termKeyPressed = Signal(str)  # 输入信号
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFont(QFont("Monospace", 13))
+        # self.setStyleSheet("background-color: #000; color: #fff;")
+        self.setUndoRedoEnabled(False)
+        self.setLineWrapMode(QTextEdit.NoWrap)
+        self.setCursorWidth(2)
+        self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(' '))
+
+        self.highlighter = TerminalHighlighter(self.document())
+        self.setReadOnly(False)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+        # pyte 终端仿真
+        self.screen = pyte.Screen(80, 24)
+        self.stream = pyte.Stream(self.screen)
+
+        # 禁止鼠标选中时弹出菜单
+        # self.setContextMenuPolicy(Qt.NoContextMenu)
+
+    def keyPressEvent(self, event):
+        # 处理所有按键，转发给 SSH
+        text = event.text()
+        key = event.key()
+        if key == Qt.Key_Return or key == Qt.Key_Enter:
+            self.termKeyPressed.emit('\r')
+        elif key == Qt.Key_Backspace:
+            self.termKeyPressed.emit('\x7f')
+        elif key == Qt.Key_Left:
+            self.termKeyPressed.emit('\x1b[D')
+        elif key == Qt.Key_Right:
+            self.termKeyPressed.emit('\x1b[C')
+        elif key == Qt.Key_Up:
+            self.termKeyPressed.emit('\x1b[A')
+        elif key == Qt.Key_Down:
+            self.termKeyPressed.emit('\x1b[B')
+        elif text:
+            self.termKeyPressed.emit(text)
+        # 不让 QPlainTextEdit 处理按键，全部交给 pyte+SSH
+        # 不调用 super().keyPressEvent(event)
+
+    # 重写 contextMenuEvent 方法
+    # 自定义右键菜单
+    def contextMenuEvent(self, event: QContextMenuEvent):
+        # 创建一个 QMenu 对象
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+                QMenu::item {
+                    padding-left: 5px;  /* 调整图标和文字之间的间距 */
+                }
+                QMenu::icon {
+                    padding-right: 0px; /* 设置图标右侧的间距 */
+                }
+            """)
+
+        # 创建复制和粘贴的 QAction 对象
+        copy_action = QAction(QIcon(":copy.png"), self.tr('复制'), self)
+        copy_action.setIconVisibleInMenu(True)
+        paste_action = QAction(QIcon(":paste.png"), self.tr('粘贴'), self)
+        paste_action.setIconVisibleInMenu(True)
+        clear_action = QAction(QIcon(":clear.png"), self.tr('清屏'), self)
+        clear_action.setIconVisibleInMenu(True)
+
+        # 绑定槽函数到 QAction 对象
+        copy_action.triggered.connect(self.copy)
+        paste_action.triggered.connect(self.paste)
+        clear_action.triggered.connect(self.clear_term)
+
+        # 将 QAction 对象添加到菜单中
+        menu.addAction(copy_action)
+        menu.addAction(paste_action)
+        menu.addAction(clear_action)
+
+        # 显示菜单
+        menu.exec(event.globalPos())
+
+    # 复制文本
+    def copy(self):
+        # 获取当前选中的文本，并复制到剪贴板
+        selected_text = self.textCursor().selectedText()
+        clipboard = QApplication.clipboard()
+        clipboard.setText(selected_text)
+
+    # 粘贴文本
+    def paste(self):
+        # 从剪贴板获取文本，并粘贴到终端
+        clipboard = QApplication.clipboard()
+        clipboard_text = clipboard.text()
+        if clipboard_text:
+            self.termKeyPressed.emit(clipboard_text)
+
+    def clear_term(self):
+        self.termKeyPressed.emit('clear' + '\n')
 
 
 def open_data(ssh):

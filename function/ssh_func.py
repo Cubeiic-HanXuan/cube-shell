@@ -28,7 +28,9 @@ class SshClient(BaseBackend):
         self.isConnected = False
         self.buffer1 = ['▉', '']
         self.buffer3 = ''
-        self.buffer_write = b''
+        # self.buffer_write = b''
+        # 当接收到方向键盘输入时，需要刷新终端
+        self.need_refresh_flags = False
         # 下载文件大小
         self.total_size = 0
         # 加载私钥
