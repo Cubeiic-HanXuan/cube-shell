@@ -22,7 +22,7 @@ nuitka \
   --include-module=pyte \
   --include-module=yaml \
   --include-module=pygments.formatters.html \
-  --include-module=pygments.lexers.python \
+  --include-module=pygments.lexers.shell \
   --include-package=core,function,style,ui,icons \
   --include-data-dir=conf=conf \
   --include-data-dir=frp=frp \

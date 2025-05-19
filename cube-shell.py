@@ -32,7 +32,7 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QDialog, QMessag
 from deepdiff import DeepDiff
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
-from pygments.lexers import PythonLexer
+from pygments.lexers import BashLexer
 
 from core.docker.docker_compose_editor import DockerComposeEditor
 from core.docker.docker_installer_ui import DockerInstallerWidget
@@ -1082,18 +1082,18 @@ class MainDialog(QMainWindow):
         shell.setStyleSheet("background-color: " + color_ + ";")
         filtered_data = terminal_str.rstrip().replace("\0", " ")
 
-        pattern = r'\s+(?=\n)'
-        result = re.sub(pattern, '', filtered_data)
-        special_lines = util.remove_special_lines(result)
+        # pattern = r'\s+(?=\n)'
+        # result = re.sub(pattern, '', filtered_data)
+        special_lines = util.remove_special_lines(filtered_data)
         replace = special_lines.replace("                        ", "")
 
         # 第一次打开渲染banner
         if "Last login:" in terminal_str:
             # 高亮代码
-            highlighted2 = highlight(util.BANNER + special_lines, PythonLexer(), formatter)
+            highlighted2 = highlight(util.BANNER + replace, BashLexer(), formatter)
         else:
             # 高亮代码
-            highlighted2 = highlight(special_lines, PythonLexer(), formatter)
+            highlighted2 = highlight(replace, BashLexer(), formatter)
 
         shell.setHtml(highlighted2)
 
@@ -2495,7 +2495,7 @@ class TextEditor(QMainWindow):
         # 使用Pygments进行语法高亮
         formatter = HtmlFormatter(style='fruity', noclasses=True)
         # 高亮代码
-        highlighted = highlight(old_text, PythonLexer(), formatter)
+        highlighted = highlight(old_text, BashLexer(), formatter)
 
         self.te.textEdit.setHtml(highlighted)
         self.te.textEdit.setStyleSheet('background-color: rgb(17, 17, 17);')
@@ -2720,7 +2720,7 @@ class InstallDocker(QDialog):
 
             cmd1 = "docker pull " + image
             ack = ssh_conn.exec(cmd=cmd1, pty=False)
-            highlighted = highlight(ack, PythonLexer(), formatter)
+            highlighted = highlight(ack, BashLexer(), formatter)
             self.dial.textBrowserDockerInout.append(highlighted)
             if ack:
                 #  创建宿主机挂载目录
@@ -2736,7 +2736,7 @@ class InstallDocker(QDialog):
                 ack = ssh_conn.exec(cmd=cmd2, pty=False)
                 # 睡眠一秒
                 time.sleep(1)
-                highlighted = highlight(ack, PythonLexer(), formatter)
+                highlighted = highlight(ack, BashLexer(), formatter)
                 self.dial.textBrowserDockerInout.append(highlighted)
                 if ack:
                     for bind in item['volumes']:
@@ -2744,7 +2744,7 @@ class InstallDocker(QDialog):
                         cp = bind.get('cp')
                         cmd3 = f"docker cp {container_name}:{source}/ {cp}" + " "
                         ack = ssh_conn.exec(cmd=cmd3, pty=False)
-                        highlighted = highlight(ack, PythonLexer(), formatter)
+                        highlighted = highlight(ack, BashLexer(), formatter)
                         self.dial.textBrowserDockerInout.append(highlighted)
 
                     cmd_stop = f"docker stop {container_name}"
@@ -2757,7 +2757,7 @@ class InstallDocker(QDialog):
 
             cmd = f"docker run -d --name {container_name} {environment} {ports} {volumes} {labels} {privileged} {image} {cmd_}"
             ack = ssh_conn.exec(cmd=cmd, pty=False)
-            highlighted = highlight(ack, PythonLexer(), formatter)
+            highlighted = highlight(ack, BashLexer(), formatter)
             self.dial.textBrowserDockerInout.append(highlighted)
 
         except Exception as e:
