@@ -1,6 +1,7 @@
 {
-    "font": "Al Nile",
-    "theme": "rrt",
-    "theme_color": "#000000",
+    "font": "Apple Color Emoji",
+    "theme": "zenburn",
+    "theme_color": "#3F3F3F",
+    "font_size": 14,
     "version": "1.7.1"
 }

@@ -169,7 +169,7 @@ class MainDialog(QMainWindow):
         self.ui.treeWidgetDocker.customContextMenuRequested.connect(self.treeDocker)
 
         self.isConnected = False
-        self.timer_id = self.startTimer(50)
+        self.timer_id = self.startTimer(16)
         # 连接信号和槽
         self.initSftpSignal.connect(self.on_initSftpSignal)
         #  操作docker 成功,发射信号
@@ -398,6 +398,32 @@ class MainDialog(QMainWindow):
                     self.remove_last_line_edit()
                     self.ui.treeWidget.clear()
                     self.refreshConf()
+
+    def zoom_in(self):
+        """增大字体"""
+        current_index = self.ui.ShellTab.currentIndex()
+        shell = self.get_text_browser_from_tab(current_index)
+        if shell:
+            font = shell.font()
+            size = font.pointSize()
+            if size < 28:  # 设置最大字体大小限制
+                font.setPointSize(size + 1)
+                shell.setFont(font)
+                # 保存字体大小设置，供下次使用
+                util.THEME['font_size'] = size + 1
+
+    def zoom_out(self):
+        """减小字体"""
+        current_index = self.ui.ShellTab.currentIndex()
+        shell = self.get_text_browser_from_tab(current_index)
+        if shell:
+            font = shell.font()
+            size = font.pointSize()
+            if size > 14:  # 设置最小字体大小限制
+                font.setPointSize(size - 1)
+                shell.setFont(font)
+                # 保存字体大小设置，供下次使用
+                util.THEME['font_size'] = size - 1
 
     def index_pwd(self):
         if platform.system() == 'Darwin':
@@ -1029,22 +1055,26 @@ class MainDialog(QMainWindow):
         theme_ = util.THEME['theme']
         color_ = util.THEME['theme_color']
 
-        font = QFont(font_, 14)
+        font_size = util.THEME.get('font_size', 14)
+
+        font = QFont(font_, font_size)
         shell.setFont(font)
 
-        shell.moveCursor(QTextCursor.End)
+        # shell.moveCursor(QTextCursor.End)
+        # 获取屏幕内容，保持原始行结构
         screen = ssh_conn.screen
+        lines = screen.display.copy()
         # 使用 filter() 函数过滤空行
         # 添加光标表示
         cursor_x = screen.cursor.x
         cursor_y = screen.cursor.y
-        lines = screen.display.copy()
+
         if cursor_y < len(lines):
             line = lines[cursor_y]
             lines[cursor_y] = line[:cursor_x] + '[[CURSOR]]' + line[cursor_x:]
-        filtered_lines = list(filter(lambda x: x.strip(), lines))
+        # filtered_lines = list(filter(lambda x: x.strip(), lines))
 
-        terminal_str = '\n'.join(filtered_lines)
+        terminal_str = '\n'.join(lines)
 
         shell.clear()
         # 使用Pygments进行语法高亮
@@ -3147,6 +3177,21 @@ class TerminalWidget(QTextEdit):
 
     def clear_term(self):
         self.termKeyPressed.emit('clear' + '\n')
+
+    def wheelEvent(self, event):
+        """处理鼠标滚轮事件"""
+        if event.modifiers() & Qt.ControlModifier:
+            # 转发到MainDialog处理
+            parent = self.window()
+            if hasattr(parent, 'zoom_in') and hasattr(parent, 'zoom_out'):
+                if event.angleDelta().y() > 0:
+                    parent.zoom_in()
+                else:
+                    parent.zoom_out()
+                event.accept()
+                return
+        # 默认处理
+        super().wheelEvent(event)
 
 
 def open_data(ssh):
