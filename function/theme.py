@@ -1,12 +1,11 @@
-import sys
+import os
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, Qt
-from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QVBoxLayout, QHBoxLayout,
-    QLabel, QFrame, QStackedWidget, QPushButton, QWidget, QTableWidget, QTableWidgetItem,
-    QAbstractItemView, QFontComboBox, QHeaderView, QMessageBox
-)
+from PySide6.QtWidgets import (QMainWindow, QVBoxLayout, QHBoxLayout,
+                               QLabel, QFrame, QStackedWidget, QPushButton, QWidget, QTableWidget, QTableWidgetItem,
+                               QAbstractItemView, QFontComboBox, QHeaderView, QMessageBox
+                               )
 
 from function import util
 
@@ -89,7 +88,10 @@ class ColorThemeList(QTableWidget):
         theme_name, theme_color = list(self.themes.items())[index]
         print(theme_name, theme_color)
 
-        file_path = 'conf/theme.json'
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.abspath(os.path.join(current_dir, '../'))
+        file_path = os.path.join(project_root, 'conf', 'theme.json')
+
         # 读取 JSON 文件内容
         data = util.read_json(file_path)
         data['theme'] = theme_name
@@ -195,10 +197,3 @@ class MainWindow(QMainWindow):
 
         util.THEME = data
         QMessageBox.information(self, "切换字体", "字体切换成功")
-
-
-if __name__ == '__main__':
-    app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec())
