@@ -2,7 +2,7 @@
 
 [Setup]
 AppName=cube-shell
-AppVersion=1.7.1
+AppVersion=1.7.2
 DefaultDirName={commonpf}\cube-shell
 DefaultGroupName=寒暄
 OutputDir=.

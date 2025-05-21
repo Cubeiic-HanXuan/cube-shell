@@ -1,7 +1,7 @@
 {
     "font": "Apple Color Emoji",
-    "theme": "zenburn",
-    "theme_color": "#3F3F3F",
+    "theme": "rrt",
+    "theme_color": "#000000",
     "font_size": 14,
-    "version": "1.7.1"
+    "version": "1.7.2"
 }

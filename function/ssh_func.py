@@ -1,5 +1,7 @@
 import threading
 import time
+from collections import deque
+from typing import Dict, Any
 
 import paramiko
 
@@ -22,6 +24,23 @@ class SshClient(BaseBackend):
 
         self.system_info_dict = None
         self.cpu_use, self.mem_use, self.disk_use, self.receive_speed, self.transmit_speed = 0, 0, 0, 0, 0
+
+        # 数据历史和平滑处理
+        self._data_history = {
+            'cpu': deque(maxlen=5),
+            'memory': deque(maxlen=5),
+            'disk': deque(maxlen=5),
+            'network': {'rx': deque(maxlen=5), 'tx': deque(maxlen=5)}
+        }
+        # 上次网络读数
+        self._last_net_data = None
+        self._last_net_time = 0
+        # 上次CPU读数
+        self._last_cpu_data = None
+        self._last_cpu_time = 0
+        # 监控间隔(秒)
+        self.monitor_interval = 2.0
+
         self.timer1, self.timer2 = None, None
         self.Shell = None
         self.pwd = ''
@@ -149,6 +168,7 @@ class SshClient(BaseBackend):
 
     def _start_heartbeat(self):
         """启动心跳线程"""
+
         def heartbeat():
             while self.active and self.is_connected():
                 try:
@@ -237,16 +257,13 @@ class SshClient(BaseBackend):
         """
        关闭 SSH 连接，并从多路复用器中移除该后端。
        """
-        self.active = False
-        # if self.channel:
-        #     self.conn.close()
-        #     mux.remove_and_close(self)
-        #     self.close_sig = 0
+
         try:
+            self.active = False
             if self.channel:
-                self.channel.close()
-            if self.transport:
-                self.transport.close()
+                self.conn.close()
+                mux.remove_and_close(self)
+                self.close_sig = 0
         except Exception as e:
             util.logger.debug(f"关闭连接时出错: {str(e)}")
         finally:
@@ -299,86 +316,301 @@ class SshClient(BaseBackend):
                 ln.append(ll)
         return ln
 
-    def cpu_use_data(self, info: str) -> tuple:
-        lines = info.split('\n')
-        for l in lines:
-            if l.startswith('cpu'):
-                ll = self.del_more_space(l)
-                i = int(ll[1]) + int(ll[2]) + int(ll[3]) + int(ll[4]) + int(ll[5]) + int(ll[6]) + int(ll[7])
-                return i, int(ll[4])
+    def get_cpu_stats(self) -> Dict[str, Any]:
+        """获取详细的CPU使用率统计
 
-    def disk_use_data(self, info: str) -> int:
-        lines = info.split('\n')
-        for l in lines:
-            if l.endswith('/'):
-                ll = self.del_more_space(l)
-                if len(ll[4]) == 3:
-                    return int(ll[4][0:2])
-                elif len(ll[4]) == 2:
-                    return int(ll[4][0:1])
-                elif len(ll[4]) == 4:
-                    return int(ll[4][0:3])
+        Returns:
+            Dict包含总体使用率和各核心使用率
+        """
+        try:
+            # 获取第一次CPU状态
+            output1 = self.exec(cmd="cat /proc/stat")
+            cpu_data1 = parse_data.parse_cpu_data(output1)
 
-    def mem_use_data(self, info: str) -> int:
-        lines = info.split('\n')
-        for l in lines:
-            if l.startswith('Mem'):
-                ll = self.del_more_space(l)
-                return int((int(ll[2])) / int(ll[1]) * 100)
+            # 等待足够的时间间隔
+            time.sleep(self.monitor_interval)
+
+            # 获取第二次CPU状态
+            output2 = self.exec(cmd="cat /proc/stat")
+            cpu_data2 = parse_data.parse_cpu_data(output2)
+
+            # 计算CPU使用率
+            usage_stats = parse_data.calculate_cpu_usage(cpu_data1, cpu_data2)
+
+            # 应用平滑处理
+            self._smooth_value('cpu', usage_stats['total_usage'])
+
+            return usage_stats
+        except Exception as e:
+            util.logger.error(f"获取CPU统计失败: {str(e)}")
+            return {
+                'total_usage': 0,
+                'user_usage': 0,
+                'system_usage': 0,
+                'iowait': 0,
+                'cores_usage': []
+            }
+
+    # 内存统计数据收集
+    def get_memory_stats(self) -> Dict[str, Any]:
+        """获取详细的内存使用统计
+
+        Returns:
+            包含内存统计信息的字典
+        """
+        try:
+            output = self.exec(cmd="free -m")
+
+            memory_stats = parse_data.parse_memory_data(output)
+
+            # 应用平滑处理
+            self._smooth_value('memory', memory_stats['usage_percent'])
+
+            return memory_stats
+        except Exception as e:
+            util.logger.error(f"获取内存统计失败: {str(e)}")
+            return {
+                'total': 0,
+                'used': 0,
+                'free': 0,
+                'shared': 0,
+                'cache': 0,
+                'available': 0,
+                'usage_percent': 0
+            }
+
+    # 磁盘统计数据收集
+    def get_disk_stats(self) -> Dict[str, Any]:
+        """获取详细的磁盘使用统计
+
+        Returns:
+            包含磁盘使用信息的字典
+        """
+        try:
+            # 获取磁盘空间使用情况
+            df_output = self.exec(cmd="df -h")
+
+            # 获取磁盘IO性能数据 (如果有iostat命令)
+            try:
+                io_output = self.exec(cmd="iostat -d -x 1 2 | tail -n +4")
+                has_io_data = True
+            except:
+                io_output = ""
+                has_io_data = False
+
+            # 解析数据
+            partitions = parse_data.parse_disk_data(df_output)
+
+            # 如果有IO数据，解析它
+            io_stats = {}
+            if has_io_data:
+                io_stats = parse_data.parse_io_data(io_output)
+
+            # 计算根分区使用率，并应用平滑处理
+            root_usage = next((p['usage_percent'] for p in partitions if p['mount_point'] == '/'), 0)
+            self._smooth_value('disk', root_usage)
+
+            return {
+                'partitions': partitions,
+                'io': io_stats,
+                'root_usage': root_usage
+            }
+        except Exception as e:
+            util.logger.error(f"获取磁盘统计失败: {str(e)}")
+            return {
+                'partitions': [],
+                'io': {},
+                'root_usage': 0
+            }
+
+    # 网络统计数据收集
+    def get_network_stats(self) -> Dict[str, Any]:
+        """获取详细的网络使用统计
+
+        Returns:
+            包含网络接口和速率的字典
+        """
+        try:
+            # 获取第一次网络状态
+            output1 = self.exec(cmd="cat /proc/net/dev")
+            net_data1 = parse_data.parse_network_data(output1)
+            timestamp1 = time.time()
+
+            # 等待足够的时间间隔
+            time.sleep(self.monitor_interval)
+
+            # 获取第二次网络状态
+            output2 = self.exec(cmd="cat /proc/net/dev")
+            net_data2 = parse_data.parse_network_data(output2)
+            timestamp2 = time.time()
+
+            # 计算网络速率
+            interval = timestamp2 - timestamp1
+            stats = parse_data.calculate_network_speed(net_data1, net_data2, interval)
+
+            # 应用平滑处理
+            main_interface = parse_data.get_main_interface(stats['interfaces'])
+            if main_interface:
+                self._smooth_value('network', {'rx': main_interface['rx_speed'], 'tx': main_interface['tx_speed']})
+
+                # 更新总速率
+                stats['total_rx_speed'] = main_interface['rx_speed']
+                stats['total_tx_speed'] = main_interface['tx_speed']
+
+            return stats
+        except Exception as e:
+            util.logger.error(f"获取网络统计失败: {str(e)}")
+            return {
+                'interfaces': [],
+                'total_rx_speed': 0,
+                'total_tx_speed': 0
+            }
+
+    # 数据平滑处理
+    def _smooth_value(self, data_type: str, value: Any, alpha: float = 0.3) -> Any:
+        """使用EMA平滑数据
+
+        Args:
+            data_type: 数据类型
+            value: 新值
+            alpha: 平滑因子 (0-1)，越小平滑效果越强
+
+        Returns:
+            平滑后的值
+        """
+        # 特殊处理网络数据
+        if data_type == 'network':
+            rx_value = value['rx']
+            tx_value = value['tx']
+
+            # 对RX添加到历史并计算平均值
+            self._data_history['network']['rx'].append(rx_value)
+            smoothed_rx = sum(self._data_history['network']['rx']) / len(self._data_history['network']['rx'])
+
+            # 对TX添加到历史并计算平均值
+            self._data_history['network']['tx'].append(tx_value)
+            smoothed_tx = sum(self._data_history['network']['tx']) / len(self._data_history['network']['tx'])
+
+            self.receive_speed = smoothed_rx
+            self.transmit_speed = smoothed_tx
+
+            return {'rx': smoothed_rx, 'tx': smoothed_tx}
+        else:
+            # 普通数值平滑
+            self._data_history[data_type].append(value)
+            smoothed = sum(self._data_history[data_type]) / len(self._data_history[data_type])
+
+            # 更新相应属性
+            if data_type == 'cpu':
+                self.cpu_usage = smoothed
+            elif data_type == 'memory':
+                self.mem_usage = smoothed
+            elif data_type == 'disk':
+                self.disk_usage = smoothed
+
+            return smoothed
+
+    # 整合获取所有系统状态数据
+    def get_system_stats(self) -> Dict[str, Any]:
+        """获取所有系统统计数据
+
+        Returns:
+            包含所有统计信息的字典
+        """
+        try:
+            # 执行批量命令获取数据
+            commands = [
+                "cat /proc/stat",
+                "free -m",
+                "df -h",
+                "cat /proc/net/dev",
+                "cat /proc/meminfo",
+                "uptime"
+            ]
+
+            outputs = {}
+            for cmd in commands:
+                outputs[cmd.split()[0]] = self.exec(cmd)
+
+            # 解析主机信息（如果还没有获取）
+            if not self.system_info_dict:
+                host_info = self.exec(cmd='hostnamectl')
+                self.system_info_dict = parse_data.parse_hostnamectl_output(host_info)
+
+            # 解析所有统计信息
+            cpu_stats = self.get_cpu_stats()
+            memory_stats = self.get_memory_stats()
+            disk_stats = self.get_disk_stats()
+            network_stats = self.get_network_stats()
+
+            # 系统负载信息
+            load_avg = parse_data.parse_load_average(outputs.get('uptime', ''))
+
+            return {
+                'system': self.system_info_dict,
+                'cpu': cpu_stats,
+                'memory': memory_stats,
+                'disk': disk_stats,
+                'network': network_stats,
+                'load': load_avg,
+                'timestamp': time.time()
+            }
+        except Exception as e:
+            util.logger.error(f"获取系统统计信息失败: {str(e)}")
+            return {
+                'system': self.system_info_dict or {},
+                'cpu': {'total_usage': 0},
+                'memory': {'usage_percent': 0},
+                'disk': {'root_usage': 0},
+                'network': {'total_rx_speed': 0, 'total_tx_speed': 0},
+                'load': [0, 0, 0],
+                'timestamp': time.time()
+            }
 
     def get_datas(self):
-        # 获取主机信息
-        stdin, stdout, stderr = self.conn.exec_command(timeout=10, bufsize=100, command='hostnamectl')
-        host_info = stdout.read().decode('utf8')
-        self.system_info_dict = parse_data.parse_hostnamectl_output(host_info)
+        """持续监控系统状态的后台线程方法"""
+
+        # 获取主机基本信息
+        try:
+            host_info = self.exec(cmd='hostnamectl')
+            self.system_info_dict = parse_data.parse_hostnamectl_output(host_info)
+        except Exception as e:
+            util.logger.error(f"获取主机信息失败: {str(e)}")
+            self.system_info_dict = {}
+
+        # 监控循环
         while self.active:
             try:
                 if not self.is_connected():
                     self._trigger_reconnect()
-                # if self.close_sig == 0:
-                #     break
-                stdin, stdout, stderr = self.conn.exec_command(timeout=10, bufsize=100, command='cat /proc/stat')
-                cpuinfo1 = stdout.read().decode('utf8')
-                time.sleep(1)
-                stdin, stdout, stderr = self.conn.exec_command(timeout=10, bufsize=100, command='cat /proc/stat')
-                cpuinfo2 = stdout.read().decode('utf8')
 
-                stdin, stdout, stderr = self.conn.exec_command(timeout=10, bufsize=100, command='df')
-                diskinfo = stdout.read().decode('utf8')
+                if self.close_sig == 0:
+                    break
 
-                stdin, stdout, stderr = self.conn.exec_command(timeout=10, bufsize=100, command='free')
-                meminfo = stdout.read().decode('utf8')
+                # CPU监控
+                cpu_stats = self.get_cpu_stats()
+                self.cpu_use = cpu_stats['total_usage']
 
-                c_u1, c_idle1 = self.cpu_use_data(cpuinfo1)
-                c_u2, c_idle2 = self.cpu_use_data(cpuinfo2)
-                self.cpu_use = int((1 - (c_idle2 - c_idle1) / (c_u2 - c_u1)) * 100)
-                self.mem_use = self.mem_use_data(meminfo)
-                self.disk_use = self.disk_use_data(diskinfo)
+                # 内存监控
+                memory_stats = self.get_memory_stats()
+                self.mem_use = memory_stats['usage_percent']
 
-                # 获取网卡流量
-                stdin1, stdout1, stderr1 = self.conn.exec_command(timeout=10, bufsize=100, command='cat /proc/net/dev')
-                netinfo = stdout1.read().decode('utf8')
-                dev1 = parse_data.parse_net_dev(netinfo)
-                merged_initial_data = parse_data.merge_network_data(dev1)
-                # 设置时间间隔
-                time.sleep(1)
-                stdin2, stdout2, stderr2 = self.conn.exec_command(timeout=10, bufsize=100, command='cat /proc/net/dev')
-                netinfo1 = stdout2.read().decode('utf8')
-                dev2 = parse_data.parse_net_dev(netinfo1)
-                merged_current_data = parse_data.merge_network_data(dev2)
-                # 计算速度
-                self.receive_speed, self.transmit_speed = parse_data.calculate_speed(merged_initial_data,
-                                                                                     merged_current_data, 1)
-                # time.sleep(1)
+                # 磁盘监控
+                disk_stats = self.get_disk_stats()
+                self.disk_use = disk_stats['root_usage']
+
+                # 网络监控
+                network_stats = self.get_network_stats()
+                # 更新变量由_smooth_value处理
+
+                # 间隔时间
+                time.sleep(max(1.0, self.monitor_interval - 2))  # 减去已用的测量时间
+
             except EOFError as e:
                 util.logger.error(f"EOFError: {e}")
+                time.sleep(5)
             except Exception as e:
-                util.logger.error(f"Unexpected error: {e}")
-                util.logger.info("连接已经关闭")
-                #time.sleep(1)
+                util.logger.error(f"监控异常: {e}")
+                time.sleep(5)
 
-
-if __name__ == '__main__':
-    session = SshClient('192.168.31.162', 22, 'firefly', 'firefly')
-    session.connect()
-    sftp = session.open_sftp()
+        util.logger.info("系统监控已停止")

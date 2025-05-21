@@ -1,10 +1,8 @@
-import asyncio
 import glob
 import json
 import os
 import pickle
 import platform
-import re
 import shutil
 import subprocess
 import sys
@@ -12,7 +10,6 @@ import threading
 import time
 import uuid
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from socket import socket
 
 import PySide6
@@ -21,13 +18,13 @@ import pyte
 import qdarktheme
 import toml
 from PySide6.QtCore import QTimer, Signal, Qt, QPoint, QRect, QEvent, QObject, Slot, QUrl, QCoreApplication, \
-    QTranslator, QSize, QTimerEvent, QThread, QMetaObject, Q_ARG
+    QTranslator, QSize, QThread, QMetaObject, Q_ARG, QSignalBlocker
 from PySide6.QtGui import QIcon, QAction, QTextCursor, QCursor, QCloseEvent, QKeyEvent, QInputMethodEvent, QPixmap, \
     QDragEnterEvent, QDropEvent, QFont, QContextMenuEvent, QDesktopServices, QGuiApplication, QPalette, QColor, \
     QSyntaxHighlighter, QTextCharFormat
 from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QDialog, QMessageBox, QTreeWidgetItem, \
     QInputDialog, QFileDialog, QTreeWidget, QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QTableWidgetItem, \
-    QHeaderView, QStyle, QTabBar, QTextBrowser, QLineEdit, QScrollArea, QGridLayout, QProgressBar, QPlainTextEdit, \
+    QHeaderView, QStyle, QTabBar, QTextBrowser, QLineEdit, QScrollArea, QGridLayout, QProgressBar, \
     QTextEdit
 from deepdiff import DeepDiff
 from pygments import highlight
@@ -42,7 +39,7 @@ from core.pty.mux import mux
 from core.uploader.progress_adapter import ProgressAdapter
 from core.uploader.sftp_uploader_core import SFTPUploaderCore
 from core.vars import ICONS, CONF_FILE, CMDS, KEYS
-from function import util, about, theme, traversal, parse_data
+from function import util, about, theme, traversal
 from function.ssh_func import SshClient
 from function.util import format_file_size, has_valid_suffix
 from style.style import updateColor, InstalledButtonStyle, InstallButtonStyle
@@ -168,8 +165,19 @@ class MainDialog(QMainWindow):
 
         self.ui.treeWidgetDocker.customContextMenuRequested.connect(self.treeDocker)
 
+        # 创建SSH连接器
+        self.ssh_connector = SSHConnector()
+        self.ssh_connector.connected.connect(self.on_ssh_connected)
+        self.ssh_connector.failed.connect(self.on_ssh_failed)
+
         self.isConnected = False
-        self.timer_id = self.startTimer(16)
+
+        # self.timer_id = self.startTimer(50)
+
+        self.terminal_timer = QTimer(self)
+        self.terminal_timer.timeout.connect(self.update_terminal_timer)
+        self.terminal_timer.start(16)  # 约60fps
+
         # 连接信号和槽
         self.initSftpSignal.connect(self.on_initSftpSignal)
         #  操作docker 成功,发射信号
@@ -316,7 +324,7 @@ class MainDialog(QMainWindow):
 
             # self.Shell = QTextBrowser(self.tab)
             self.Shell = TerminalWidget(self.tab)
-            self.Shell.setReadOnly(True)
+            # self.Shell.setReadOnly(True)
             self.Shell.setObjectName(u"Shell")
             self.verticalLayout_shell.addWidget(self.Shell)
             self.verticalLayout_index.addLayout(self.verticalLayout_shell)
@@ -461,25 +469,19 @@ class MainDialog(QMainWindow):
         self.update_process_list()
 
     # 进程管理开始
-    def showContextMenu(self, pos):
-        # 获取所有选中的索引
-        selected_indexes = self.ui.result.selectedIndexes()
-        if not selected_indexes:
-            return
+    def showContextMenu(self, position):
+        context_menu = QMenu()
+        refresh_action = QAction("刷新进程列表", self)
+        refresh_action.triggered.connect(self.update_process_list)
+        context_menu.addAction(refresh_action)
 
-        # 获取所有选中行的第一列值
-        first_column_values = set()
-        for index in selected_indexes:
-            if index.column() == 0:
-                first_column_values.add(index.data(Qt.DisplayRole))
+        # 如果已选择进程，添加终止进程选项
+        if len(self.ui.result.selectedItems()) > 0:
+            kill_action = QAction("终止进程", self)
+            kill_action.triggered.connect(self.kill_selected_process)
+            context_menu.addAction(kill_action)
 
-        # 创建菜单
-        menu = QMenu()
-        kill_action = QAction(QIcon(':kill.png'), self.tr('Kill 进程'), self)
-        menu.setCursor(QCursor(Qt.PointingHandCursor))
-        kill_action.triggered.connect(lambda: self.kill_process(list(first_column_values)))
-        menu.addAction(kill_action)
-        menu.exec(self.ui.result.viewport().mapToGlobal(pos))
+        context_menu.exec_(self.ui.result.viewport().mapToGlobal(position))
 
     def update_process_list(self):
         self.all_processes = self.get_filtered_process_list()
@@ -539,29 +541,48 @@ class MainDialog(QMainWindow):
             QMessageBox.critical(self, "Error", self.tr("连接或检索进程列表失败") + f": {e}")
             return []
 
-    # kill 选中的进程数据
-    def kill_process(self, selected_rows):
-        pips = ""
-        for value in selected_rows:
-            pips += str(value) + " "
-        # 优雅结束进程，避免数据丢失
-        command = "echo " + pips + "| xargs -n 1 kill -15"
+    def kill_selected_process(self):
+        if not self.ssh():
+            QMessageBox.warning(self, "警告", "SSH客户端未设置，请先设置SSH客户端")
+            return
 
-        try:
-            ssh_conn = self.ssh()
+        selected_rows = set(item.row() for item in self.ui.result.selectedItems())
 
-            # 在远程服务器上执行命令结束进程
-            stdin, stdout, stderr = ssh_conn.conn.exec_command(timeout=10, command=command, get_pty=False)
-            error = stderr.read().decode('utf-8').strip()
-            if error:
-                QMessageBox.warning(self, "Warning", self.tr("服务器结束以下进程出错") + f" {pips}: {error}")
-            else:
-                QMessageBox.information(self, "Success", self.tr(f"以下进程 {pips} 被成功 kill."))
-                self.update_process_list()
-        except Exception as e:
-            QMessageBox.critical(self, "Error", self.tr(f"kill 以下进程失败 {pips}: {e}"))
+        if not selected_rows:
+            return
 
-    # 进程管理结束
+        # 获取所选行的PID
+        for row in selected_rows:
+            pid_item = self.ui.result.item(row, 0)
+            if pid_item:
+                pid = pid_item.text()
+
+                reply = QMessageBox.question(
+                    self,
+                    "确认终止",
+                    f"确认要终止进程 PID: {pid} 吗?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+
+                # 设置按钮文本为中文
+                yes_button = reply.button(QMessageBox.Yes)
+                no_button = reply.button(QMessageBox.No)
+                yes_button.setText(self.tr("确定"))
+                no_button.setText(self.tr("取消"))
+
+
+                if reply == QMessageBox.Yes and self.ssh():
+                    # 优雅结束进程，避免数据丢失
+                    command = "echo " + pid + "| xargs -n 1 kill -15"
+                    stdin, stdout, stderr = self.ssh().conn.exec_command(timeout=10, command=command, get_pty=False)
+                    error = stderr.read().decode('utf-8').strip()
+                    if error:
+                        QMessageBox.information(self, "成功", f"进程 {pid} 已终止")
+                        # 刷新进程列表
+                        self.update_process_list()
+                    else:
+                        QMessageBox.warning(self, "失败", f"无法终止进程 {pid}: {error}")
 
     def keyPressEvent(self, event):
         text = str(event.text())
@@ -836,16 +857,49 @@ class MainDialog(QMainWindow):
                 return
 
             try:
-                ssh_conn = SshClient(host.split(':')[0], int(host.split(':')[1]), username, password,
-                                     key_type, key_file)
 
-                # 启动一个线程来异步执行 SSH 连接
-                threading.Thread(target=self.connect_ssh_thread, args=(ssh_conn,), daemon=True).start()
+                # 启动异步连接
+                QMetaObject.invokeMethod(
+                    self.ssh_connector,
+                    "connect_ssh",
+                    Qt.QueuedConnection,
+                    Q_ARG(str, host.split(':')[0]),
+                    Q_ARG(int, int(host.split(':')[1])),
+                    Q_ARG(str, username),
+                    Q_ARG(str, password),
+                    Q_ARG(str, key_type),
+                    Q_ARG(str, key_file)
+                )
+
+                # ssh_conn = SshClient(host.split(':')[0], int(host.split(':')[1]), username, password,
+                #                      key_type, key_file)
+                #
+                # # 启动一个线程来异步执行 SSH 连接
+                # threading.Thread(target=self.connect_ssh_thread, args=(ssh_conn,), daemon=True).start()
             except Exception as e:
                 util.logger.error(str(e))
                 self.Shell.setPlaceholderText(str(e))
         else:
             self.alarm(self.tr('请选择一台设备！'))
+
+    def on_ssh_connected(self, ssh_conn):
+        """SSH连接成功回调"""
+        current_index = self.ui.ShellTab.currentIndex()
+        ssh_conn.Shell = self.Shell
+        self.ui.ShellTab.setTabWhatsThis(current_index, ssh_conn.id)
+
+        # 初始化 SFTP
+        self.initSftpSignal.emit()
+
+        # 确保终端工具激活
+        terminal = self.get_text_browser_from_tab(current_index)
+        if terminal:
+            terminal.termKeyPressed.connect(lambda data: self.send(data))
+
+    def on_ssh_failed(self, error_msg):
+        """SSH连接失败回调"""
+        self._delete_tab()
+        QMessageBox.warning(self, self.tr("拒绝连接"), self.tr("请检查服务器用户名、密码或密钥是否正确"))
 
     # 获取当前标签页的backend
     def ssh(self):
@@ -853,40 +907,40 @@ class MainDialog(QMainWindow):
         this = self.ui.ShellTab.tabWhatsThis(current_index)
         return mux.backend_index[this]
 
-    def connect_ssh_thread(self, ssh_conn):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        try:
-            loop.run_until_complete(self.async_connect_ssh(ssh_conn))
-        finally:
-            loop.close()
-
-    async def async_connect_ssh(self, ssh_conn):
-        try:
-            # 使用上下文管理器创建线程池执行器，动态调整线程池大小
-            max_workers = min(32, (os.cpu_count() or 1) * 5)
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # 在线程池中执行同步的 connect 方法
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(executor, ssh_conn.connect)
-        except Exception as e:
-            # 处理连接失败的情况
-            util.logger.error(f"SSH connection failed: {e}")
-            # 删除当前的 tab 并显示警告消息
-            self._delete_tab()
-            # 在主线程中显示消息框
-            QMetaObject.invokeMethod(self, "warning", Qt.QueuedConnection, Q_ARG(str, self.tr("拒绝连接")),
-                                     Q_ARG(str, self.tr("请检查服务器用户名、密码或密钥是否正确"))
-                                     )
-            return
-
-        current_index = self.ui.ShellTab.currentIndex()
-        ssh_conn.Shell = self.Shell
-        self.ui.ShellTab.setTabWhatsThis(current_index, ssh_conn.id)
-
-        # 异步初始化 SFTP
-        self.initSftpSignal.emit()
+    # def connect_ssh_thread(self, ssh_conn):
+    #     loop = asyncio.new_event_loop()
+    #     asyncio.set_event_loop(loop)
+    #
+    #     try:
+    #         loop.run_until_complete(self.async_connect_ssh(ssh_conn))
+    #     finally:
+    #         loop.close()
+    #
+    # async def async_connect_ssh(self, ssh_conn):
+    #     try:
+    #         # 使用上下文管理器创建线程池执行器，动态调整线程池大小
+    #         max_workers = min(32, (os.cpu_count() or 1) * 5)
+    #         with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    #             # 在线程池中执行同步的 connect 方法
+    #             loop = asyncio.get_event_loop()
+    #             await loop.run_in_executor(executor, ssh_conn.connect)
+    #     except Exception as e:
+    #         # 处理连接失败的情况
+    #         util.logger.error(f"SSH connection failed: {e}")
+    #         # 删除当前的 tab 并显示警告消息
+    #         self._delete_tab()
+    #         # 在主线程中显示消息框
+    #         QMetaObject.invokeMethod(self, "warning", Qt.QueuedConnection, Q_ARG(str, self.tr("拒绝连接")),
+    #                                  Q_ARG(str, self.tr("请检查服务器用户名、密码或密钥是否正确"))
+    #                                  )
+    #         return
+    #
+    #     current_index = self.ui.ShellTab.currentIndex()
+    #     ssh_conn.Shell = self.Shell
+    #     self.ui.ShellTab.setTabWhatsThis(current_index, ssh_conn.id)
+    #
+    #     # 异步初始化 SFTP
+    #     self.initSftpSignal.emit()
 
     @Slot(str, str)  # 将其标记为槽
     def warning(self, title, message):
@@ -962,14 +1016,6 @@ class MainDialog(QMainWindow):
             self.add_new_tab()
             self.run()
 
-            current_index = self.ui.ShellTab.currentIndex()
-            shell = self.get_text_browser_from_tab(current_index)
-
-            try:
-                shell.termKeyPressed.connect(lambda data: self.send(data))
-            except Exception as e:
-                util.logger.error(str(e))
-
     # 回车获取目录
     def on_return_pressed(self):
         # 获取布局中小部件的数量
@@ -1032,35 +1078,47 @@ class MainDialog(QMainWindow):
             self._off(name)
             self._remove_tab_by_name(name)
 
-    def timerEvent(self, event: QTimerEvent):
-        if event.timerId() == self.timer_id:
-            try:
-                ssh_conn = self.ssh()
-                if ssh_conn.screen.dirty or ssh_conn.need_refresh_flags:
+    # def timerEvent(self, event: QTimerEvent):
+    #     if event.timerId() == self.timer_id:
+    #         try:
+    #             ssh_conn = self.ssh()
+    #             if ssh_conn.screen.dirty or ssh_conn.need_refresh_flags:
+    #                 with QSignalBlocker(self.Shell):
+    #                     self.updateTerminal(ssh_conn)
+    #                 # self.updateTerminal(ssh_conn)
+    #                 ssh_conn.need_refresh_flags = False
+    #         except Exception as e:
+    #             pass
+    #     else:
+    #         # 确保处理其他定时器事件
+    #         super().timerEvent(event)
+
+    def update_terminal_timer(self):
+        try:
+            ssh_conn = self.ssh()
+            if ssh_conn.screen.dirty or ssh_conn.need_refresh_flags:
+                with QSignalBlocker(self.Shell):
                     self.updateTerminal(ssh_conn)
-                    ssh_conn.need_refresh_flags = False
-                # self.updateTerminal(ssh_conn)
-                # self.update()
-            except Exception as e:
-                pass
-        else:
-            # 确保处理其他定时器事件
-            super().timerEvent(event)
+                ssh_conn.need_refresh_flags = False
+        except Exception as e:
+            pass
 
     def updateTerminal(self, ssh_conn):
         current_index = self.ui.ShellTab.currentIndex()
         shell = self.get_text_browser_from_tab(current_index)
+        if not shell:
+            return
 
         font_ = util.THEME['font']
         theme_ = util.THEME['theme']
         color_ = util.THEME['theme_color']
 
         font_size = util.THEME.get('font_size', 14)
-
         font = QFont(font_, font_size)
-        shell.setFont(font)
 
-        # shell.moveCursor(QTextCursor.End)
+        shell.setFont(font)
+        shell.document().setDefaultFont(font)
+
         # 获取屏幕内容，保持原始行结构
         screen = ssh_conn.screen
         lines = screen.display.copy()
@@ -1069,43 +1127,68 @@ class MainDialog(QMainWindow):
         cursor_x = screen.cursor.x
         cursor_y = screen.cursor.y
 
-        if cursor_y < len(lines):
-            line = lines[cursor_y]
-            lines[cursor_y] = line[:cursor_x] + '[[CURSOR]]' + line[cursor_x:]
-        # filtered_lines = list(filter(lambda x: x.strip(), lines))
+        # 保留光标位置信息，但不修改原内容
+        cursor_position = {'x': cursor_x, 'y': cursor_y}
+
+        # if cursor_y < len(lines):
+        #     line = lines[cursor_y]
+        #     lines[cursor_y] = line[:cursor_x] + '[[CURSOR]]' + line[cursor_x:]
 
         terminal_str = '\n'.join(lines)
 
+        #  清理终端
         shell.clear()
+
         # 使用Pygments进行语法高亮
         formatter = HtmlFormatter(style=theme_, noclasses=True, bg_color='#ffffff')
         shell.setStyleSheet("background-color: " + color_ + ";")
-        filtered_data = terminal_str.rstrip().replace("\0", " ")
 
-        # pattern = r'\s+(?=\n)'
-        # result = re.sub(pattern, '', filtered_data)
-        special_lines = util.remove_special_lines(filtered_data)
-        replace = special_lines.replace("                        ", "")
+        # 文本处理
+        filtered_data = terminal_str.rstrip().replace("\0", " ")
+        replace = filtered_data.replace("                        ", "")
 
         # 第一次打开渲染banner
-        if "Last login:" in terminal_str:
-            # 高亮代码
-            highlighted2 = highlight(util.BANNER + replace, BashLexer(), formatter)
-        else:
-            # 高亮代码
-            highlighted2 = highlight(replace, BashLexer(), formatter)
+        # if "Last login:" in terminal_str:
+        #     # 高亮代码
+        #     html_content = highlight(util.BANNER + replace, BashLexer(), formatter)
+        # else:
+        #     # 高亮代码
+        html_content = highlight(replace, BashLexer(), formatter)
 
-        shell.setHtml(highlighted2)
+        shell.setHtml(html_content)
+
+        # 高效定位光标
+        cursor = QTextCursor(shell.document())
+        cursor.movePosition(QTextCursor.Start)
+
+        # 计算光标位置
+        line_count = 0
+        for _ in range(cursor_position['y']):
+            if not cursor.movePosition(QTextCursor.Down):
+                break
+            line_count += 1
+
+        # 移动到行首并定位到正确列位置
+        cursor.movePosition(QTextCursor.StartOfLine)
+        for _ in range(min(cursor_position['x'],
+                           len(lines[cursor_position['y']]) if cursor_position['y'] < len(lines) else 0)):
+            if not cursor.movePosition(QTextCursor.Right):
+                break
 
         # 将光标移动到 pyte 的真实位置
-        shell.moveCursor(QTextCursor.Start)
-        if shell.find('[[CURSOR]]'):
-            cursor = shell.textCursor()
-            # 删除标记（选中后直接删除）
-            cursor.removeSelectedText()
-            cursor.insertText('▉')
-            shell.setTextCursor(cursor)
-            shell.ensureCursorVisible()
+        # shell.moveCursor(QTextCursor.Start)
+        # if shell.find('[[CURSOR]]'):
+        #     cursor = shell.textCursor()
+        #     # 删除标记（选中后直接删除）
+        #     cursor.removeSelectedText()
+        # cursor.insertText('▉')
+        # cursor.insertText('▌')
+        shell.setTextCursor(cursor)
+        shell.ensureCursorVisible()
+
+        # 启用光标闪烁并设置为可见状态
+        shell.setCursorWidth(3)  # 设置光标宽度
+        shell.setFocus()  # 确保获得焦点以显示光标
 
         # 如果没有这串代码，执行器就会疯狂执行代码
         ssh_conn.screen.dirty.clear()
@@ -1128,21 +1211,28 @@ class MainDialog(QMainWindow):
 
     def closeEvent(self, event):
         try:
-            # 关闭定时起动器
-            if self.timer_id is not None:
-                self.killTimer(self.timer_id)
-                self.timer_id = None
+            # 停止定时器
+            if hasattr(self, 'terminal_timer'):
+                self.terminal_timer.stop()
+
+            # 停止SSH连接器
+            if hasattr(self, 'ssh_connector'):
+                self.ssh_connector.stop()
             """
              窗口关闭事件 当存在通道的时候关闭通道
              不存在时结束多路复用器的监听
             :param event: 关闭事件
             :return: None
             """
-            # ssh_conn = self.ssh()
-            # if mux.backend_index:
-            #     for key, ssh_conn in mux.backend_index.items():
-            #         if ssh_conn:
-            #             ssh_conn.close()
+            # 清理SSH连接
+            if mux.backend_index:
+                for key, ssh_conn in list(mux.backend_index.items()):
+                    if ssh_conn:
+                        # 安全地清理定时器
+                        if hasattr(ssh_conn, 'timer1') and ssh_conn.timer1:
+                            ssh_conn.timer1.stop()
+                        # 关闭连接
+                        ssh_conn.close()
             mux.stop()
 
             """
@@ -1170,6 +1260,8 @@ class MainDialog(QMainWindow):
                 shutil.copy(tunnel_json_path, F"{tunnel_json_path}-{timestamp}")
                 with open(tunnel_json_path, "w") as fp:
                     json.dump(data, fp)
+
+                # 清理过多的备份
                 backup_configs = glob.glob(F"{tunnel_json_path}-*")
                 if len(backup_configs) > 10:
                     for config in sorted(backup_configs, reverse=True)[10:]:
@@ -1484,34 +1576,48 @@ class MainDialog(QMainWindow):
     # 当前目录列表刷新
     def refreshDirs(self):
         try:
-            # 先删除旧项目释放内存
-            while self.ui.treeWidget.topLevelItemCount() > 0:
-                self.ui.treeWidget.takeTopLevelItem(0)
+            # 阻止UI更新
+            self.ui.treeWidget.setUpdatesEnabled(False)
+            # 清除现有项
+            self.ui.treeWidget.clear()
+
             ssh_conn = self.ssh()
             ssh_conn.pwd, files = self.getDirNow()
             self.dir_tree_now = files[1:]
+
+            # 设置表头
             self.ui.treeWidget.setHeaderLabels(
-                [self.tr("文件名"), self.tr("文件大小"), self.tr("修改日期"), self.tr("权限"), self.tr("所有者/组")])
-            self.add_line_edit(ssh_conn.pwd)  # 添加一个初始的 QLineEdit
-            self.ui.treeWidget.clear()
-            i = 0
-            for n in files[1:]:
-                self.ui.treeWidget.addTopLevelItem(QTreeWidgetItem(0))
-                self.ui.treeWidget.topLevelItem(i).setText(0, n[8])
+                [self.tr("文件名"), self.tr("文件大小"), self.tr("修改日期"), self.tr("权限"),
+                 self.tr("所有者/组")])
+
+            # 更新路径编辑框
+            self.add_line_edit(ssh_conn.pwd)
+
+            # 批量创建项目
+            items = []
+            for i, n in enumerate(files[1:]):
+                item = QTreeWidgetItem()
+                item.setText(0, n[8])
                 size_in_bytes = int(n[4].replace(",", ""))
-                self.ui.treeWidget.topLevelItem(i).setText(1, format_file_size(size_in_bytes))
-                self.ui.treeWidget.topLevelItem(i).setText(2, n[5] + ' ' + n[6] + ' ' + n[7])
-                self.ui.treeWidget.topLevelItem(i).setText(3, n[0])
-                self.ui.treeWidget.topLevelItem(i).setText(4, n[3])
+                item.setText(1, format_file_size(size_in_bytes))
+                item.setText(2, f"{n[5]} {n[6]} {n[7]}")
+                item.setText(3, n[0])
+                item.setText(4, n[3])
+
                 # 设置图标
                 if n[0].startswith('d'):
-                    # 获取默认的文件夹图标
-                    folder_icon = util.get_default_folder_icon()
-                    self.ui.treeWidget.topLevelItem(i).setIcon(0, folder_icon)
+                    item.setIcon(0, util.get_default_folder_icon())
                 elif n[0][0] in ['l', '-', 's']:
-                    file_icon = util.get_default_file_icon(n[8])
-                    self.ui.treeWidget.topLevelItem(i).setIcon(0, file_icon)
-                i += 1
+                    item.setIcon(0, util.get_default_file_icon(n[8]))
+
+                items.append(item)
+
+            # 批量添加项目
+            self.ui.treeWidget.addTopLevelItems(items)
+
+            # 恢复UI更新
+            self.ui.treeWidget.setUpdatesEnabled(True)
+
         except Exception as e:
             util.logger.error(f"Error refreshing directories: {e}")
 
@@ -1969,70 +2075,80 @@ class MainDialog(QMainWindow):
         self.ui.download_with_resume1.setValue(current // 1024)
         QApplication.processEvents()  # 更新 GUI 事件循环
 
-    # 上传文件
     def uploadFile(self):
+        """优化的文件上传功能"""
         ssh_conn = self.ssh()
-        # 保存进度条字典，用于在上传完成后隐藏
-        self.progress_bars = {}  # file_id -> progress_bar
 
         # 跟踪正在上传的文件数量和状态
-        self.active_uploads = set()  # 跟踪正在上传的文件ID
-        self.completed_uploads = set()  # 跟踪已完成的文件ID
-        self.failed_uploads = set()  # 跟踪失败的文件ID
+        ssh_conn.active_uploads = set()  # 跟踪正在上传的文件ID
+        ssh_conn.completed_uploads = set()  # 跟踪已完成的文件ID
+        ssh_conn.failed_uploads = set()  # 跟踪失败的文件ID
 
-        # 打开文件对话框让用户选择文件
+        # 使用QFileDialog获取文件
         files, _ = QFileDialog.getOpenFileNames(self, self.tr("选择文件"), "", self.tr("所有文件 (*)"))
-        if files:
-            # 创建上传器核心
-            self.uploader = SFTPUploaderCore(ssh_conn.open_sftp())
+        if not files:
+            return
 
-            # 创建进度适配器
-            self.progress_adapter = ProgressAdapter()
-            self.progress_adapter.connect_signals(self.uploader)
+        # 创建上传器
+        self.uploader = SFTPUploaderCore(ssh_conn.open_sftp())
+        self.progress_adapter = ProgressAdapter()
+        self.progress_adapter.connect_signals(self.uploader)
 
-            # 监听完成和失败信号，用于关闭进度条
-            self.uploader.upload_completed.connect(self.on_upload_completed)
-            self.uploader.upload_failed.connect(self.on_upload_failed)
+        # 批量准备上传任务
+        upload_tasks = []
+        progress_bars = {}
 
-            # 上传每个文件
-            for local_path in files:
-                file_id = str(uuid.uuid4())
-                filename = os.path.basename(local_path)
-                remote_path = f"{ssh_conn.pwd}/{filename}"  # 根据实际需要修改远程路径
+        # 阻止布局更新，提高效率
+        self.ui.download_with_resume.blockSignals(True)
 
-                # 添加到正在上传的集合
-                self.active_uploads.add(file_id)
+        for local_path in files:
+            file_id = str(uuid.uuid4())
+            filename = os.path.basename(local_path)
+            remote_path = f"{ssh_conn.pwd}/{filename}"
 
-                # 创建进度条控件
-                progress_group = QWidget()
-                progress_layout = QHBoxLayout(progress_group)
+            # 添加到正在上传的集合
+            ssh_conn.active_uploads.add(file_id)
 
-                # 文件信息标签
-                label = QLabel(f"{filename}")
-                progress_layout.addWidget(label, 1)
+            # 创建进度条组件
+            progress_group = QWidget()
+            progress_layout = QHBoxLayout(progress_group)
+            progress_layout.setContentsMargins(1, 1, 1, 1)
 
-                # 进度条
-                progress_bar = QProgressBar()
-                progress_bar.setRange(0, 100)
-                progress_bar.setValue(0)
-                progress_layout.addWidget(progress_bar, 2)
+            label = QLabel(filename)
+            progress_bar = QProgressBar()
+            progress_bar.setRange(0, 100)
 
-                # 添加到主布局
-                self.ui.download_with_resume.addWidget(progress_group)
+            progress_layout.addWidget(label, 1)
+            progress_layout.addWidget(progress_bar, 2)
 
-                # 保存到字典中
-                self.progress_bars[file_id] = progress_bar
+            # 添加到主布局
+            self.ui.download_with_resume.addWidget(progress_group)
 
-                # 注册进度条到适配器
-                self.progress_adapter.register_pyside_progress_bar(file_id, progress_bar, label)
+            # 保存引用
+            progress_bars[file_id] = progress_bar
+            self.progress_adapter.register_pyside_progress_bar(file_id, progress_bar, label)
 
-                # 开始上传
-                self.uploader.upload_file(file_id, local_path, remote_path)
-            self.refreshDirs()
+            # 准备上传任务
+            upload_tasks.append((file_id, local_path, remote_path))
+
+        # 恢复布局更新
+        self.ui.download_with_resume.blockSignals(False)
+
+        # 使用QThreadPool批量执行上传任务
+        for file_id, local_path, remote_path in upload_tasks:
+            self.uploader.upload_file(file_id, local_path, remote_path)
+
+        # 保存进度条引用
+        self.progress_bars = progress_bars
+
+        # 监听完成和失败信号
+        self.uploader.upload_completed.connect(self.on_upload_completed)
+        self.uploader.upload_failed.connect(self.on_upload_failed)
 
     def on_upload_completed(self, file_id, filename):
         """上传完成时隐藏进度条"""
         if file_id in self.progress_bars:
+            ssh_conn = self.ssh()
             # 获取进度条对象
             progress_bar = self.progress_bars[file_id]
 
@@ -2041,9 +2157,9 @@ class MainDialog(QMainWindow):
             progress_bar.setFormat("完成")
 
             # 更新文件状态
-            if file_id in self.active_uploads:
-                self.active_uploads.remove(file_id)
-                self.completed_uploads.add(file_id)
+            if file_id in ssh_conn.active_uploads:
+                ssh_conn.active_uploads.remove(file_id)
+                ssh_conn.completed_uploads.add(file_id)
 
             # 检查是否所有文件都完成了
             self.check_all_uploads_completed()
@@ -2052,6 +2168,7 @@ class MainDialog(QMainWindow):
     def on_upload_failed(self, file_id, filename, error):
         """上传失败时标记进度条为失败状态"""
         if file_id in self.progress_bars:
+            ssh_conn = self.ssh()
             # 获取进度条对象
             progress_bar = self.progress_bars[file_id]
 
@@ -2072,16 +2189,17 @@ class MainDialog(QMainWindow):
             """)
 
             # 更新文件状态
-            if file_id in self.active_uploads:
-                self.active_uploads.remove(file_id)
-                self.failed_uploads.add(file_id)
+            if file_id in ssh_conn.active_uploads:
+                ssh_conn.active_uploads.remove(file_id)
+                ssh_conn.failed_uploads.add(file_id)
 
             # 检查是否所有文件都完成了
             self.check_all_uploads_completed()
 
     def check_all_uploads_completed(self):
+        ssh_conn = self.ssh()
         """检查是否所有上传都已完成，如果是则清理界面"""
-        if not self.active_uploads and (self.completed_uploads or self.failed_uploads):
+        if not ssh_conn.active_uploads and (ssh_conn.completed_uploads or ssh_conn.failed_uploads):
             # 所有上传都已完成或失败，延迟一段时间后清理界面
             from PySide6.QtCore import QTimer
             QTimer.singleShot(1500, self.clear_all_progress)  # 1.5秒后清理
@@ -2089,10 +2207,11 @@ class MainDialog(QMainWindow):
     def clear_all_progress(self):
         """清除所有进度条和相关组件"""
         util.clear_grid_layout(self.ui.download_with_resume)
+        ssh_conn = self.ssh()
         # 重置状态
-        self.active_uploads.clear()
-        self.completed_uploads.clear()
-        self.failed_uploads.clear()
+        ssh_conn.active_uploads.clear()
+        ssh_conn.completed_uploads.clear()
+        ssh_conn.failed_uploads.clear()
 
     # 上传更新进度条
     def upload_update_progress(self, value):
@@ -2352,6 +2471,33 @@ class MainDialog(QMainWindow):
             self.setLightTheme()
         else:
             self.setDarkTheme()
+
+
+class SSHConnector(QObject):
+    """异步 SSH 连接器"""
+    connected = Signal(object)  # 连接成功信号
+    failed = Signal(str)  # 连接失败信号
+
+    def __init__(self):
+        super().__init__()
+        self._thread = QThread()
+        self.moveToThread(self._thread)
+        self._thread.start()
+
+    @Slot(str, int, str, str, str, str)
+    def connect_ssh(self, host, port, username, password, key_type, key_file):
+        try:
+            ssh_conn = SshClient(host, port, username, password, key_type, key_file)
+            ssh_conn.connect()
+            self.connected.emit(ssh_conn)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+    def stop(self):
+        """停止工作线程"""
+        if self._thread.isRunning():
+            self._thread.quit()
+            self._thread.wait()
 
 
 # 权限确认
@@ -3086,76 +3232,100 @@ class TerminalWidget(QTextEdit):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # 基本设置
         self.setFont(QFont("Monospace", 13))
-        # self.setStyleSheet("background-color: #000; color: #fff;")
         self.setUndoRedoEnabled(False)
         self.setLineWrapMode(QTextEdit.NoWrap)
-        self.setCursorWidth(2)
+        self.setCursorWidth(3)
         self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(' '))
-
-        self.highlighter = TerminalHighlighter(self.document())
-        self.setReadOnly(False)
         self.setFocusPolicy(Qt.StrongFocus)
+
+        # 硬件加速
+        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        self.setAttribute(Qt.WA_PaintOnScreen, False)
+
+        # 可选：自定义光标样式
+        palette = self.palette()
+        palette.setColor(QPalette.Highlight, QColor("#FFFFFF"))  # 设置选中文本的背景色
+        palette.setColor(QPalette.HighlightedText, QColor("#000000"))  # 设置选中文本的颜色
+        self.setPalette(palette)
+
+        # 缓存剪贴板
+        self._clipboard = QApplication.clipboard()
+
+        # 缓存键映射
+        self._key_mappings = {
+            Qt.Key_Return: '\r',
+            Qt.Key_Enter: '\r',
+            Qt.Key_Backspace: '\x7f',
+            Qt.Key_Home: '\x1b[H',
+            Qt.Key_End: '\x1b[F',
+            Qt.Key_PageUp: '\x1b[5~',
+            Qt.Key_PageDown: '\x1b[6~',
+            Qt.Key_Tab: '\t',
+            Qt.Key_Left: '\x1b[D',
+            Qt.Key_Right: '\x1b[C',
+            Qt.Key_Up: '\x1b[A',
+            Qt.Key_Down: '\x1b[B',
+        }
+
+        # 缓存右键菜单样式
+        self._menu_style = """
+            QMenu::item { padding-left: 5px; }
+            QMenu::icon { padding-right: 0px; }
+        """
+
+        # 缓存图标
+        self._action_icons = {
+            'copy': QIcon(":copy.png"),
+            'paste': QIcon(":paste.png"),
+            'clear': QIcon(":clear.png")
+        }
 
         # pyte 终端仿真
         self.screen = pyte.Screen(80, 24)
         self.stream = pyte.Stream(self.screen)
 
+        # 语法高亮
+        self.highlighter = TerminalHighlighter(self.document())
+
         # 禁止鼠标选中时弹出菜单
         # self.setContextMenuPolicy(Qt.NoContextMenu)
 
     def keyPressEvent(self, event):
-        # 处理所有按键，转发给 SSH
-        text = event.text()
+        # 处理按键，优先使用映射
         key = event.key()
-        if key == Qt.Key_Return or key == Qt.Key_Enter:
-            self.termKeyPressed.emit('\r')
-        elif key == Qt.Key_Backspace:
-            self.termKeyPressed.emit('\x7f')
-        elif key == Qt.Key_Left:
-            self.termKeyPressed.emit('\x1b[D')
-        elif key == Qt.Key_Right:
-            self.termKeyPressed.emit('\x1b[C')
-        elif key == Qt.Key_Up:
-            self.termKeyPressed.emit('\x1b[A')
-        elif key == Qt.Key_Down:
-            self.termKeyPressed.emit('\x1b[B')
-        elif text:
+        if key in self._key_mappings:
+            self.termKeyPressed.emit(self._key_mappings[key])
+            event.accept()
+            return
+
+        # 处理普通文本
+        text = event.text()
+        if text:
             self.termKeyPressed.emit(text)
-        # 不让 QPlainTextEdit 处理按键，全部交给 pyte+SSH
-        # 不调用 super().keyPressEvent(event)
+            event.accept()
+            return
 
     # 重写 contextMenuEvent 方法
     # 自定义右键菜单
     def contextMenuEvent(self, event: QContextMenuEvent):
         # 创建一个 QMenu 对象
         menu = QMenu(self)
-        menu.setStyleSheet("""
-                QMenu::item {
-                    padding-left: 5px;  /* 调整图标和文字之间的间距 */
-                }
-                QMenu::icon {
-                    padding-right: 0px; /* 设置图标右侧的间距 */
-                }
-            """)
+        menu.setStyleSheet(self._menu_style)
 
-        # 创建复制和粘贴的 QAction 对象
-        copy_action = QAction(QIcon(":copy.png"), self.tr('复制'), self)
-        copy_action.setIconVisibleInMenu(True)
-        paste_action = QAction(QIcon(":paste.png"), self.tr('粘贴'), self)
-        paste_action.setIconVisibleInMenu(True)
-        clear_action = QAction(QIcon(":clear.png"), self.tr('清屏'), self)
-        clear_action.setIconVisibleInMenu(True)
+        # 添加菜单项
+        actions = [
+            (self._action_icons['copy'], self.tr('复制'), self.copy),
+            (self._action_icons['paste'], self.tr('粘贴'), self.paste),
+            (self._action_icons['clear'], self.tr('清屏'), self.clear_term)
+        ]
 
-        # 绑定槽函数到 QAction 对象
-        copy_action.triggered.connect(self.copy)
-        paste_action.triggered.connect(self.paste)
-        clear_action.triggered.connect(self.clear_term)
-
-        # 将 QAction 对象添加到菜单中
-        menu.addAction(copy_action)
-        menu.addAction(paste_action)
-        menu.addAction(clear_action)
+        for icon, text, slot in actions:
+            action = QAction(icon, text, self)
+            action.setIconVisibleInMenu(True)
+            action.triggered.connect(slot)
+            menu.addAction(action)
 
         # 显示菜单
         menu.exec(event.globalPos())
@@ -3164,19 +3334,19 @@ class TerminalWidget(QTextEdit):
     def copy(self):
         # 获取当前选中的文本，并复制到剪贴板
         selected_text = self.textCursor().selectedText()
-        clipboard = QApplication.clipboard()
-        clipboard.setText(selected_text)
+        if selected_text:
+            self._clipboard.setText(selected_text)
 
     # 粘贴文本
     def paste(self):
         # 从剪贴板获取文本，并粘贴到终端
-        clipboard = QApplication.clipboard()
-        clipboard_text = clipboard.text()
-        if clipboard_text:
-            self.termKeyPressed.emit(clipboard_text)
+        # 粘贴使用缓存的剪贴板
+        text = self._clipboard.text()
+        if text:
+            self.termKeyPressed.emit(text)
 
     def clear_term(self):
-        self.termKeyPressed.emit('clear' + '\n')
+        self.termKeyPressed.emit('clear\n')
 
     def wheelEvent(self, event):
         """处理鼠标滚轮事件"""
