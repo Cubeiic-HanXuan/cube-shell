@@ -1830,7 +1830,7 @@ class MainDialog(QMainWindow):
         ssh_conn = self.ssh()
         groups = defaultdict(list)
         # 获取 compose 项目和配置文件列表
-        ls = ssh_conn.exec("docker compose ls -a")
+        ls = ssh_conn.sudo_exec("docker compose ls -a")
         lines = ls.strip().splitlines()
 
         # 获取compose 项目下的所有容器
@@ -1841,7 +1841,7 @@ class MainDialog(QMainWindow):
             config = parts[-1]
             ps_cmd = f"docker compose --file {config} ps -a --format '{{{{json .}}}}'"
             # 执行docker compose ps
-            conn_exec = ssh_conn.exec(ps_cmd)
+            conn_exec = ssh_conn.sudo_exec(ps_cmd)
             container_list = []
             for ps in conn_exec.strip().splitlines():
                 if ps.strip():
@@ -1955,7 +1955,7 @@ class MainDialog(QMainWindow):
             ssh_conn = self.ssh()
             util.clear_grid_layout(self.ui.gridLayout_7)
             # 检测服务器是否安装了docker，如果没有安装就不展示常用容器
-            data_ = ssh_conn.exec('docker --version')
+            data_ = ssh_conn.sudo_exec('docker --version')
             if data_:
                 services = util.get_compose_service(abspath('docker-compose-full.yml'))
                 # 每行最多四个小块
@@ -1979,7 +1979,7 @@ class MainDialog(QMainWindow):
                 # 将滚动区域添加到原布局位置（替换原来的gridLayout_7）
                 self.ui.gridLayout_7.addWidget(scroll_area)
 
-                conn_exec = ssh_conn.exec("docker ps -a --format '{{json .}}'")
+                conn_exec = ssh_conn.sudo_exec("docker ps -a --format '{{json .}}'")
                 container_list = []
                 for ps in conn_exec.strip().splitlines():
                     if ps.strip():

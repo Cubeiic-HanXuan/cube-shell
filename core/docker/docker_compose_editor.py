@@ -710,9 +710,14 @@ class DockerComposeEditor(QWidget):
         try:
             # 构建完整的docker-compose命令
             full_command = f"docker compose -f {self.dirs}{self.file_name} {command}"
-
-            # 执行命令并获取输出
-            stdin, stdout, stderr = self.ssh.conn.exec_command(full_command)
+            if self.ssh.username == "root":
+                # 执行命令并获取输出
+                stdin, stdout, stderr = self.ssh.conn.exec_command(full_command)
+            else:
+                stdin, stdout, stderr = self.ssh.conn.exec_command(f"sudo -S {full_command}")
+                # sudo 会通过 stdin 读取密码，写入密码并回车
+                stdin.write(f"{self.ssh.password}\n")
+                stdin.flush()
 
             # 清空输出区域
             self.output_text.clear()
@@ -755,9 +760,14 @@ class DockerComposeEditor(QWidget):
         try:
             # 清空输出区域
             self.output_text.clear()
-
-            # 执行日志命令
-            stdin, stdout, stderr = self.ssh.conn.exec_command(f"docker compose -f {self.dirs}{self.file_name} logs -f")
+            if self.ssh.username == "root":
+                # 执行日志命令
+                stdin, stdout, stderr = self.ssh.conn.exec_command(f"docker compose -f {self.dirs}{self.file_name} logs -f")
+            else:
+                stdin, stdout, stderr = self.ssh.conn.exec_command(f"sudo -S docker compose -f {self.dirs}{self.file_name} logs -f")
+                # sudo 会通过 stdin 读取密码，写入密码并回车
+                stdin.write(f"{self.ssh.password}\n")
+                stdin.flush()
 
             # 创建线程来读取输出
             def read_logs():

@@ -278,6 +278,20 @@ class SshClient(BaseBackend):
         )
         return stdout.read().decode('utf8')
 
+    def _sudo_exec(self, cmd, pty):
+        """实际的命令执行方法"""
+        if self.username == 'root':
+            stdin, stdout, stderr = self.conn.exec_command(command=cmd, get_pty=pty, timeout=30)
+        else:
+            stdin, stdout, stderr = self.conn.exec_command(command=f'sudo -S {cmd}', get_pty=pty, timeout=30)
+            if self.password:
+                stdin.write(f"{self.password}\n")
+                stdin.flush()
+        return stdout.read().decode('utf8')
+
+    def sudo_exec(self, cmd='', pty=False):
+        return self.safe_execute(self._sudo_exec, cmd, pty)
+
     def exec(self, cmd='', pty=False):
         """
         远程执行命令
