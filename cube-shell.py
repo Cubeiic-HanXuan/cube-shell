@@ -1,5 +1,6 @@
 import glob
 import json
+import logging
 import os
 import pickle
 import platform
@@ -9,23 +10,21 @@ import sys
 import threading
 import time
 import uuid
+import PySide6
+import appdirs
+import qdarktheme
+import toml
 from collections import defaultdict
 from socket import socket
 
-import PySide6
-import appdirs
-import pyte
-import qdarktheme
-import toml
 from PySide6.QtCore import QTimer, Signal, Qt, QPoint, QRect, QEvent, QObject, Slot, QUrl, QCoreApplication, \
-    QTranslator, QSize, QThread, QMetaObject, Q_ARG, QSignalBlocker
-from PySide6.QtGui import QIcon, QAction, QTextCursor, QCursor, QCloseEvent, QKeyEvent, QInputMethodEvent, QPixmap, \
-    QDragEnterEvent, QDropEvent, QFont, QContextMenuEvent, QDesktopServices, QGuiApplication, QPalette, QColor, \
-    QSyntaxHighlighter, QTextCharFormat
+    QSize, QThread, QMetaObject, Q_ARG, QProcessEnvironment
+from PySide6.QtGui import QColor
+from PySide6.QtGui import QIcon, QAction, QCursor, QCloseEvent, QInputMethodEvent, QPixmap, \
+    QDragEnterEvent, QDropEvent, QFont, QDesktopServices, QGuiApplication, QSyntaxHighlighter, QTextCharFormat
 from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QDialog, QMessageBox, QTreeWidgetItem, \
     QInputDialog, QFileDialog, QTreeWidget, QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QTableWidgetItem, \
-    QHeaderView, QStyle, QTabBar, QTextBrowser, QLineEdit, QScrollArea, QGridLayout, QProgressBar, \
-    QTextEdit
+    QHeaderView, QStyle, QTabBar, QTextBrowser, QLineEdit, QScrollArea, QGridLayout, QProgressBar
 from deepdiff import DeepDiff
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
@@ -34,47 +33,40 @@ from pygments.lexers import BashLexer
 from core.docker.docker_compose_editor import DockerComposeEditor
 from core.docker.docker_installer_ui import DockerInstallerWidget
 from core.frequently_used_commands import TreeSearchApp
-from core.pty.forwarder import ForwarderManager
-from core.pty.mux import mux
+from core.forwarder import ForwarderManager
 from core.uploader.progress_adapter import ProgressAdapter
 from core.uploader.sftp_uploader_core import SFTPUploaderCore
 from core.vars import ICONS, CONF_FILE, CMDS, KEYS
 from function import util, about, theme, traversal
 from function.ssh_func import SshClient
 from function.util import format_file_size, has_valid_suffix
+from qtermwidget.qtermwidget import QTermWidget
+from qtermwidget.filter import HighlightFilter, PermissionHighlightFilter
 from style.style import updateColor, InstalledButtonStyle, InstallButtonStyle
 from ui import add_config, text_editor, confirm, main, docker_install, auth
 from ui.add_tunnel_config import Ui_AddTunnelConfig
 from ui.tunnel import Ui_Tunnel
 from ui.tunnel_config import Ui_TunnelConfig
 
-keymap = {
-    Qt.Key_Backspace: chr(127).encode(),
-    Qt.Key_Escape: chr(27).encode(),
-    Qt.Key_AsciiTilde: chr(126).encode(),
-    Qt.Key_Up: b'\x1b[A',
-    Qt.Key_Down: b'\x1b[B',
-    Qt.Key_Left: b'\x1b[D',
-    Qt.Key_Right: b'\x1b[C',
-    Qt.Key_PageUp: "~1".encode(),
-    Qt.Key_PageDown: "~2".encode(),
-    Qt.Key_Home: "~H".encode(),
-    Qt.Key_End: "~F".encode(),
-    Qt.Key_Insert: "~3".encode(),
-    Qt.Key_Delete: "~4".encode(),
-    Qt.Key_F1: "~a".encode(),
-    Qt.Key_F2: "~b".encode(),
-    Qt.Key_F3: "~c".encode(),
-    Qt.Key_F4: "~d".encode(),
-    Qt.Key_F5: "~e".encode(),
-    Qt.Key_F6: "~f".encode(),
-    Qt.Key_F7: "~g".encode(),
-    Qt.Key_F8: "~h".encode(),
-    Qt.Key_F9: "~i".encode(),
-    Qt.Key_F10: "~j".encode(),
-    Qt.Key_F11: "~k".encode(),
-    Qt.Key_F12: "~l".encode(),
-}
+# Setup logging
+log_dir = os.path.expanduser("~/.cube-shell")
+if not os.path.exists(log_dir):
+    os.makedirs(log_dir)
+
+# Configure logging to file
+logging.basicConfig(
+    filename=os.path.join(log_dir, "cube-shell.log"),
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    encoding='utf-8'
+)
+logger = logging.getLogger("cube-shell")
+
+# Redirect stdout/stderr to files for debugging
+sys.stdout = open(os.path.join(log_dir, 'stdout.log'), 'w', buffering=1, encoding='utf-8')
+sys.stderr = open(os.path.join(log_dir, 'stderr.log'), 'w', buffering=1, encoding='utf-8')
+
+print("Cube-Shell Starting...")
 
 
 def abspath(path):
@@ -92,6 +84,12 @@ class MainDialog(QMainWindow):
     initSftpSignal = Signal()
     finished = Signal(str, str)  # 信号：成功结果 (命令, 输出)
     error = Signal(str, str)  # 信号：错误 (命令, 错误信息)
+    # 🔧 新增：主题切换信号
+    themeChanged = Signal(bool)  # 参数：is_dark_theme
+
+    # 异步更新UI信号
+    update_file_tree_signal = Signal(str, str, list)  # connection_id, pwd, file_list
+    update_process_list_signal = Signal(str, list)  # connection_id, process_list
 
     def __init__(self, qt_app):
         super().__init__()
@@ -99,10 +97,17 @@ class MainDialog(QMainWindow):
         self.ui = main.Ui_MainWindow()
         self.ui.setupUi(self)
         self.setWindowIcon(QIcon(":logo.ico"))
-        self.setAttribute(Qt.WA_InputMethodEnabled, True)
+
+        # 连接异步信号
+        self.update_file_tree_signal.connect(self.on_file_tree_updated)
+        self.update_process_list_signal.connect(self.on_process_list_updated)
+        # Disable InputMethodEnabled to avoid TUINSRemoteViewController errors on macOS
+        self.setAttribute(Qt.WA_InputMethodEnabled, False)
         self.setAttribute(Qt.WA_KeyCompression, True)
         self.setFocusPolicy(Qt.WheelFocus)
         self.Shell = None
+        # 存储 SSH 客户端实例，用于管理后台连接
+        self.ssh_clients = {}
         icon = QIcon(":index.png")
         self.ui.ShellTab.tabBar().setTabIcon(0, icon)
 
@@ -142,6 +147,8 @@ class MainDialog(QMainWindow):
 
         self.ui.discButton.clicked.connect(self.disc_off)
         self.ui.theme.clicked.connect(self.toggleTheme)
+        # 🔧 连接主题切换信号
+        self.themeChanged.connect(self.on_system_theme_changed)
         self.ui.treeWidget.customContextMenuRequested.connect(self.treeRight)
         self.ui.treeWidget.doubleClicked.connect(self.cd)
         self.ui.ShellTab.currentChanged.connect(self.shell_tab_current_changed)
@@ -172,12 +179,6 @@ class MainDialog(QMainWindow):
 
         self.isConnected = False
 
-        # self.timer_id = self.startTimer(50)
-
-        self.terminal_timer = QTimer(self)
-        self.terminal_timer.timeout.connect(self.update_terminal_timer)
-        self.terminal_timer.start(16)  # 约60fps
-
         # 连接信号和槽
         self.initSftpSignal.connect(self.on_initSftpSignal)
         #  操作docker 成功,发射信号
@@ -186,6 +187,9 @@ class MainDialog(QMainWindow):
         self.NAT = False
         self.NAT_lod()
         self.ui.pushButton.clicked.connect(self.on_NAT_traversal)
+
+        # 记录当前文件树显示的连接ID
+        self.current_displayed_connection_id = None
 
     def on_NAT_traversal(self):
         device = self.ui.comboBox.currentText()
@@ -297,16 +301,51 @@ class MainDialog(QMainWindow):
         current_index = self.ui.ShellTab.currentIndex()
         current_index1 = self.ui.ShellTab.tabText(current_index)
         if current_index1 != self.tr("首页"):
+            # 1. 获取并关闭终端组件
+            shell = self.get_text_browser_from_tab(current_index)
+            if shell:
+                try:
+                    shell.close()
+                    # 关键：处理挂起的事件，确保closeEvent被完整执行，进程被清理
+                    QApplication.processEvents()
+                except Exception:
+                    pass
+
+            # 2. 获取 Widget 引用
+            widget = self.ui.ShellTab.widget(current_index)
+
+            # 3. 移除标签页
             self.ui.ShellTab.removeTab(current_index)
+
+            # 4. 显式销毁 Widget
+            if widget:
+                widget.deleteLater()
 
     # 根据标签页名字删除标签页
     def _remove_tab_by_name(self, name):
         for i in range(self.ui.ShellTab.count()):
             if self.ui.ShellTab.tabText(i) == name:
+                # 1. 获取并关闭终端组件
+                shell = self.get_text_browser_from_tab(i)
+                if shell:
+                    try:
+                        shell.close()
+                        QApplication.processEvents()
+                    except Exception:
+                        pass
+
+                # 2. 获取 Widget 引用
+                widget = self.ui.ShellTab.widget(i)
+
+                # 3. 移除标签页
                 self.ui.ShellTab.removeTab(i)
+
+                # 4. 显式销毁 Widget
+                if widget:
+                    widget.deleteLater()
                 break
 
-    # 增加标签页
+    # 增加标签页 - 修改为支持 QTermWidget
     def add_new_tab(self):
         focus = self.ui.treeWidget.currentIndex().row()
         if focus != -1:
@@ -322,17 +361,18 @@ class MainDialog(QMainWindow):
             self.verticalLayout_shell = QVBoxLayout()
             self.verticalLayout_shell.setObjectName(u"verticalLayout_shell")
 
-            # self.Shell = QTextBrowser(self.tab)
-            self.Shell = TerminalWidget(self.tab)
-            # self.Shell.setReadOnly(True)
+            # 使用自定义的SSHQTermWidget，提供右键菜单支持
+            self.Shell = SSHQTermWidget(self.tab)
+
             self.Shell.setObjectName(u"Shell")
-            self.verticalLayout_shell.addWidget(self.Shell)
-            self.verticalLayout_index.addLayout(self.verticalLayout_shell)
+
+            # 🔧 修复：使用addWidget并设置拉伸因子确保完全填充
+            self.verticalLayout_shell.addWidget(self.Shell, 0)  # 拉伸因子1
+            self.verticalLayout_index.addLayout(self.verticalLayout_shell, 0)  # 拉伸因子1
+
             tab_name = self.generate_unique_tab_name(name)
             tab_index = self.ui.ShellTab.addTab(self.tab, tab_name)
             self.ui.ShellTab.setCurrentIndex(tab_index)
-            self.Shell.setAttribute(Qt.WA_InputMethodEnabled, True)
-            self.Shell.setAttribute(Qt.WA_KeyCompression, True)
 
             if tab_index > 0:
                 close_button = QPushButton(self)
@@ -371,18 +411,40 @@ class MainDialog(QMainWindow):
     def get_text_browser_from_tab(self, index):
         tab = self.ui.ShellTab.widget(index)
         if tab:
-            return tab.findChild(TerminalWidget, "Shell")
+            # 先查找自定义的 SSHQTermWidget
+            ssh_qtermwidget_instance = tab.findChild(SSHQTermWidget, "Shell")
+            if ssh_qtermwidget_instance:
+                return ssh_qtermwidget_instance
+
+            # 再查找原始的 QTermWidget（备用）
+            qtermwidget_instance = tab.findChild(QTermWidget, "Shell")
+            if qtermwidget_instance:
+                return qtermwidget_instance
         return None
 
     # 监听标签页切换
     def shell_tab_current_changed(self, index):
         current_index = self.ui.ShellTab.currentIndex()
 
-        if mux.backend_index:
+        # 尝试恢复主题 (修复切换Tab主题丢失问题)
+        try:
+            terminal = self.get_text_browser_from_tab(current_index)
+            if terminal and hasattr(terminal, 'current_theme_name'):
+                terminal.setColorScheme(terminal.current_theme_name)
+            elif terminal:
+                # 如果没有记录主题，默认设置 Ubuntu
+                terminal.setColorScheme("Ubuntu")
+        except Exception:
+            pass
+
+        # 切换标签页时，先重置当前显示的连接ID，确保 refreshDirs 能强制刷新UI
+        self.current_displayed_connection_id = None
+
+        if self.ssh_clients:
             current_text = self.ui.ShellTab.tabText(index)
             this = self.ui.ShellTab.tabWhatsThis(current_index)
-            if this:
-                ssh_conn = mux.backend_index[this]
+            if this and this in self.ssh_clients:
+                ssh_conn = self.ssh_clients[this]
                 if current_text == self.tr("首页"):
                     if ssh_conn:
                         ssh_conn.close_sig = 0
@@ -393,7 +455,7 @@ class MainDialog(QMainWindow):
                     self.ui.treeWidget.clear()
                     self.refreshConf()
                 else:
-                    if mux.backend_index:
+                    if self.ssh_clients:
                         ssh_conn.close_sig = 1
                         self.isConnected = True
                         self.refreshDirs()
@@ -408,30 +470,40 @@ class MainDialog(QMainWindow):
                     self.refreshConf()
 
     def zoom_in(self):
-        """增大字体"""
+        """增大字体 - 支持 QTermWidget"""
         current_index = self.ui.ShellTab.currentIndex()
         shell = self.get_text_browser_from_tab(current_index)
         if shell:
-            font = shell.font()
+            # QTermWidget 字体设置
+            if hasattr(shell, 'getTerminalFont'):
+                font = shell.getTerminalFont()
+            else:
+                font = QFont("Monospace", util.THEME.get('font_size', 14))
+
             size = font.pointSize()
             if size < 28:  # 设置最大字体大小限制
                 font.setPointSize(size + 1)
-                shell.setFont(font)
-                # 保存字体大小设置，供下次使用
+                shell.setTerminalFont(font)
                 util.THEME['font_size'] = size + 1
+                print(f"QTermWidget 字体增大到: {size + 1}")
 
     def zoom_out(self):
-        """减小字体"""
+        """减小字体 - 支持 QTermWidget"""
         current_index = self.ui.ShellTab.currentIndex()
         shell = self.get_text_browser_from_tab(current_index)
         if shell:
-            font = shell.font()
+            # QTermWidget 字体设置
+            if hasattr(shell, 'getTerminalFont'):
+                font = shell.getTerminalFont()
+            else:
+                font = QFont("Monospace", util.THEME.get('font_size', 14))
+
             size = font.pointSize()
-            if size > 14:  # 设置最小字体大小限制
+            if size > 8:  # 设置最小字体大小限制
                 font.setPointSize(size - 1)
-                shell.setFont(font)
-                # 保存字体大小设置，供下次使用
+                shell.setTerminalFont(font)
                 util.THEME['font_size'] = size - 1
+                print(f"QTermWidget 字体减小到: {size - 1}")
 
     def index_pwd(self):
         if platform.system() == 'Darwin':
@@ -484,9 +556,48 @@ class MainDialog(QMainWindow):
         context_menu.exec_(self.ui.result.viewport().mapToGlobal(position))
 
     def update_process_list(self):
-        self.all_processes = self.get_filtered_process_list()
-        self.filtered_processes = self.all_processes[:]
-        self.display_processes()
+        """更新进程列表 - 异步优化版"""
+        ssh_conn = self.ssh()
+        if not ssh_conn: return
+
+        # 1. 使用缓存立即显示
+        if hasattr(ssh_conn, 'cached_processes'):
+            self.all_processes = ssh_conn.cached_processes
+        else:
+            self.all_processes = []
+
+        # 更新UI显示 (使用缓存或空列表)
+        self.apply_filter(self.ui.search_box.text())
+
+        # 2. 后台线程获取最新数据
+        # 检查线程是否存在并运行
+        if not hasattr(ssh_conn, 'process_thread') or not ssh_conn.process_thread.is_alive():
+            ssh_conn.process_thread = threading.Thread(target=self.update_process_list_thread, args=(ssh_conn,),
+                                                       daemon=True)
+            ssh_conn.process_thread.start()
+
+    def update_process_list_thread(self, ssh_conn):
+        try:
+            processes = self.get_filtered_process_list(ssh_conn)
+            self.update_process_list_signal.emit(ssh_conn.id, processes)
+        except Exception:
+            pass
+
+    @Slot(str, list)
+    def on_process_list_updated(self, conn_id, processes):
+        """处理进程列表更新信号"""
+        # 更新缓存
+        if conn_id in self.ssh_clients:
+            self.ssh_clients[conn_id].cached_processes = processes
+
+        # 检查是否是当前显示的Tab
+        current_index = self.ui.ShellTab.currentIndex()
+        this = self.ui.ShellTab.tabWhatsThis(current_index)
+        if this != conn_id: return
+
+        self.all_processes = processes
+        # 重新应用过滤并显示
+        self.apply_filter(self.ui.search_box.text())
 
     def display_processes(self):
         self.ui.result.setRowCount(0)
@@ -506,12 +617,19 @@ class MainDialog(QMainWindow):
         self.filtered_processes = [p for p in self.all_processes if any(text.lower() in v.lower() for v in p.values())]
         self.display_processes()
 
-    def get_filtered_process_list(self):
+    def get_filtered_process_list(self, ssh_conn=None):
         try:
-            ssh_conn = self.ssh()
-            # 在远程服务器上执行命令获取进程信息
-            stdin, stdout, stderr = ssh_conn.conn.exec_command(timeout=10, command="ps aux --no-headers",
-                                                               get_pty=False)
+            if ssh_conn is None:
+                ssh_conn = self.ssh()
+                if not ssh_conn: return []
+                # 在远程服务器上执行命令获取进程信息
+                stdin, stdout, stderr = ssh_conn.conn.exec_command(timeout=10, command="ps aux --no-headers",
+                                                                   get_pty=False)
+            else:
+                # 后台线程使用
+                stdin, stdout, stderr = ssh_conn.conn.exec_command(timeout=10, command="ps aux --no-headers",
+                                                                   get_pty=False)
+
             output = stdout.readlines()
 
             # 解析输出结果
@@ -571,7 +689,6 @@ class MainDialog(QMainWindow):
                 yes_button.setText(self.tr("确定"))
                 no_button.setText(self.tr("取消"))
 
-
                 if reply == QMessageBox.Yes and self.ssh():
                     # 优雅结束进程，避免数据丢失
                     command = "echo " + pid + "| xargs -n 1 kill -15"
@@ -583,40 +700,6 @@ class MainDialog(QMainWindow):
                         self.update_process_list()
                     else:
                         QMessageBox.warning(self, "失败", f"无法终止进程 {pid}: {error}")
-
-    def keyPressEvent(self, event):
-        text = str(event.text())
-        key = event.key()
-
-        modifiers = event.modifiers()
-        ctrl = modifiers == Qt.ControlModifier
-        if ctrl and key == Qt.Key_Plus:
-            self.zoom_in()
-        elif ctrl and key == Qt.Key_Minus:
-            self.zoom_out()
-        else:
-            if text and key != Qt.Key_Backspace:
-                focus_widget = QApplication.focusWidget()
-                # QLineEdit回车之后不发送命令
-                if not isinstance(focus_widget, QLineEdit):
-                    self.send(text.encode("utf-8"))
-            else:
-                s = keymap.get(key)
-                if s:
-                    self.send(s)
-
-        # self.on_text_changed(text)
-        # event.accept()
-        super().keyPressEvent(event)
-
-    def keyReleaseEvent(self, event: QKeyEvent):
-        if mux.backend_index:
-            text = str(event.text())
-            key = event.key()
-            # ssh_conn = self.ssh()
-
-            if text and key == Qt.Key_Tab:
-                self.send(text.encode("utf-8"))
 
     def showEvent(self, event):
         self.center()
@@ -671,12 +754,12 @@ class MainDialog(QMainWindow):
         menubar = self.menuBar()
 
         file_menu = menubar.addMenu(self.tr("文件"))
-        # 创建“设置”菜单
+        # 创建"设置"菜单
         setting_menu = menubar.addMenu(self.tr("设置"))
-        # 创建“帮助”菜单
+        # 创建"帮助"菜单
         help_menu = menubar.addMenu(self.tr("帮助"))
 
-        # 创建“新建”动作
+        # 创建"新建"动作
         new_action = QAction(QIcon(":icons8-ssh-48.png"), self.tr("&新增配置"), self)
         new_action.setIconVisibleInMenu(True)
         new_action.setShortcut("Shift+Ctrl+A")
@@ -705,21 +788,21 @@ class MainDialog(QMainWindow):
         file_menu.addAction(import_configuration)
         import_configuration.triggered.connect(self.import_configuration)
 
-        # 创建“主题设置”动作
+        # 创建"主题设置"动作
         theme_action = QAction(QIcon(":undo.png"), self.tr("&主题设置"), self)
         theme_action.setShortcut("Shift+Ctrl+T")
         theme_action.setStatusTip(self.tr("设置主题"))
         setting_menu.addAction(theme_action)
         theme_action.triggered.connect(self.theme)
         #
-        # 创建“重做”动作
+        # 创建"重做"动作
         # docker_action = QAction(QIcon(":redo.png"), "&容器编排", self)
         # docker_action.setShortcut("Shift+Ctrl+D")
         # docker_action.setStatusTip(self.tr("容器编排"))
         # setting_menu.addAction(docker_action)
         # docker_action.triggered.connect(self.container_orchestration)
 
-        # 创建“关于”动作
+        # 创建"关于"动作
         about_action = QAction(QIcon(":about.png"), self.tr("&关于"), self)
         about_action.setShortcut("Shift+Ctrl+B")
         about_action.setStatusTip(self.tr("cubeShell 有关信息"))
@@ -857,93 +940,163 @@ class MainDialog(QMainWindow):
                 return
 
             try:
+                current_index = self.ui.ShellTab.currentIndex()
+                terminal = self.get_text_browser_from_tab(current_index)
+                # 🔧 修复：使用记录的主题，而不是硬编码
+                if hasattr(terminal, 'current_theme_name'):
+                    terminal.setColorScheme(terminal.current_theme_name)
+                else:
+                    terminal.setColorScheme("Ubuntu")
 
-                # 启动异步连接
-                QMetaObject.invokeMethod(
-                    self.ssh_connector,
-                    "connect_ssh",
-                    Qt.QueuedConnection,
-                    Q_ARG(str, host.split(':')[0]),
-                    Q_ARG(int, int(host.split(':')[1])),
-                    Q_ARG(str, username),
-                    Q_ARG(str, password),
-                    Q_ARG(str, key_type),
-                    Q_ARG(str, key_file)
-                )
+                # 🔧 修正：分离主机地址和端口
+                host_ip = host.split(':')[0]  # 纯IP地址
+                host_port = int(host.split(':')[1])  # 端口号
+                self._connect_with_qtermwidget(host_ip, host_port, username, password, key_type, key_file, terminal)
 
-                # ssh_conn = SshClient(host.split(':')[0], int(host.split(':')[1]), username, password,
-                #                      key_type, key_file)
-                #
-                # # 启动一个线程来异步执行 SSH 连接
-                # threading.Thread(target=self.connect_ssh_thread, args=(ssh_conn,), daemon=True).start()
             except Exception as e:
                 util.logger.error(str(e))
                 self.Shell.setPlaceholderText(str(e))
         else:
             self.alarm(self.tr('请选择一台设备！'))
 
+    def _connect_with_qtermwidget(self, host, port, username, password, key_type, key_file, terminal):
+        """使用 QTermWidget 直接处理 SSH 连接"""
+        try:
+            print(f"Connecting to {host}:{port} via QTermWidget...")
+
+            # 设置终端程序为bash
+            # terminal.setShellProgram("/bin/bash")
+
+            # 设置工作目录
+            if hasattr(terminal, 'setWorkingDirectory'):
+                terminal.setWorkingDirectory(os.path.expanduser("~"))
+
+            env = QProcessEnvironment.systemEnvironment()
+
+            # # Fix PATH for macOS
+            # current_path = env.value("PATH", "")
+            # extra_paths = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+            # new_path = current_path
+            # for p in extra_paths:
+            #     if p not in new_path:
+            #         new_path += os.pathsep + p
+            # env.insert("PATH", new_path)
+            # print(f"Using PATH: {new_path}")
+
+            # # 核心颜色设置
+            # env.insert("TERM", "xterm-256color")
+            # env.insert("COLORTERM", "truecolor")
+            # env.insert("CLICOLOR", "1")
+            # env.insert("CLICOLOR_FORCE", "1")  # 强制颜色输出
+
+            # terminal.setEnvironment(env.toStringList())
+
+            # 使用sshpass
+            ssh_command = "ssh"
+            ssh_args = [
+                "-o", "ConnectTimeout=10",  # 连接超时设置
+                "-t"
+            ]
+            # 构建SSH命令
+            if port != 22:
+                ssh_args.extend(["-p", port])
+            if key_type and key_file:
+                # 密钥认证：验证密钥文件并设置正确权限
+                key_file_path = os.path.expanduser(key_file)  # 展开~路径
+                if os.path.exists(key_file_path):
+                    # 设置密钥文件权限为600
+                    try:
+                        os.chmod(key_file_path, 0o600)
+                    except Exception as e1:
+                        print(f"设置密钥权限失败: {e1}")
+
+                    ssh_args.extend(["-i", key_file_path])
+
+            if username:
+                ssh_args.extend(["-o", "StrictHostKeyChecking=no",  # 跳过主机密钥检查
+                                 "-o", "UserKnownHostsFile=/dev/null"  # 不保存主机密钥文件
+                                 ])
+                ssh_args.append(f"{username}@{host}")
+            else:
+                ssh_args.append(host)
+
+            terminal.setShellProgram(ssh_command)
+            terminal.setArgs(ssh_args)
+            terminal.startShellProgram()
+
+            # 🔧 修复：在启动 Shell 后重新应用主题，防止被重置
+            if hasattr(terminal, 'current_theme_name'):
+                terminal.setColorScheme(terminal.current_theme_name)
+            else:
+                terminal.setColorScheme("Ubuntu")
+
+            if not key_type and not key_file:
+                def auto_input_password():
+                    terminal.sendText(password + "\n")
+
+                # 等待1.5秒让SSH显示密码提示，然后自动输入
+                QTimer.singleShot(1500, auto_input_password)
+
+            # 为了支持 SFTP 等功能，建立后台 SSH 连接
+            print("建立后台 SSH 连接用于 SFTP...")
+            self._establish_background_ssh(host, port, username, password, key_type, key_file)
+
+        except Exception as e2:
+            print(f"QTermWidget SSH 连接失败: {e2}")
+            # 回退到原有方式
+            self._fallback_to_original_ssh(host, port, username, password, key_type, key_file)
+
+    def _establish_background_ssh(self, host, port, username, password, key_type, key_file):
+        """建立后台 SSH 连接用于 SFTP 等功能"""
+        try:
+            # 异步建立后台连接
+            QMetaObject.invokeMethod(
+                self.ssh_connector,
+                "connect_ssh",
+                Qt.QueuedConnection,
+                Q_ARG(str, host),  # 这里已经是纯IP地址
+                Q_ARG(int, port),  # 这里已经是数字端口
+                Q_ARG(str, username),
+                Q_ARG(str, password),
+                Q_ARG(str, key_type),
+                Q_ARG(str, key_file)
+            )
+        except Exception as e:
+            print(f"建立后台 SSH 连接失败: {e}")
+
+    def _fallback_to_original_ssh(self, host, port, username, password, key_type, key_file):
+        """回退到原有 SSH 连接方式"""
+        print("回退到原有 SSH 连接方式")
+        QMetaObject.invokeMethod(
+            self.ssh_connector,
+            "connect_ssh",
+            Qt.QueuedConnection,
+            Q_ARG(str, host),  # 这里已经是纯IP地址
+            Q_ARG(int, port),  # 这里已经是数字端口
+            Q_ARG(str, username),
+            Q_ARG(str, password),
+            Q_ARG(str, key_type),
+            Q_ARG(str, key_file)
+        )
+
     def on_ssh_connected(self, ssh_conn):
-        """SSH连接成功回调"""
+        """SSH连接成功回调 - 区分 QTermWidget 模式和传统模式"""
         current_index = self.ui.ShellTab.currentIndex()
         ssh_conn.Shell = self.Shell
         self.ui.ShellTab.setTabWhatsThis(current_index, ssh_conn.id)
 
+        # 将连接实例存储到本地字典，替代 mux
+        self.ssh_clients[ssh_conn.id] = ssh_conn
+
         # 初始化 SFTP
         self.initSftpSignal.emit()
 
-        # 确保终端工具激活
-        terminal = self.get_text_browser_from_tab(current_index)
-        if terminal:
-            terminal.termKeyPressed.connect(lambda data: self.send(data))
-
-    def on_ssh_failed(self, error_msg):
-        """SSH连接失败回调"""
-        self._delete_tab()
-        QMessageBox.warning(self, self.tr("拒绝连接"), self.tr("请检查服务器用户名、密码或密钥是否正确"))
-
-    # 获取当前标签页的backend
-    def ssh(self):
-        current_index = self.ui.ShellTab.currentIndex()
-        this = self.ui.ShellTab.tabWhatsThis(current_index)
-        return mux.backend_index[this]
-
-    # def connect_ssh_thread(self, ssh_conn):
-    #     loop = asyncio.new_event_loop()
-    #     asyncio.set_event_loop(loop)
-    #
-    #     try:
-    #         loop.run_until_complete(self.async_connect_ssh(ssh_conn))
-    #     finally:
-    #         loop.close()
-    #
-    # async def async_connect_ssh(self, ssh_conn):
-    #     try:
-    #         # 使用上下文管理器创建线程池执行器，动态调整线程池大小
-    #         max_workers = min(32, (os.cpu_count() or 1) * 5)
-    #         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-    #             # 在线程池中执行同步的 connect 方法
-    #             loop = asyncio.get_event_loop()
-    #             await loop.run_in_executor(executor, ssh_conn.connect)
-    #     except Exception as e:
-    #         # 处理连接失败的情况
-    #         util.logger.error(f"SSH connection failed: {e}")
-    #         # 删除当前的 tab 并显示警告消息
-    #         self._delete_tab()
-    #         # 在主线程中显示消息框
-    #         QMetaObject.invokeMethod(self, "warning", Qt.QueuedConnection, Q_ARG(str, self.tr("拒绝连接")),
-    #                                  Q_ARG(str, self.tr("请检查服务器用户名、密码或密钥是否正确"))
-    #                                  )
-    #         return
-    #
-    #     current_index = self.ui.ShellTab.currentIndex()
-    #     ssh_conn.Shell = self.Shell
-    #     self.ui.ShellTab.setTabWhatsThis(current_index, ssh_conn.id)
-    #
-    #     # 异步初始化 SFTP
-    #     self.initSftpSignal.emit()
-
     @Slot(str, str)  # 将其标记为槽
     def warning(self, title, message):
+        # 修复：确保在主线程中执行 UI 操作
+        if QThread.currentThread() != QCoreApplication.instance().thread():
+            QMetaObject.invokeMethod(self, "warning", Qt.QueuedConnection, Q_ARG(str, title), Q_ARG(str, message))
+            return
         QMessageBox.warning(self, self.tr(title), self.tr(message))
 
     # 初始化sftp和控制面板
@@ -1002,16 +1155,21 @@ class MainDialog(QMainWindow):
     # 选择文件夹
     def cd(self):
         if self.isConnected:
+            ssh_conn = self.ssh()
+
+            # 关键安全检查：
+            # 如果当前显示的连接ID与实际操作的连接ID不一致（说明UI显示的是旧数据），则阻止操作
+            if self.current_displayed_connection_id != ssh_conn.id:
+                return
+
             focus = self.ui.treeWidget.currentIndex().row()
             if focus != -1 and self.dir_tree_now[focus][0].startswith('d'):
-                ssh_conn = self.ssh()
                 ssh_conn.pwd = self.getData2(
                     'cd ' + ssh_conn.pwd + '/' + self.ui.treeWidget.topLevelItem(focus).text(0) +
                     ' && pwd')[:-1]
                 self.refreshDirs()
             else:
                 self.editFile()
-                # self.alarm('文件无法前往，右键编辑文件！')
         elif not self.isConnected:
             self.add_new_tab()
             self.run()
@@ -1032,12 +1190,19 @@ class MainDialog(QMainWindow):
 
     # 断开服务器
     def _off(self, name):
-        this = self.get_tab_whats_this_by_name(name)
-        ssh_conn = mux.backend_index[this]
+        try:
+            this = self.get_tab_whats_this_by_name(name)
+            if this in self.ssh_clients:
+                ssh_conn = self.ssh_clients[this]
+                if hasattr(ssh_conn, 'timer1') and ssh_conn.timer1:
+                    ssh_conn.timer1.stop()
+                ssh_conn.term_data = b''
+                ssh_conn.pwd = ''
+                ssh_conn.close()
+                del self.ssh_clients[this]
+        except Exception as e:
+            pass
 
-        ssh_conn.timer1.stop()
-        ssh_conn.term_data = b''
-        ssh_conn.close()
         self.isConnected = False
         self.ssh_username, self.ssh_password, self.ssh_ip, self.key_type, self.key_file = None, None, None, None, None
         self.ui.networkUpload.setText('')
@@ -1049,7 +1214,7 @@ class MainDialog(QMainWindow):
         self.ui.treeWidget.setColumnCount(1)
         self.ui.treeWidget.setHeaderLabels([self.tr("设备列表")])
         self.remove_last_line_edit()
-        ssh_conn.pwd = ''
+
         self.ui.treeWidgetDocker.clear()
         self.ui.result.clear()
         # 隐藏顶部的列头
@@ -1063,7 +1228,6 @@ class MainDialog(QMainWindow):
         self.ui.memRate.setValue(0)
 
         self.refreshConf()
-        mux.remove_and_close(ssh_conn)
 
     # 断开服务器并删除tab
     def off(self, index, name):
@@ -1078,128 +1242,20 @@ class MainDialog(QMainWindow):
             self._off(name)
             self._remove_tab_by_name(name)
 
-    # def timerEvent(self, event: QTimerEvent):
-    #     if event.timerId() == self.timer_id:
-    #         try:
-    #             ssh_conn = self.ssh()
-    #             if ssh_conn.screen.dirty or ssh_conn.need_refresh_flags:
-    #                 with QSignalBlocker(self.Shell):
-    #                     self.updateTerminal(ssh_conn)
-    #                 # self.updateTerminal(ssh_conn)
-    #                 ssh_conn.need_refresh_flags = False
-    #         except Exception as e:
-    #             pass
-    #     else:
-    #         # 确保处理其他定时器事件
-    #         super().timerEvent(event)
-
-    def update_terminal_timer(self):
-        try:
-            ssh_conn = self.ssh()
-            if ssh_conn.screen.dirty or ssh_conn.need_refresh_flags:
-                with QSignalBlocker(self.Shell):
-                    self.updateTerminal(ssh_conn)
-                ssh_conn.need_refresh_flags = False
-        except Exception as e:
-            pass
-
-    def updateTerminal(self, ssh_conn):
-        current_index = self.ui.ShellTab.currentIndex()
-        shell = self.get_text_browser_from_tab(current_index)
-        if not shell:
-            return
-
-        font_ = util.THEME['font']
-        theme_ = util.THEME['theme']
-        color_ = util.THEME['theme_color']
-
-        font_size = util.THEME.get('font_size', 14)
-        font = QFont(font_, font_size)
-
-        shell.setFont(font)
-        shell.document().setDefaultFont(font)
-
-        # 获取屏幕内容，保持原始行结构
-        screen = ssh_conn.screen
-        lines = screen.display.copy()
-        # 使用 filter() 函数过滤空行
-        # 添加光标表示
-        cursor_x = screen.cursor.x
-        cursor_y = screen.cursor.y
-
-        # 保留光标位置信息，但不修改原内容
-        cursor_position = {'x': cursor_x, 'y': cursor_y}
-
-        # if cursor_y < len(lines):
-        #     line = lines[cursor_y]
-        #     lines[cursor_y] = line[:cursor_x] + '[[CURSOR]]' + line[cursor_x:]
-
-        terminal_str = '\n'.join(lines)
-
-        #  清理终端
-        shell.clear()
-
-        # 使用Pygments进行语法高亮
-        formatter = HtmlFormatter(style=theme_, noclasses=True, bg_color='#ffffff')
-        shell.setStyleSheet("background-color: " + color_ + ";")
-
-        # 文本处理
-        filtered_data = terminal_str.rstrip().replace("\0", " ")
-        replace = filtered_data.replace("                        ", "")
-
-        # 第一次打开渲染banner
-        # if "Last login:" in terminal_str:
-        #     # 高亮代码
-        #     html_content = highlight(util.BANNER + replace, BashLexer(), formatter)
-        # else:
-        #     # 高亮代码
-        html_content = highlight(replace, BashLexer(), formatter)
-
-        shell.setHtml(html_content)
-
-        # 高效定位光标
-        cursor = QTextCursor(shell.document())
-        cursor.movePosition(QTextCursor.Start)
-
-        # 计算光标位置
-        line_count = 0
-        for _ in range(cursor_position['y']):
-            if not cursor.movePosition(QTextCursor.Down):
-                break
-            line_count += 1
-
-        # 移动到行首并定位到正确列位置
-        cursor.movePosition(QTextCursor.StartOfLine)
-        for _ in range(min(cursor_position['x'],
-                           len(lines[cursor_position['y']]) if cursor_position['y'] < len(lines) else 0)):
-            if not cursor.movePosition(QTextCursor.Right):
-                break
-
-        # 将光标移动到 pyte 的真实位置
-        # shell.moveCursor(QTextCursor.Start)
-        # if shell.find('[[CURSOR]]'):
-        #     cursor = shell.textCursor()
-        #     # 删除标记（选中后直接删除）
-        #     cursor.removeSelectedText()
-        # cursor.insertText('▉')
-        # cursor.insertText('▌')
-        shell.setTextCursor(cursor)
-        shell.ensureCursorVisible()
-
-        # 启用光标闪烁并设置为可见状态
-        shell.setCursorWidth(3)  # 设置光标宽度
-        shell.setFocus()  # 确保获得焦点以显示光标
-
-        # 如果没有这串代码，执行器就会疯狂执行代码
-        ssh_conn.screen.dirty.clear()
-
     def send(self, data):
-        if mux.backend_index:
-            ssh_conn = self.ssh()
-            ssh_conn.write(data)
-            # 如果是方向键，设置刷新标志
-            if data in ['\x1b[D', '\x1b[C', '\x1b[A', '\x1b[B']:
-                ssh_conn.need_refresh_flags = True
+        """发送数据到终端 - 支持 QTermWidget"""
+        # 只要有任何活动的 SSH 连接（后台连接），或者处于连接状态，就允许发送
+        # 注意：对于 QTermWidget，直接发送到组件即可，它会处理
+        current_index = self.ui.ShellTab.currentIndex()
+        terminal = self.get_text_browser_from_tab(current_index)
+
+        if terminal:
+            # QTermWidget 直接发送文本
+            if isinstance(data, bytes):
+                text = data.decode('utf-8', errors='ignore')
+            else:
+                text = str(data)
+            terminal.sendText(text)
 
     def do_killall_ssh(self):
         for tunnel in self.tunnels:
@@ -1211,13 +1267,29 @@ class MainDialog(QMainWindow):
 
     def closeEvent(self, event):
         try:
-            # 停止定时器
-            if hasattr(self, 'terminal_timer'):
-                self.terminal_timer.stop()
+            # 尝试关闭所有终端组件，给它们机会清理进程
+            if hasattr(self.ui, 'ShellTab'):
+                total_tabs = self.ui.ShellTab.count()
+                for tab_index in range(total_tabs):
+                    shell = self.get_text_browser_from_tab(tab_index)
+                    if shell:
+                        try:
+                            shell.close()
+                        except Exception:
+                            pass
 
             # 停止SSH连接器
             if hasattr(self, 'ssh_connector'):
                 self.ssh_connector.stop()
+
+            # 停止上传线程
+            if hasattr(self, 'upload_thread') and isinstance(self.upload_thread,
+                                                             QThread) and self.upload_thread.isRunning():
+                self.upload_thread.quit()
+                if not self.upload_thread.wait(1000):
+                    self.upload_thread.terminate()
+                    self.upload_thread.wait()
+
             """
              窗口关闭事件 当存在通道的时候关闭通道
              不存在时结束多路复用器的监听
@@ -1225,15 +1297,38 @@ class MainDialog(QMainWindow):
             :return: None
             """
             # 清理SSH连接
-            if mux.backend_index:
-                for key, ssh_conn in list(mux.backend_index.items()):
+            # 使用线程异步关闭连接，避免阻塞UI
+            if self.ssh_clients:
+                # 先停止定时器 (在主线程操作，避免跨线程操作UI组件/定时器)
+                connections = list(self.ssh_clients.values())
+                for ssh_conn in connections:
                     if ssh_conn:
-                        # 安全地清理定时器
-                        if hasattr(ssh_conn, 'timer1') and ssh_conn.timer1:
-                            ssh_conn.timer1.stop()
-                        # 关闭连接
-                        ssh_conn.close()
-            mux.stop()
+                        try:
+                            if hasattr(ssh_conn, 'timer1') and ssh_conn.timer1:
+                                ssh_conn.timer1.stop()
+                            # 等待并清理后台刷新线程
+                            if hasattr(ssh_conn, 'refresh_thread') and ssh_conn.refresh_thread.is_alive():
+                                # 注意：不能join()因为这是在主线程，可能会卡死。
+                                # 由于是 daemon 线程，主程序退出时会自动结束，这里主要确保不再有新的操作
+                                pass
+                            if hasattr(ssh_conn, 'process_thread') and ssh_conn.process_thread.is_alive():
+                                pass
+                        except Exception:
+                            pass
+
+                def cleanup_ssh_connections(conns):
+                    try:
+                        for ssh_conn in conns:
+                            if ssh_conn:
+                                try:
+                                    ssh_conn.close()
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        util.logger.error(f"Error during async cleanup: {e}")
+
+                threading.Thread(target=cleanup_ssh_connections, args=(connections,), daemon=True).start()
+                self.ssh_clients.clear()
 
             """
             该函数处理窗口关闭事件，主要功能包括：
@@ -1575,15 +1670,76 @@ class MainDialog(QMainWindow):
 
     # 当前目录列表刷新
     def refreshDirs(self):
+        """刷新目录列表 - 异步优化版"""
+        ssh_conn = self.ssh()
+        if not ssh_conn:
+            return
+
+        # 1. 如果有缓存数据，且与当前目录一致，立即显示
+        # 关键修正：只有当缓存的路径与当前连接的路径一致时才使用缓存，否则说明切换了目录，不应显示旧数据
+        if hasattr(ssh_conn, 'cached_pwd') and hasattr(ssh_conn, 'cached_files'):
+            if ssh_conn.cached_pwd == ssh_conn.pwd:
+                self.on_file_tree_updated(ssh_conn.id, ssh_conn.cached_pwd, ssh_conn.cached_files)
+            else:
+                # 路径不一致，说明是新目录，不使用旧缓存，也不清空（避免闪烁），等待新数据
+                pass
+        else:
+            # 无缓存时也不清空，避免出现空白闪烁，等待后台数据覆盖
+            pass
+
+        # 2. 启动后台线程获取最新数据
+        # 检查线程是否存在并运行
+        if not hasattr(ssh_conn, 'refresh_thread') or not ssh_conn.refresh_thread.is_alive():
+            ssh_conn.refresh_thread = threading.Thread(target=self.refreshDirs_thread, args=(ssh_conn,), daemon=True)
+            ssh_conn.refresh_thread.start()
+
+    def refreshDirs_thread(self, ssh_conn):
+        """后台线程获取目录数据"""
+        try:
+            pwd, files = self.getDirNow(ssh_conn)
+            if pwd:  # 确保获取成功
+                self.update_file_tree_signal.emit(ssh_conn.id, pwd, files[1:])
+        except Exception as e:
+            util.logger.error(f"Error in refreshDirs_thread: {e}")
+
+    @Slot(str, str, list)
+    def on_file_tree_updated(self, conn_id, pwd, files):
+        """处理文件树更新信号"""
+        # 更新缓存
+        if conn_id in self.ssh_clients:
+            ssh_conn = self.ssh_clients[conn_id]
+
+            # 检查数据是否变化
+            is_data_same = False
+            if hasattr(ssh_conn, 'cached_pwd') and hasattr(ssh_conn, 'cached_files'):
+                if ssh_conn.cached_pwd == pwd and ssh_conn.cached_files == files:
+                    is_data_same = True
+
+            ssh_conn.cached_pwd = pwd
+            ssh_conn.cached_files = files
+
+            # 如果当前显示的连接就是此连接，且数据未变，则跳过刷新
+            if self.current_displayed_connection_id == conn_id and is_data_same:
+                return
+
+        # 检查当前显示的标签页是否对应此连接
+        current_index = self.ui.ShellTab.currentIndex()
+        this = self.ui.ShellTab.tabWhatsThis(current_index)
+        if this != conn_id:
+            return
+
+        # 更新当前显示的连接ID
+        self.current_displayed_connection_id = conn_id
+
         try:
             # 阻止UI更新
             self.ui.treeWidget.setUpdatesEnabled(False)
             # 清除现有项
             self.ui.treeWidget.clear()
 
-            ssh_conn = self.ssh()
-            ssh_conn.pwd, files = self.getDirNow()
-            self.dir_tree_now = files[1:]
+            self.dir_tree_now = files
+            ssh_conn = self.ssh_clients[conn_id]
+            ssh_conn.pwd = pwd  # 更新连接对象的 pwd
 
             # 设置表头
             self.ui.treeWidget.setHeaderLabels(
@@ -1591,11 +1747,12 @@ class MainDialog(QMainWindow):
                  self.tr("所有者/组")])
 
             # 更新路径编辑框
-            self.add_line_edit(ssh_conn.pwd)
+            self.add_line_edit(pwd)
 
             # 批量创建项目
             items = []
-            for i, n in enumerate(files[1:]):
+            for i, n in enumerate(files):
+                if len(n) < 9: continue  # 简单校验防止索引越界
                 item = QTreeWidgetItem()
                 item.setText(0, n[8])
                 size_in_bytes = int(n[4].replace(",", ""))
@@ -1619,13 +1776,28 @@ class MainDialog(QMainWindow):
             self.ui.treeWidget.setUpdatesEnabled(True)
 
         except Exception as e:
-            util.logger.error(f"Error refreshing directories: {e}")
+            util.logger.error(f"Error refreshing directories UI: {e}")
+
+    # 旧的同步方法已废弃，保留 getDirNow
 
     # 获取当前目录列表
-    def getDirNow(self):
-        ssh_conn = self.ssh()
-        pwd = self.getData2('cd ' + ssh_conn.pwd.replace("//", "/") + ' && pwd')
-        dir_info = self.getData2(cmd='cd ' + ssh_conn.pwd.replace("//", "/") + ' && ls -al').split('\n')
+    def getDirNow(self, ssh_conn=None):
+        if ssh_conn is None:
+            ssh_conn = self.ssh()
+            if not ssh_conn:
+                return "", []
+            # 使用 getData2 (带信号发射)
+            pwd = self.getData2('cd ' + ssh_conn.pwd.replace("//", "/") + ' && pwd')
+            dir_info = self.getData2(cmd='cd ' + ssh_conn.pwd.replace("//", "/") + ' && ls -al').split('\n')
+        else:
+            # 直接使用 exec (后台线程使用，不通过 getData2 避免跨线程 UI 访问)
+            try:
+                pwd = ssh_conn.exec('cd ' + ssh_conn.pwd.replace("//", "/") + ' && pwd')
+                dir_info = ssh_conn.exec(cmd='cd ' + ssh_conn.pwd.replace("//", "/") + ' && ls -al').split('\n')
+            except Exception as e:
+                util.logger.error(f"Error in getDirNow background fetch: {e}")
+                return "", []
+
         dir_n_info = []
         for d in dir_info:
             d_list = ssh_conn.del_more_space(d)
@@ -1791,8 +1963,8 @@ class MainDialog(QMainWindow):
         if self.isConnected:
             current_index = self.ui.ShellTab.currentIndex()
             this = self.ui.ShellTab.tabWhatsThis(current_index)
-            if this:
-                ssh_conn = mux.backend_index[this]
+            if this and this in self.ssh_clients:
+                ssh_conn = self.ssh_clients[this]
                 system_info_dict = ssh_conn.system_info_dict
                 cpu_use = ssh_conn.cpu_use
                 mem_use = ssh_conn.mem_use
@@ -2471,6 +2643,42 @@ class MainDialog(QMainWindow):
             self.setLightTheme()
         else:
             self.setDarkTheme()
+        # 🔧 发射主题切换信号
+        self.themeChanged.emit(True)
+
+    def on_system_theme_changed(self, is_dark_theme):
+        """系统主题切换时，重新应用终端主题"""
+        try:
+            # 遍历所有终端标签页
+            for index in range(self.ui.ShellTab.count()):
+                terminal = self.get_text_browser_from_tab(index)
+                # 检查是否为 SSHQTermWidget 实例（或具有 setColorScheme 方法）
+                if terminal and hasattr(terminal, 'setColorScheme'):
+                    # 重新应用当前主题，以覆盖系统样式表的影响
+                    if hasattr(terminal, 'current_theme_name'):
+                        terminal.setColorScheme(terminal.current_theme_name)
+                    else:
+                        terminal.setColorScheme("Ubuntu")
+        except Exception as e:
+            print(f"重新应用终端主题失败: {e}")
+
+    def on_ssh_failed(self, error_msg):
+        """SSH连接失败回调"""
+        # 确保 UI 操作在主线程
+        if QThread.currentThread() != QCoreApplication.instance().thread():
+            QMetaObject.invokeMethod(self, "on_ssh_failed", Qt.QueuedConnection, Q_ARG(str, error_msg))
+            return
+
+        self._delete_tab()
+        QMessageBox.warning(self, self.tr("拒绝连接"), self.tr("请检查服务器用户名、密码或密钥是否正确"))
+
+    # 获取当前标签页的backend
+    def ssh(self):
+        current_index = self.ui.ShellTab.currentIndex()
+        this = self.ui.ShellTab.tabWhatsThis(current_index)
+        if this and this in self.ssh_clients:
+            return self.ssh_clients[this]
+        return None
 
 
 class SSHConnector(QObject):
@@ -2497,7 +2705,11 @@ class SSHConnector(QObject):
         """停止工作线程"""
         if self._thread.isRunning():
             self._thread.quit()
-            self._thread.wait()
+            # 增加等待时间，如果还在运行则强制终止
+            # 100ms太短，容易导致 QThread: Destroyed while thread is still running
+            if not self._thread.wait(1000):
+                self._thread.terminate()
+                self._thread.wait()
 
 
 # 权限确认
@@ -2618,7 +2830,12 @@ class AddConfigUi(QDialog):
             self.dial.lineEdit.setEnabled(False)
 
     def alarm(self, alart):
-        self.dial.alarmbox = QMessageBox()
+        # 修复：确保在主线程中创建 QMessageBox
+        if QThread.currentThread() != QCoreApplication.instance().thread():
+            QMetaObject.invokeMethod(self, "alarm", Qt.QueuedConnection, Q_ARG(str, alart))
+            return
+
+        self.dial.alarmbox = QMessageBox(self)  # 指定父对象
         self.dial.alarmbox.setWindowIcon(QIcon("Resources/icon.ico"))
         self.dial.alarmbox.setText(alart)
         self.dial.alarmbox.setWindowTitle(self.tr('错误提示'))
@@ -3224,146 +3441,6 @@ class TerminalHighlighter(QSyntaxHighlighter):
             self.setFormat(0, len(text), fmt)
 
 
-class TerminalWidget(QTextEdit):
-    """
-    自定义终端
-    """
-    termKeyPressed = Signal(str)  # 输入信号
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        # 基本设置
-        self.setFont(QFont("Monospace", 13))
-        self.setUndoRedoEnabled(False)
-        self.setLineWrapMode(QTextEdit.NoWrap)
-        self.setCursorWidth(3)
-        self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(' '))
-        self.setFocusPolicy(Qt.StrongFocus)
-
-        # 硬件加速
-        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
-        self.setAttribute(Qt.WA_PaintOnScreen, False)
-
-        # 可选：自定义光标样式
-        palette = self.palette()
-        palette.setColor(QPalette.Highlight, QColor("#FFFFFF"))  # 设置选中文本的背景色
-        palette.setColor(QPalette.HighlightedText, QColor("#000000"))  # 设置选中文本的颜色
-        self.setPalette(palette)
-
-        # 缓存剪贴板
-        self._clipboard = QApplication.clipboard()
-
-        # 缓存键映射
-        self._key_mappings = {
-            Qt.Key_Return: '\r',
-            Qt.Key_Enter: '\r',
-            Qt.Key_Backspace: '\x7f',
-            Qt.Key_Home: '\x1b[H',
-            Qt.Key_End: '\x1b[F',
-            Qt.Key_PageUp: '\x1b[5~',
-            Qt.Key_PageDown: '\x1b[6~',
-            Qt.Key_Tab: '\t',
-            Qt.Key_Left: '\x1b[D',
-            Qt.Key_Right: '\x1b[C',
-            Qt.Key_Up: '\x1b[A',
-            Qt.Key_Down: '\x1b[B',
-        }
-
-        # 缓存右键菜单样式
-        self._menu_style = """
-            QMenu::item { padding-left: 5px; }
-            QMenu::icon { padding-right: 0px; }
-        """
-
-        # 缓存图标
-        self._action_icons = {
-            'copy': QIcon(":copy.png"),
-            'paste': QIcon(":paste.png"),
-            'clear': QIcon(":clear.png")
-        }
-
-        # pyte 终端仿真
-        self.screen = pyte.Screen(80, 24)
-        self.stream = pyte.Stream(self.screen)
-
-        # 语法高亮
-        self.highlighter = TerminalHighlighter(self.document())
-
-        # 禁止鼠标选中时弹出菜单
-        # self.setContextMenuPolicy(Qt.NoContextMenu)
-
-    def keyPressEvent(self, event):
-        # 处理按键，优先使用映射
-        key = event.key()
-        if key in self._key_mappings:
-            self.termKeyPressed.emit(self._key_mappings[key])
-            event.accept()
-            return
-
-        # 处理普通文本
-        text = event.text()
-        if text:
-            self.termKeyPressed.emit(text)
-            event.accept()
-            return
-
-    # 重写 contextMenuEvent 方法
-    # 自定义右键菜单
-    def contextMenuEvent(self, event: QContextMenuEvent):
-        # 创建一个 QMenu 对象
-        menu = QMenu(self)
-        menu.setStyleSheet(self._menu_style)
-
-        # 添加菜单项
-        actions = [
-            (self._action_icons['copy'], self.tr('复制'), self.copy),
-            (self._action_icons['paste'], self.tr('粘贴'), self.paste),
-            (self._action_icons['clear'], self.tr('清屏'), self.clear_term)
-        ]
-
-        for icon, text, slot in actions:
-            action = QAction(icon, text, self)
-            action.setIconVisibleInMenu(True)
-            action.triggered.connect(slot)
-            menu.addAction(action)
-
-        # 显示菜单
-        menu.exec(event.globalPos())
-
-    # 复制文本
-    def copy(self):
-        # 获取当前选中的文本，并复制到剪贴板
-        selected_text = self.textCursor().selectedText()
-        if selected_text:
-            self._clipboard.setText(selected_text)
-
-    # 粘贴文本
-    def paste(self):
-        # 从剪贴板获取文本，并粘贴到终端
-        # 粘贴使用缓存的剪贴板
-        text = self._clipboard.text()
-        if text:
-            self.termKeyPressed.emit(text)
-
-    def clear_term(self):
-        self.termKeyPressed.emit('clear\n')
-
-    def wheelEvent(self, event):
-        """处理鼠标滚轮事件"""
-        if event.modifiers() & Qt.ControlModifier:
-            # 转发到MainDialog处理
-            parent = self.window()
-            if hasattr(parent, 'zoom_in') and hasattr(parent, 'zoom_out'):
-                if event.angleDelta().y() > 0:
-                    parent.zoom_in()
-                else:
-                    parent.zoom_out()
-                event.accept()
-                return
-        # 默认处理
-        super().wheelEvent(event)
-
-
 def open_data(ssh):
     with open(get_config_path('config.dat'), 'rb') as c:
         conf = pickle.loads(c.read())[ssh]
@@ -3432,16 +3509,532 @@ def get_config_path(file_name):
     return os.path.join(get_config_directory(util.APP_NAME), file_name)
 
 
+# 自定义QTermWidget类，使用内置功能
+class SSHQTermWidget(QTermWidget):
+    """
+    自定义QTermWidget，使用内置的右键菜单和复制粘贴功能
+    """
+
+    def __init__(self, parent=None):
+        # startnow=0，不自动启动shell
+        super().__init__(0, parent)
+
+        # 缓存剪贴板
+        self._clipboard = QApplication.clipboard()
+
+        # 缓存图标
+        self._action_icons = {
+            'copy': QIcon(":copy.png"),
+            'paste': QIcon(":paste.png"),
+            'clear': QIcon(":clear.png")
+        }
+
+        # 记录当前主题
+        self.current_theme_name = "Ubuntu"
+        self.setColorScheme(self.current_theme_name)
+
+        # 设置语法高亮支持
+        self.setup_syntax_highlighting()
+
+    def setup_syntax_highlighting(self):
+        """设置语法高亮支持"""
+
+        # 设置适合代码显示的字体
+        self.setup_code_font()
+
+        # 设置自定义高亮过滤器 (WindTerm 风格)
+        self.setup_custom_filters()
+
+    def setup_custom_filters(self):
+        """设置自定义高亮过滤器"""
+        try:
+
+            display = self.m_impl.m_terminalDisplay
+            filter_chain = display._filter_chain
+
+            # 1. 权限字符串高亮 (drwxr-xr-x)
+            perm_filter = PermissionHighlightFilter()
+            filter_chain.addFilter(perm_filter)
+
+            # 2. 数字高亮 (紫色)
+            # 匹配独立的数字或者文件大小等
+            number_filter = HighlightFilter(r'\b\d+\b', QColor("#bd93f9"), None)
+            filter_chain.addFilter(number_filter)
+
+            # 3. 日期时间高亮 (绿色)
+            # 匹配像 "Nov 29" 或 "11:30" 或 "2025-11-29"
+            date_filter = HighlightFilter(
+                r'\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+\b|\b\d{2}:\d{2}\b|\b\d{4}-\d{2}-\d{2}\b',
+                QColor("#50fa7b"), None
+            )
+            filter_chain.addFilter(date_filter)
+
+            # 4. 压缩包文件名高亮 (天蓝色)
+            # 匹配 .zip, .tar.gz, .rar 等
+            archive_filter = HighlightFilter(
+                r'\b[\w\-\.]+\.(?:zip|tar\.gz|tgz|rar|7z|gz|bz2|xz)\b',
+                QColor("#8be9fd"), None
+            )
+            filter_chain.addFilter(archive_filter)
+
+            print("已加载 WindTerm 风格自定义高亮过滤器")
+
+        except Exception as e:
+            print(f"设置自定义过滤器失败: {e}")
+
+    def setup_code_font(self):
+        """设置适合代码显示的字体"""
+        # 优选等宽字体，支持更好的代码显示
+        fonts_to_try = [
+            "JetBrains Mono",
+            "Fira Code",
+            "Source Code Pro",
+            "Consolas",
+            "Monaco",
+            "Menlo",
+            "DejaVu Sans Mono",
+            "Liberation Mono",
+            "Courier New"
+        ]
+
+        current_size = util.THEME.get('font_size', 14)
+
+        for font_name in fonts_to_try:
+            font = QFont(font_name, current_size)
+            if font.exactMatch():
+                if hasattr(self, 'setTerminalFont'):
+                    self.setTerminalFont(font)
+                    print(f"使用代码字体: {font_name}")
+                    return
+
+        # 使用系统默认等宽字体
+        font = QFont("monospace", current_size)
+        if hasattr(self, 'setTerminalFont'):
+            self.setTerminalFont(font)
+            print("使用系统默认等宽字体")
+
+    def contextMenuEvent(self, event):
+        """优化的右键菜单实现"""
+        try:
+            # 创建右键菜单，不依赖filterActions
+            menu = QMenu(self)
+            self._apply_dark_menu_style(menu)
+
+            # 添加自定义功能
+            self._add_custom_actions(menu)
+
+            # 显示菜单
+            menu.exec(event.globalPos())
+            print("显示了自定义右键菜单")
+
+        except Exception as e:
+            print(f"右键菜单创建失败: {e}")
+
+    def _apply_dark_menu_style(self, menu):
+        """应用暗色主题菜单样式"""
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #2d2d30;
+                color: #d4d4d4;
+                border: 1px solid #3c3c3c;
+                border-radius: 3px;
+                padding: 2px;
+            }
+            QMenu::item {
+                padding: 8px 16px;
+                border-radius: 2px;
+                margin: 1px;
+            }
+            QMenu::item:selected {
+                background-color: #094771;
+                color: white;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #3c3c3c;
+                margin: 4px 0px;
+            }
+            QMenu::icon {
+                margin-right: 8px;
+            }
+        """)
+
+    def _add_custom_actions(self, menu):
+        """添加自定义动作到菜单"""
+
+        # 复制操作 - 使用QTermWidget内置方法
+        copy_action = QAction(self._action_icons['copy'], "复制", self)
+        copy_action.setIconVisibleInMenu(True)
+        copy_action.setShortcut("Ctrl+Shift+C")
+        copy_action.triggered.connect(self.copyClipboard)
+        menu.addAction(copy_action)
+
+        # 粘贴操作 - 使用QTermWidget内置方法
+        paste_action = QAction(self._action_icons['paste'], "粘贴", self)
+        paste_action.setIconVisibleInMenu(True)
+        paste_action.setShortcut("Ctrl+Shift+V")
+        paste_action.triggered.connect(self.pasteClipboard)
+        paste_action.setEnabled(bool(self._clipboard.text()))
+        menu.addAction(paste_action)
+
+        menu.addSeparator()
+
+        # 清屏操作 - 使用QTermWidget内置方法
+        clear_action = QAction(self._action_icons['clear'], "清屏", self)
+        clear_action.setIconVisibleInMenu(True)
+        clear_action.triggered.connect(self.clear)
+        menu.addAction(clear_action)
+
+        # 添加主题相关选项
+        menu.addSeparator()
+
+        # 终端主题切换
+        theme_action = QAction("🎨 切换终端主题", self)
+        theme_action.triggered.connect(self.show_theme_selector)
+        menu.addAction(theme_action)
+
+    def wheelEvent(self, event):
+        """处理鼠标滚轮事件（支持Ctrl+滚轮缩放）"""
+        if event.modifiers() & Qt.ControlModifier:
+            # 转发到主窗口处理字体缩放
+            parent = self.window()
+            if hasattr(parent, 'zoom_in') and hasattr(parent, 'zoom_out'):
+                if event.angleDelta().y() > 0:
+                    parent.zoom_in()
+                else:
+                    parent.zoom_out()
+                event.accept()
+                return
+        # 默认处理（滚动）
+        super().wheelEvent(event)
+
+    def show_theme_selector(self):
+        """显示增强的主题选择器"""
+        try:
+            dialog = TerminalThemeSelector(self)
+            dialog.theme_selected.connect(self.apply_theme)
+            dialog.exec()
+        except Exception as e:
+            print(f"显示主题选择器失败: {e}")
+
+    def get_theme_descriptions(self):
+        """获取主题描述"""
+        return {
+            "Breeze": "现代简洁风格 (推荐)",
+            "DarkPastels": "暗色柔和风格 (推荐)",
+            "Solarized Dark": "专业暗色主题 (推荐)",
+            "Solarized Light": "专业亮色主题 (推荐)",
+            "Linux": "Linux经典风格",
+            "WhiteOnBlack": "经典黑底白字",
+            "BlackOnWhite": "传统白底黑字",
+            "GreenOnBlack": "经典绿色终端",
+            "BlackOnLightYellow": "淡黄底黑字",
+            "DarkPicture": "暗色图片风格",
+            "LightPicture": "亮色图片风格",
+            "Tango": "Tango配色方案",
+            "Vintage": "复古风格",
+            "Monokai": "Monokai经典",
+            "Ubuntu": "Ubuntu默认风格",
+        }
+
+    def setColorScheme(self, name):
+        """重写 setColorScheme 以记录当前主题"""
+        self.current_theme_name = name
+        super().setColorScheme(name)
+
+    def apply_theme(self, theme_name):
+        """应用终端主题"""
+        try:
+            # 应用主题
+            self.setColorScheme(theme_name)
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "错误",
+                f"切换主题失败: {e}"
+            )
+
+    def get_recommended_themes(self):
+        """获取推荐的主题列表"""
+        # 推荐的主题，按优先级排序
+        recommended = [
+            "Breeze",  # KDE现代主题
+            "DarkPastels",  # 暗色柔和主题
+            "Solarized Dark",  # 专业暗色主题
+            "Solarized Light",  # 专业亮色主题
+            "Linux",  # Linux经典主题
+            "WhiteOnBlack",  # 经典黑白主题
+            "BlackOnWhite",  # 白底黑字主题
+            "GreenOnBlack",  # 绿色经典主题
+        ]
+
+        # 获取可用主题
+        try:
+            available = self.availableColorSchemes()
+
+            # 返回推荐主题中可用的
+            recommended_available = []
+            for theme in recommended:
+                if theme in available:
+                    recommended_available.append(theme)
+
+            # 添加其他可用主题
+            for theme in available:
+                if theme not in recommended_available:
+                    recommended_available.append(theme)
+
+            return recommended_available
+
+        except Exception as e:
+            print(f"获取推荐主题失败: {e}")
+            return []
+
+
+class TerminalThemeSelector(QDialog):
+    """增强的终端主题选择器对话框"""
+
+    theme_selected = Signal(str)  # 主题选择信号
+
+    def __init__(self, terminal_widget, parent=None):
+        super().__init__(parent)
+        self.terminal_widget = terminal_widget
+        self.current_theme = ""
+        self.setup_ui()
+        self.load_themes()
+
+    def setup_ui(self):
+        """设置用户界面"""
+        self.setWindowTitle("🎨 终端主题选择器")
+        self.setFixedSize(600, 500)
+        self.setModal(True)
+
+        # 主布局
+        layout = QVBoxLayout(self)
+
+        # 标题
+        title_label = QLabel("🌈 选择您喜欢的终端主题")
+        title_label.setStyleSheet("""
+            QLabel {
+                font-size: 18px;
+                font-weight: bold;
+                padding: 10px;
+                color: #2c3e50;
+                background-color: #ecf0f1;
+                border-radius: 5px;
+                margin-bottom: 10px;
+            }
+        """)
+        layout.addWidget(title_label)
+
+        # 当前主题显示
+        self.current_label = QLabel()
+        self.current_label.setStyleSheet("""
+            QLabel {
+                padding: 8px;
+                background-color: #3498db;
+                color: white;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+        """)
+        layout.addWidget(self.current_label)
+
+        # 主题网格布局
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        scroll_widget = QWidget()
+        self.grid_layout = QGridLayout(scroll_widget)
+        self.grid_layout.setSpacing(10)
+
+        scroll_area.setWidget(scroll_widget)
+        layout.addWidget(scroll_area)
+
+        # 按钮布局
+        button_layout = QHBoxLayout()
+
+        self.preview_btn = QPushButton("🔍 预览")
+        self.preview_btn.setEnabled(False)
+        self.preview_btn.clicked.connect(self.preview_theme)
+
+        self.apply_btn = QPushButton("✅ 应用")
+        self.apply_btn.setEnabled(False)
+        self.apply_btn.clicked.connect(self.apply_theme)
+
+        cancel_btn = QPushButton("❌ 取消")
+        cancel_btn.clicked.connect(self.reject)
+
+        button_layout.addWidget(self.preview_btn)
+        button_layout.addWidget(self.apply_btn)
+        button_layout.addStretch()
+        button_layout.addWidget(cancel_btn)
+
+        layout.addLayout(button_layout)
+
+        # 设置对话框样式
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #f8f9fa;
+            }
+            QPushButton {
+                padding: 8px 16px;
+                border: none;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:enabled {
+                background-color: #3498db;
+                color: white;
+            }
+            QPushButton:disabled {
+                background-color: #bdc3c7;
+                color: #7f8c8d;
+            }
+            QPushButton:hover:enabled {
+                background-color: #2980b9;
+            }
+        """)
+
+    def load_themes(self):
+        """加载可用主题"""
+        try:
+            # 获取当前主题
+            try:
+                self.current_theme = self.terminal_widget.colorScheme()
+            except:
+                self.current_theme = "未知"
+
+            self.current_label.setText(f"📌 当前主题: {self.current_theme}")
+
+            # 获取推荐主题
+            themes = self.terminal_widget.get_recommended_themes()
+            descriptions = self.terminal_widget.get_theme_descriptions()
+
+            # 创建主题按钮
+            row, col = 0, 0
+            max_cols = 3
+
+            self.theme_buttons = {}
+
+            for theme in themes:
+                btn = self.create_theme_button(theme, descriptions.get(theme, ""))
+                self.grid_layout.addWidget(btn, row, col)
+                self.theme_buttons[theme] = btn
+
+                col += 1
+                if col >= max_cols:
+                    col = 0
+                    row += 1
+
+            # 高亮当前主题
+            if self.current_theme in self.theme_buttons:
+                self.highlight_current_theme()
+
+        except Exception as e:
+            print(f"加载主题失败: {e}")
+
+    def create_theme_button(self, theme_name, description):
+        """创建主题按钮"""
+        btn = QPushButton()
+        btn.setFixedSize(180, 80)
+        btn.setCheckable(True)
+
+        # 设置按钮文本
+        text = f"{theme_name}"
+        if description:
+            text += f"\n{description}"
+        btn.setText(text)
+
+        # 设置样式
+        btn.setStyleSheet("""
+            QPushButton {
+                text-align: center;
+                border: 2px solid #bdc3c7;
+                border-radius: 8px;
+                background-color: white;
+                color: #2c3e50;
+                font-size: 11px;
+                padding: 5px;
+            }
+            QPushButton:hover {
+                border-color: #3498db;
+                background-color: #ecf0f1;
+            }
+            QPushButton:checked {
+                border-color: #e74c3c;
+                background-color: #fdf2f2;
+                color: #c0392b;
+                font-weight: bold;
+            }
+        """)
+
+        # 连接信号
+        btn.clicked.connect(lambda checked, name=theme_name: self.select_theme(name))
+
+        return btn
+
+    def highlight_current_theme(self):
+        """高亮显示当前主题"""
+        if self.current_theme in self.theme_buttons:
+            btn = self.theme_buttons[self.current_theme]
+            btn.setStyleSheet(btn.styleSheet() + """
+                QPushButton {
+                    border-color: #27ae60;
+                    background-color: #d5f4e6;
+                    color: #27ae60;
+                }
+            """)
+
+    def select_theme(self, theme_name):
+        """选择主题"""
+        # 取消其他按钮的选中状态
+        for btn in self.theme_buttons.values():
+            btn.setChecked(False)
+
+        # 选中当前按钮
+        if theme_name in self.theme_buttons:
+            self.theme_buttons[theme_name].setChecked(True)
+
+        self.selected_theme = theme_name
+        self.preview_btn.setEnabled(True)
+        self.apply_btn.setEnabled(True)
+
+    def preview_theme(self):
+        """预览主题"""
+        if hasattr(self, 'selected_theme'):
+            # 临时应用主题
+            original_theme = self.current_theme
+            self.terminal_widget.setColorScheme(self.selected_theme)
+
+            # 显示预览信息
+            QMessageBox.information(
+                self,
+                "🔍 主题预览",
+                f"正在预览主题: {self.selected_theme}\n\n"
+                f"如果满意，请点击'应用'按钮确认。\n"
+                f"否则主题将恢复为: {original_theme}"
+            )
+
+    def apply_theme(self):
+        """应用选中的主题"""
+        if hasattr(self, 'selected_theme'):
+            self.theme_selected.emit(self.selected_theme)
+            self.accept()
+
+
 if __name__ == '__main__':
     print("PySide6 version:", PySide6.__version__)
+
     app = QApplication(sys.argv)
 
-    translator = QTranslator()
-    # 加载编译后的 .qm 文件
-    translator.load("app_zh_CN.qm")
-
-    # 安装翻译
-    app.installTranslator(translator)
+    # translator = QTranslator()
+    # # 加载编译后的 .qm 文件
+    # translator.load("app_zh_CN.qm")
+    #
+    # # 安装翻译
+    # app.installTranslator(translator)
 
     window = MainDialog(app)
 

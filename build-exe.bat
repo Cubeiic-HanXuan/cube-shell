@@ -26,7 +26,6 @@ nuitka --windows-console-mode=disable --windows-icon-from-ico=icons/logo.ico ^
   --include-module=deepdiff ^
   --include-module=pygments ^
   --include-module=paramiko ^
-  --include-module=pyte ^
   --include-module=yaml ^
   --include-module=pygments.formatters.html ^
   --include-module=pygments.lexers.shell ^

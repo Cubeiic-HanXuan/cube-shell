@@ -257,15 +257,37 @@ def parse_disk_data(output: str) -> List[Dict[str, Any]]:
         parts = re.split(r'\s+', line.strip())
         if len(parts) >= 6:
             try:
+                filesystem = parts[0]
+                
+                # 过滤伪文件系统 (tmpfs, devtmpfs, overlay, squashfs, loop等)
+                # 通常物理磁盘以 /dev/ 开头，或者看起来像正常的挂载点
+                # 简单规则：排除已知不需要的类型
+                if filesystem == 'tmpfs' or filesystem == 'devtmpfs' or \
+                   filesystem == 'overlay' or filesystem == 'squashfs' or \
+                   'loop' in filesystem or filesystem == 'none' or filesystem == 'udev':
+                    continue
+                
+                # 也可以只保留以 /dev/ 开头的，但这可能会漏掉一些网络挂载(nfs, smb)
+                # 如果只想监控物理磁盘，可以加上: if not filesystem.startswith('/dev/'): continue
+                # 但为了全面性，我们主要使用黑名单过滤
+
                 # 从百分比中提取数字
                 usage_str = parts[4].rstrip('%')
                 usage_percent = float(usage_str)
+                
+                # 解析大小为MB，方便后续计算总和
+                size_mb = parse_size_value(parts[1])
+                used_mb = parse_size_value(parts[2])
+                avail_mb = parse_size_value(parts[3])
 
                 partition = {
                     'filesystem': parts[0],
                     'size': parts[1],
+                    'size_mb': size_mb,
                     'used': parts[2],
+                    'used_mb': used_mb,
                     'available': parts[3],
+                    'available_mb': avail_mb,
                     'usage_percent': usage_percent,
                     'mount_point': parts[5]
                 }

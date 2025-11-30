@@ -19,11 +19,10 @@ nuitka \
   --include-module=deepdiff \
   --include-module=pygments \
   --include-module=paramiko \
-  --include-module=pyte \
   --include-module=yaml \
   --include-module=pygments.formatters.html \
   --include-module=pygments.lexers.shell \
-  --include-package=core,function,style,ui,icons \
+  --include-package=qtermwidget,core,function,style,ui,icons \
   --include-data-dir=conf=conf \
   --include-data-dir=frp=frp \
   cube-shell.py

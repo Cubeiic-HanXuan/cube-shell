@@ -4,17 +4,16 @@ from collections import deque
 from typing import Dict, Any
 
 import paramiko
+import uuid
 
-from core.pty.backend import BaseBackend
-from core.pty.mux import mux
 from function import parse_data, util
 
 
-class SshClient(BaseBackend):
+class SshClient(object):
 
     def __init__(self, host, port, username, password, key_type, key_file, on_connect_success=None,
                  callback_param=None):
-        super(SshClient, self).__init__()
+        self.id = str(uuid.uuid4())
         self.host, self.port, self.username, self.password, self.key_type, self.key_file = host, port, username, \
             password, key_type, key_file
 
@@ -161,7 +160,6 @@ class SshClient(BaseBackend):
                 self.channel.get_pty(term="xterm-256color", width=100, height=200)
                 self.channel.invoke_shell()
                 self.isConnected = True
-                mux.add_backend(self)
             except Exception as e:
                 util.logger.error(f"通道初始化失败: {str(e)}")
                 raise
@@ -192,15 +190,32 @@ class SshClient(BaseBackend):
 
     def safe_execute(self, func, *args, **kwargs):
         """执行操作的通用安全包装"""
+        # 如果连接已主动关闭，直接返回
+        if not self.active:
+            return None
+
         try:
             if not self.is_connected():
-                self._trigger_reconnect()
+                if self.active:
+                    self._trigger_reconnect()
+                else:
+                    return None
             return func(*args, **kwargs)
         except (paramiko.SSHException, EOFError) as e:
+            if not self.active:
+                return None
             util.logger.error(f"连接异常: {str(e)}")
             self._trigger_reconnect()
             return self.safe_execute(func, *args, **kwargs)
+        except AttributeError as e:
+            # 处理断开连接时的并发竞争条件
+            if not self.active and ("open_session" in str(e) or "NoneType" in str(e)):
+                return None
+            util.logger.error(f"操作失败: {str(e)}")
+            raise
         except Exception as e:
+            if not self.active:
+                return None
             util.logger.error(f"操作失败: {str(e)}")
             raise
 
@@ -242,16 +257,16 @@ class SshClient(BaseBackend):
        """
         self.channel.send(data)
 
-    def read(self):
-        """
-        从 SSH 通道读取数据，并写入到屏幕。
-        """
-        try:
-            if self.channel.recv_ready():
-                output = self.channel.recv(4096)
-                self.write_to_screen(output)
-        except Exception as e:
-            util.logger.error(f"Error while reading from channel: {e}")
+    # def read(self):
+    #     """
+    #     从 SSH 通道读取数据，并写入到屏幕。
+    #     """
+    #     try:
+    #         if self.channel.recv_ready():
+    #             output = self.channel.recv(4096)
+    #             #self.write_to_screen(output)
+    #     except Exception as e:
+    #         util.logger.error(f"Error while reading from channel: {e}")
 
     def close(self):
         """
@@ -262,12 +277,11 @@ class SshClient(BaseBackend):
             self.active = False
             if self.channel:
                 self.conn.close()
-                mux.remove_and_close(self)
                 self.close_sig = 0
         except Exception as e:
             util.logger.debug(f"关闭连接时出错: {str(e)}")
-        finally:
-            super().close()
+        # finally:
+        #     super().close()
 
     def _exec(self, cmd, pty):
         """实际的命令执行方法"""
@@ -339,6 +353,14 @@ class SshClient(BaseBackend):
         try:
             # 获取第一次CPU状态
             output1 = self.exec(cmd="cat /proc/stat")
+            if not output1:
+                return {
+                    'total_usage': 0,
+                    'user_usage': 0,
+                    'system_usage': 0,
+                    'iowait': 0,
+                    'cores_usage': []
+                }
             cpu_data1 = parse_data.parse_cpu_data(output1)
 
             # 等待足够的时间间隔
@@ -346,6 +368,14 @@ class SshClient(BaseBackend):
 
             # 获取第二次CPU状态
             output2 = self.exec(cmd="cat /proc/stat")
+            if not output2:
+                return {
+                    'total_usage': 0,
+                    'user_usage': 0,
+                    'system_usage': 0,
+                    'iowait': 0,
+                    'cores_usage': []
+                }
             cpu_data2 = parse_data.parse_cpu_data(output2)
 
             # 计算CPU使用率
@@ -374,6 +404,16 @@ class SshClient(BaseBackend):
         """
         try:
             output = self.exec(cmd="free -m")
+            if not output:
+                return {
+                    'total': 0,
+                    'used': 0,
+                    'free': 0,
+                    'shared': 0,
+                    'cache': 0,
+                    'available': 0,
+                    'usage_percent': 0
+                }
 
             memory_stats = parse_data.parse_memory_data(output)
 
@@ -403,6 +443,13 @@ class SshClient(BaseBackend):
         try:
             # 获取磁盘空间使用情况
             df_output = self.exec(cmd="df -h")
+            if not df_output:
+                return {
+                    'partitions': [],
+                    'io': {},
+                    'root_usage': 0,
+                    'total_usage': 0
+                }
 
             # 获取磁盘IO性能数据 (如果有iostat命令)
             try:
@@ -420,14 +467,26 @@ class SshClient(BaseBackend):
             if has_io_data:
                 io_stats = parse_data.parse_io_data(io_output)
 
-            # 计算根分区使用率，并应用平滑处理
+            # 计算所有分区的总使用率
+            total_size = sum(p.get('size_mb', 0) for p in partitions)
+            total_used = sum(p.get('used_mb', 0) for p in partitions)
+            
+            if total_size > 0:
+                total_usage_percent = (total_used / total_size) * 100
+            else:
+                total_usage_percent = 0
+            
+            # 使用总使用率进行平滑处理
+            self._smooth_value('disk', total_usage_percent)
+            
+            # 获取根分区使用率（仅供参考）
             root_usage = next((p['usage_percent'] for p in partitions if p['mount_point'] == '/'), 0)
-            self._smooth_value('disk', root_usage)
 
             return {
                 'partitions': partitions,
                 'io': io_stats,
-                'root_usage': root_usage
+                'root_usage': root_usage,
+                'total_usage': total_usage_percent
             }
         except Exception as e:
             util.logger.error(f"获取磁盘统计失败: {str(e)}")
@@ -447,6 +506,12 @@ class SshClient(BaseBackend):
         try:
             # 获取第一次网络状态
             output1 = self.exec(cmd="cat /proc/net/dev")
+            if not output1:
+                return {
+                    'interfaces': [],
+                    'total_rx_speed': 0,
+                    'total_tx_speed': 0
+                }
             net_data1 = parse_data.parse_network_data(output1)
             timestamp1 = time.time()
 
@@ -455,6 +520,12 @@ class SshClient(BaseBackend):
 
             # 获取第二次网络状态
             output2 = self.exec(cmd="cat /proc/net/dev")
+            if not output2:
+                return {
+                    'interfaces': [],
+                    'total_rx_speed': 0,
+                    'total_tx_speed': 0
+                }
             net_data2 = parse_data.parse_network_data(output2)
             timestamp2 = time.time()
 
@@ -516,11 +587,11 @@ class SshClient(BaseBackend):
 
             # 更新相应属性
             if data_type == 'cpu':
-                self.cpu_usage = smoothed
+                self.cpu_use = smoothed
             elif data_type == 'memory':
-                self.mem_usage = smoothed
+                self.mem_use = smoothed
             elif data_type == 'disk':
-                self.disk_usage = smoothed
+                self.disk_use = smoothed
 
             return smoothed
 
@@ -624,7 +695,8 @@ class SshClient(BaseBackend):
                 util.logger.error(f"EOFError: {e}")
                 time.sleep(5)
             except Exception as e:
-                util.logger.error(f"监控异常: {e}")
+                if self.active:
+                    util.logger.error(f"监控异常: {e}")
                 time.sleep(5)
 
         util.logger.info("系统监控已停止")

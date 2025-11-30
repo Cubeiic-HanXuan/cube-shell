@@ -1,9 +1,8 @@
-PySide6~=6.8.0.2
-paramiko~=3.5.0
-setuptools~=70.0.0
-Pygments~=2.18.0
-pyte~=0.8.2
-deepdiff~=8.0.1
+PySide6~=6.10.1
+paramiko~=4.0.0
+setuptools~=80.9.0
+Pygments~=2.19.2
+deepdiff~=8.6.1
 pyqtdarktheme~=2.1.0
 toml~=0.10.2
 appdirs~=1.4.4
