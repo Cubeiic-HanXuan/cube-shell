@@ -12,12 +12,12 @@ pip install nuitka
 REM Step 2: Build the application
 echo 2: Building the application...
 nuitka --windows-console-mode=disable --windows-icon-from-ico=icons/logo.ico ^
-  --nofollow-imports ^
+  --follow-imports ^
   --remove-output ^
-  --jobs=0 ^
+  --jobs=4 ^
   --python-flag=no_site ^
   --lto=yes ^
-  --clang ^
+  --mingw64 ^
   --output-dir=deploy ^
   --standalone ^
   --enable-plugin=pyside6 ^

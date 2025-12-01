@@ -6,18 +6,31 @@
 解决PySide6不支持setChildProcessModifier的问题
 """
 
-import errno
 import os
-import pty
-import signal
 import subprocess
-import termios
+import signal
 from enum import IntFlag
+import sys
+import errno
+import threading
 
-from PySide6.QtCore import QProcess, QSocketNotifier, Signal, QSize, Slot
+# Platform detection
+IS_WINDOWS = sys.platform == 'win32'
 
-from qtermwidget.kprocess import KProcess
-from qtermwidget.kpty_device import KPtyDevice
+if IS_WINDOWS:
+    try:
+        from winpty import PtyProcess as WinPtyProcess
+    except ImportError:
+        print("警告: 未找到winpty模块，Windows终端功能将不可用。请安装pywinpty: pip install pywinpty")
+        WinPtyProcess = None
+else:
+    import pty
+    import termios
+    import fcntl
+
+from PySide6.QtCore import QProcess, QIODevice, QObject, QSocketNotifier, Signal, QSize, QDir, Slot
+from .kprocess import KProcess
+from .kpty_device import KPtyDevice
 
 
 class PtyChannelFlag(IntFlag):
@@ -37,15 +50,16 @@ class PtyChannelFlag(IntFlag):
 class KPtyProcess(KProcess):
     """
     这个类通过PTY（伪TTY）支持扩展了KProcess.
-    
+
     严格对应C++: class KPtyProcess : public KProcess
-    
+
     注意：由于PySide6不支持setChildProcessModifier，本实现使用Python的pty模块
     """
 
     # 添加所需的信号
     receivedData = Signal(bytes, int)
-    sendData = Signal(bytes)  # 添加sendData信号
+
+    # sendData = Signal(bytes)  # 改为Slot实现
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -62,26 +76,72 @@ class KPtyProcess(KProcess):
         self._childPid = -1
         self._notifier = None
 
+        # Windows相关
+        self._winpty_process = None
+        self._read_thread = None
+        self._read_running = False
+
         # 关键修复：严格对应C++构造函数中的pty->open()调用
         # 对应C++: d->pty->open() 或 d->pty->open(ptyMasterFd)
-        if not self._pty.open():
-            print("KPtyDevice打开失败")
-            # 对应C++的错误处理，但不抛出异常，保持与C++行为一致
+        if not IS_WINDOWS:
+            if not self._pty.open():
+                print("KPtyDevice打开失败")
+                # 对应C++的错误处理，但不抛出异常，保持与C++行为一致
 
         # 初始化PTY通道
         self.setPtyChannels(PtyChannelFlag.AllChannels)
 
+    @Slot(bytes)
+    def sendData(self, data):
+        """发送数据到PTY - 这个方法作为slot接收emulation的sendData信号"""
+        self.write(data)
+
+    def write(self, data):
+        """写入数据到进程"""
+        if IS_WINDOWS:
+            if self._winpty_process:
+                try:
+                    # winpty通常期望字符串输入
+                    if isinstance(data, bytes):
+                        data = data.decode('utf-8', errors='ignore')
+                    return self._winpty_process.write(data)
+                except Exception as e:
+                    print(f"Windows PTY写入失败: {e}")
+                    return -1
+            return 0
+
+        # Linux/macOS
+        if self._masterFd >= 0:
+            try:
+                if isinstance(data, str):
+                    data = data.encode('utf-8')
+                return os.write(self._masterFd, data)
+            except OSError as e:
+                print(f"PTY写入失败: {e}")
+                return -1
+
+        # Fallback to QProcess.write (likely won't work if not started via QProcess)
+        return super().write(data)
+
+    def setWinSizeWindows(self, lines, cols):
+        """Windows平台设置窗口大小"""
+        if IS_WINDOWS and self._winpty_process:
+            try:
+                self._winpty_process.set_winsize(lines, cols)
+            except Exception as e:
+                print(f"⚠️ 设置Windows PTY窗口大小失败: {e}")
+
     def pty(self):
         """
         返回PTY设备对象 - 严格对应C++: KPtyDevice *KPtyProcess::pty() const
-        
+
         对应C++实现：
         KPtyDevice *KPtyProcess::pty() const
         {
             Q_D(const KPtyProcess);
             return d->pty.get();
         }
-        
+
         Returns:
             KPtyDevice对象，如果未初始化则返回None
         """
@@ -103,24 +163,24 @@ class KPtyProcess(KProcess):
     def start(self, program=None, arguments=None, environment=None, window_id=0, add_to_utmp=False):
         """
         启动进程 - 严格对应C++版本的start方法签名
-        
-        对应C++: int start(const QString &program, const QStringList &arguments, 
+
+        对应C++: int start(const QString &program, const QStringList &arguments,
                            const QStringList &environment, int windowId, bool addToUtmp)
-        
+
         Args:
             program: 要执行的程序路径
             arguments: 命令行参数列表
             environment: 环境变量列表（格式为 ["KEY=value", ...]）
             window_id: 窗口ID（X11相关，在Python中暂不使用）
             add_to_utmp: 是否添加到utmp记录
-            
+
         Returns:
             int: 成功返回0，失败返回负数
         """
 
         # 如果已经在运行，先停止
         if self.state() != QProcess.ProcessState.NotRunning:
-            print("进程已在运行，先停止")
+            print("⚠️ 进程已在运行，先停止")
             self.kill()
 
         # 获取程序和参数
@@ -138,17 +198,21 @@ class KPtyProcess(KProcess):
                 program = None
 
         if not program:
-            print("没有指定要运行的程序")
+            print("❌ 没有指定要运行的程序")
             self.setProcessState(QProcess.ProcessState.NotRunning)
             self.errorOccurred.emit(QProcess.ProcessError.FailedToStart)
             return
 
-        print(f"使用修复的KPtyProcess启动: {program} {arguments}")
+        print(f"🚀 使用修复的KPtyProcess启动: {program} {arguments}")
+
+        # Windows平台特殊处理
+        if IS_WINDOWS:
+            return self._start_windows(program, arguments, environment)
 
         try:
             # 创建PTY
             self._masterFd, self._slaveFd = pty.openpty()
-            print(f"PTY创建成功: master={self._masterFd}, slave={self._slaveFd}")
+            print(f"✅ PTY创建成功: master={self._masterFd}, slave={self._slaveFd}")
 
             # 设置PTY属性
             self._setup_pty_attributes()
@@ -215,7 +279,7 @@ class KPtyProcess(KProcess):
             for problematic_var in ['TMUX', 'TMUX_PANE', 'TERM_SESSION_ID']:
                 env_dict.pop(problematic_var, None)
 
-            print(f"设置环境变量: TERM={env_dict.get('TERM')}, PS1={env_dict.get('PS1')}")
+            print(f"🌍 设置环境变量: TERM={env_dict.get('TERM')}, PS1={env_dict.get('PS1')}")
 
             # 准备命令行
             cmd = [program] + (arguments if arguments else [])
@@ -234,11 +298,11 @@ class KPtyProcess(KProcess):
             self.setProcessState(QProcess.ProcessState.Running)
             self.started.emit()
 
-            print(f"进程启动成功，PID: {self._childPid}")
+            print(f"✅ 进程启动成功，PID: {self._childPid}")
             return 0  # 成功返回0，对应C++版本
 
         except Exception as e:
-            print(f"启动进程失败: {e}")
+            print(f"❌ 启动进程失败: {e}")
             self._cleanup()
             self.setProcessState(QProcess.ProcessState.NotRunning)
             self.errorOccurred.emit(QProcess.ProcessError.FailedToStart)
@@ -275,15 +339,15 @@ class KPtyProcess(KProcess):
             # 这与C++版本一致，C++版本没有修改c_lflag
 
             termios.tcsetattr(self._slaveFd, termios.TCSANOW, attrs)
-            print("PTY属性设置成功（raw模式）")
+            print("✅ PTY属性设置成功（raw模式）")
 
         except Exception as e:
-            print(f"设置PTY属性失败: {e}")
+            print(f"⚠️ 设置PTY属性失败: {e}")
 
     def _start_child_process(self, program, arguments, env_dict):
         """
         启动子进程 - 严格对应C++的setChildProcessModifier逻辑
-        
+
         对应C++: setChildProcessModifier([d]() {
             d->pty->setCTty();
             if (d->ptyChannels & StdinChannel) {
@@ -304,7 +368,7 @@ class KPtyProcess(KProcess):
         def child_setup():
             """
             子进程设置函数 - 强化版本，确保SSH会话正确工作
-            
+
             关键修复：SSH会话需要正确的控制终端和会话设置
             """
             try:
@@ -325,7 +389,7 @@ class KPtyProcess(KProcess):
                 # 第三步：重定向标准输入输出 - 确保SSH数据流正确
                 # 必须按顺序重定向，确保所有通道都连接到PTY
                 os.dup2(self._slaveFd, 0)  # stdin
-                os.dup2(self._slaveFd, 1)  # stdout 
+                os.dup2(self._slaveFd, 1)  # stdout
                 os.dup2(self._slaveFd, 2)  # stderr
 
                 # 第四步：关闭不需要的文件描述符
@@ -402,19 +466,19 @@ class KPtyProcess(KProcess):
             else:
                 # 父进程
                 self._childPid = pid
-                print(f"直接fork子进程成功，PID: {self._childPid}")
+                print(f"✅ 直接fork子进程成功，PID: {self._childPid}")
 
                 # 父进程关闭slave端，只保留master端
                 if self._slaveFd >= 0:
                     os.close(self._slaveFd)
                     self._slaveFd = -1
-                    print("父进程已关闭slave fd，只保留master fd用于通信")
+                    print("🔒 父进程已关闭slave fd，只保留master fd用于通信")
 
                 # 设置master fd为非阻塞模式
                 import fcntl
                 flags = fcntl.fcntl(self._masterFd, fcntl.F_GETFL)
                 fcntl.fcntl(self._masterFd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-                print("设置master fd为非阻塞模式")
+                print("🔧 设置master fd为非阻塞模式")
 
         except Exception as e:
             raise Exception(f"启动子进程失败: {e}")
@@ -422,15 +486,15 @@ class KPtyProcess(KProcess):
     def _setup_notifier(self):
         """
         设置读取通知器 (QSocketNotifier)
-        
+
         这个方法在PTY主设备文件描述符(masterFd)上创建一个QSocketNotifier。
-        
+
         作用机制：
         1. 监控 _masterFd 的可读事件 (QSocketNotifier.Type.Read)。
         2. 当PTY有数据可读时（即子进程向stdout/stderr输出了内容），
            底层Qt事件循环会触发 notifier 的 activated 信号。
         3. 信号连接到 self._read_from_pty 方法，从而实现异步、非阻塞的数据读取。
-        
+
         这是实现终端异步I/O的核心机制，避免了使用阻塞的 read() 调用卡死GUI线程。
         """
         if self._notifier:
@@ -478,7 +542,7 @@ class KPtyProcess(KProcess):
             self._output_buffer += data
 
         except Exception as e:
-            print(f"PTY读取异常: {e}")
+            print(f"❌ PTY读取异常: {e}")
             # 捕获所有未预期的异常，防止崩溃
             pass
 
@@ -489,9 +553,10 @@ class KPtyProcess(KProcess):
                 # 尝试回收进程
                 pid, status = os.waitpid(self._childPid, os.WNOHANG)
                 if pid > 0:
+                    # print(f"✅ 进程 {pid} 已回收，状态: {status}")
                     self._childPid = -1
                     exit_code = os.waitstatus_to_exitcode(status) if hasattr(os, 'waitstatus_to_exitcode') else (
-                                status >> 8)
+                            status >> 8)
                     self.finished.emit(exit_code)
                     self.setProcessState(QProcess.ProcessState.NotRunning)
                     self._cleanup()
@@ -512,6 +577,16 @@ class KPtyProcess(KProcess):
 
     def kill(self):
         """终止进程"""
+        if IS_WINDOWS and self._winpty_process:
+            self._read_running = False
+            try:
+                self._winpty_process.terminate()
+                self._winpty_process = None
+            except:
+                pass
+            self._cleanup()
+            return
+
         if self._childPid > 0:
             try:
                 os.kill(self._childPid, signal.SIGKILL)
@@ -527,6 +602,10 @@ class KPtyProcess(KProcess):
 
     def terminate(self):
         """温和地终止进程"""
+        if IS_WINDOWS and self._winpty_process:
+            self.kill()
+            return
+
         if self._childPid > 0:
             try:
                 os.kill(self._childPid, signal.SIGTERM)
@@ -537,17 +616,7 @@ class KPtyProcess(KProcess):
             except Exception:
                 pass
 
-    def write(self, data):
-        """写入数据到进程"""
-        if self._masterFd >= 0:
-            try:
-                if isinstance(data, str):
-                    data = data.encode('utf-8')
-                written = os.write(self._masterFd, data)
-                return written
-            except:
-                return -1
-        return 0
+    # write方法已移至上方
 
     def readAllStandardOutput(self):
         """读取所有标准输出"""
@@ -565,11 +634,7 @@ class KPtyProcess(KProcess):
         """设置流控制（暂时不实现）"""
         pass
 
-    @Slot(bytes)
-    def sendData(self, data):
-        """发送数据到PTY - 这个方法作为slot接收emulation的sendData信号"""
-        result = self.write(data)
-        return result
+    # sendData方法已移至上方
 
     def openPty(self):
         """打开PTY"""
@@ -578,6 +643,10 @@ class KPtyProcess(KProcess):
 
     def setWinSize(self, lines, cols):
         """设置窗口大小 - 关键：SSH连接需要正确的终端尺寸"""
+        if IS_WINDOWS:
+            self.setWinSizeWindows(lines, cols)
+            return
+
         if self._masterFd >= 0:
             try:
                 import struct
@@ -592,12 +661,12 @@ class KPtyProcess(KProcess):
                 if self._childPid > 0:
                     try:
                         os.kill(self._childPid, signal.SIGWINCH)
-                        print("已发送SIGWINCH信号通知进程窗口尺寸变化")
+                        print("📡 已发送SIGWINCH信号通知进程窗口尺寸变化")
                     except:
                         pass
 
             except Exception as e:
-                print(f"设置PTY窗口大小失败: {e}")
+                print(f"⚠️ 设置PTY窗口大小失败: {e}")
 
         # 同时更新pty对象（如果存在）
         if self._pty:
@@ -613,14 +682,14 @@ class KPtyProcess(KProcess):
     def setUseUtmp(self, use_utmp):
         """
         设置是否使用utmp - 严格对应C++: void KPtyProcess::setUseUtmp(bool value)
-        
+
         对应C++实现：
         void KPtyProcess::setUseUtmp(bool value)
         {
             Q_D(KPtyProcess);
             d->addUtmp = value;
         }
-        
+
         Args:
             use_utmp: 是否使用utmp
         """
@@ -630,14 +699,14 @@ class KPtyProcess(KProcess):
     def isUseUtmp(self):
         """
         返回是否使用utmp - 严格对应C++: bool KPtyProcess::isUseUtmp() const
-        
+
         对应C++实现：
         bool KPtyProcess::isUseUtmp() const
         {
             Q_D(const KPtyProcess);
             return d->addUtmp;
         }
-        
+
         Returns:
             是否使用utmp
         """
@@ -703,7 +772,7 @@ class KPtyProcess(KProcess):
                 os.close(self._masterFd)
             except:
                 pass
-            self._masterFd = -1
+        self._masterFd = -1
 
         if hasattr(self, '_slaveFd') and self._slaveFd >= 0:
             try:
@@ -727,7 +796,7 @@ class KPtyProcess(KProcess):
     def __del__(self):
         """
         析构函数
-        
+
         覆盖QProcess的析构行为，避免在Python GC时触发Qt的"Destroyed while process is still running"警告。
         """
         # 1. 仅做纯Python资源清理
@@ -752,3 +821,91 @@ class KPtyProcess(KProcess):
         # QProcess的C++析构函数会自动被调用（由PySide/Qt绑定层管理）
         # 我们不需要（也不应该）在Python的__del__中手动干预Qt对象的销毁流程
         pass
+
+    def _start_windows(self, program, arguments, environment):
+        """Windows平台启动进程 - 使用winpty"""
+        if not self._winpty_process:
+            try:
+                from winpty import PtyProcess as WinPtyProcess
+            except ImportError:
+                print("未安装winpty")
+                self.errorOccurred.emit(QProcess.ProcessError.FailedToStart)
+                return -1
+
+        try:
+            # 准备环境变量
+            env_dict = os.environ.copy()
+            if environment:
+                for env_var in environment:
+                    if '=' in env_var:
+                        key, value = env_var.split('=', 1)
+                        env_dict[key] = value
+
+            # 设置TERM
+            env_dict['TERM'] = 'xterm-256color'
+
+            # 准备命令行
+            cmd_args = [program] + (arguments if arguments else [])
+
+            self._winpty_process = WinPtyProcess.spawn(
+                cmd_args,
+                env=env_dict,
+                dimensions=(24, 80)  # 初始大小
+            )
+
+            self._childPid = 12345  # 假PID
+
+            self.setProcessState(QProcess.ProcessState.Running)
+            self.started.emit()
+
+            # 启动读取线程
+            self._read_running = True
+            self._read_thread = threading.Thread(target=self._read_from_winpty)
+            self._read_thread.daemon = True
+            self._read_thread.start()
+
+            return 0
+
+        except Exception as e:
+            self.setProcessState(QProcess.ProcessState.NotRunning)
+            self.errorOccurred.emit(QProcess.ProcessError.FailedToStart)
+            return -1
+
+    def _read_from_winpty(self):
+        """Windows读取线程"""
+        while self._read_running and self._winpty_process and self._winpty_process.isalive():
+            try:
+                # 读取数据
+                data = self._winpty_process.read(4096)
+                if data:
+                    # 确保是bytes
+                    if isinstance(data, str):
+                        data = data.encode('utf-8')
+
+                    # 发射信号
+                    self.readyReadStandardOutput.emit()
+                    self.receivedData.emit(data, len(data))
+
+                    # 缓冲数据
+                    if not hasattr(self, '_output_buffer'):
+                        self._output_buffer = b''
+                    self._output_buffer += data
+            except EOFError:
+                break
+            except Exception as e:
+                break
+
+        # 退出循环
+        self._handle_process_exit_windows()
+
+    def _handle_process_exit_windows(self):
+        """Windows进程退出处理"""
+        if self._read_running:
+            self._read_running = False
+            self.setProcessState(QProcess.ProcessState.NotRunning)
+            try:
+                # 尝试符合QProcess信号签名
+                self.finished.emit(0, QProcess.ExitStatus.NormalExit)
+            except:
+                self.finished.emit(0)
+            self._cleanup()
