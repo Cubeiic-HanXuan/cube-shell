@@ -21,7 +21,8 @@ from PySide6.QtCore import QTimer, Signal, Qt, QPoint, QRect, QEvent, QObject, S
     QSize, QThread, QMetaObject, Q_ARG, QProcessEnvironment
 from PySide6.QtGui import QColor
 from PySide6.QtGui import QIcon, QAction, QCursor, QCloseEvent, QInputMethodEvent, QPixmap, \
-    QDragEnterEvent, QDropEvent, QFont, QDesktopServices, QGuiApplication, QSyntaxHighlighter, QTextCharFormat
+    QDragEnterEvent, QDropEvent, QFont, QFontDatabase, QDesktopServices, QGuiApplication, QSyntaxHighlighter, \
+    QTextCharFormat
 from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QDialog, QMessageBox, QTreeWidgetItem, \
     QInputDialog, QFileDialog, QTreeWidget, QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QTableWidgetItem, \
     QHeaderView, QStyle, QTabBar, QTextBrowser, QLineEdit, QScrollArea, QGridLayout, QProgressBar
@@ -99,8 +100,8 @@ class MainDialog(QMainWindow):
         self.setWindowIcon(QIcon(":logo.ico"))
 
         # 连接异步信号
-        self.update_file_tree_signal.connect(self.on_file_tree_updated)
-        self.update_process_list_signal.connect(self.on_process_list_updated)
+        self.update_file_tree_signal.connect(self.handle_file_tree_updated)
+        self.update_process_list_signal.connect(self.handle_process_list_updated)
         # Disable InputMethodEnabled to avoid TUINSRemoteViewController errors on macOS
         self.setAttribute(Qt.WA_InputMethodEnabled, False)
         self.setAttribute(Qt.WA_KeyCompression, True)
@@ -144,6 +145,7 @@ class MainDialog(QMainWindow):
         self.dir_tree_now = []
         self.file_name = ''
         self.fileEvent = ''
+        self.active_upload_threads = []
 
         self.ui.discButton.clicked.connect(self.disc_off)
         self.ui.theme.clicked.connect(self.toggleTheme)
@@ -584,7 +586,7 @@ class MainDialog(QMainWindow):
             pass
 
     @Slot(str, list)
-    def on_process_list_updated(self, conn_id, processes):
+    def handle_process_list_updated(self, conn_id, processes):
         """处理进程列表更新信号"""
         # 更新缓存
         if conn_id in self.ssh_clients:
@@ -661,7 +663,7 @@ class MainDialog(QMainWindow):
 
     def kill_selected_process(self):
         if not self.ssh():
-            QMessageBox.warning(self, "警告", "SSH客户端未设置，请先设置SSH客户端")
+            self.warning("警告", "SSH客户端未设置，请先设置SSH客户端")
             return
 
         selected_rows = set(item.row() for item in self.ui.result.selectedItems())
@@ -669,37 +671,43 @@ class MainDialog(QMainWindow):
         if not selected_rows:
             return
 
+        pids_to_kill = []
         # 获取所选行的PID
         for row in selected_rows:
             pid_item = self.ui.result.item(row, 0)
             if pid_item:
-                pid = pid_item.text()
+                pids_to_kill.append(pid_item.text())
 
-                reply = QMessageBox.question(
-                    self,
-                    "确认终止",
-                    f"确认要终止进程 PID: {pid} 吗?",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No
-                )
+        if not pids_to_kill:
+            return
 
-                # 设置按钮文本为中文
-                yes_button = reply.button(QMessageBox.Yes)
-                no_button = reply.button(QMessageBox.No)
-                yes_button.setText(self.tr("确定"))
-                no_button.setText(self.tr("取消"))
+        pid_str = ", ".join(pids_to_kill)
 
-                if reply == QMessageBox.Yes and self.ssh():
-                    # 优雅结束进程，避免数据丢失
-                    command = "echo " + pid + "| xargs -n 1 kill -15"
-                    stdin, stdout, stderr = self.ssh().conn.exec_command(timeout=10, command=command, get_pty=False)
-                    error = stderr.read().decode('utf-8').strip()
-                    if error:
-                        QMessageBox.information(self, "成功", f"进程 {pid} 已终止")
-                        # 刷新进程列表
-                        self.update_process_list()
-                    else:
-                        QMessageBox.warning(self, "失败", f"无法终止进程 {pid}: {error}")
+        reply = QMessageBox.question(
+            self,
+            self.tr("确认终止"),
+            self.tr(f"确认要终止选中的 {len(pids_to_kill)} 个进程吗?\nPID: {pid_str}"),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            # 批量执行终止命令
+            try:
+                # 使用 kill -15 (SIGTERM) 优雅终止，如果需要强制可以使用 kill -9
+                # 使用空格分隔多个 PID
+                pids_args = " ".join(pids_to_kill)
+                command = f"kill -15 {pids_args}"
+
+                # 使用独立的 QThread 处理终止任务，避免阻塞 UI 且代码更清晰
+                self.kill_thread = KillProcessThread(self.ssh(), command, pids_args, pid_str)
+                self.kill_thread.success_sig.connect(self.success)
+                self.kill_thread.warning_sig.connect(self.warning)
+                self.kill_thread.update_sig.connect(lambda: self.update_process_list_signal.emit(self.ssh().id, []))
+                self.kill_thread.start()
+
+            except Exception as e:
+                self.warning("错误", f"无法启动终止任务: {e}")
 
     def showEvent(self, event):
         self.center()
@@ -1679,7 +1687,7 @@ class MainDialog(QMainWindow):
         # 关键修正：只有当缓存的路径与当前连接的路径一致时才使用缓存，否则说明切换了目录，不应显示旧数据
         if hasattr(ssh_conn, 'cached_pwd') and hasattr(ssh_conn, 'cached_files'):
             if ssh_conn.cached_pwd == ssh_conn.pwd:
-                self.on_file_tree_updated(ssh_conn.id, ssh_conn.cached_pwd, ssh_conn.cached_files)
+                self.handle_file_tree_updated(ssh_conn.id, ssh_conn.cached_pwd, ssh_conn.cached_files)
             else:
                 # 路径不一致，说明是新目录，不使用旧缓存，也不清空（避免闪烁），等待新数据
                 pass
@@ -1703,7 +1711,7 @@ class MainDialog(QMainWindow):
             util.logger.error(f"Error in refreshDirs_thread: {e}")
 
     @Slot(str, str, list)
-    def on_file_tree_updated(self, conn_id, pwd, files):
+    def handle_file_tree_updated(self, conn_id, pwd, files):
         """处理文件树更新信号"""
         # 更新缓存
         if conn_id in self.ssh_clients:
@@ -2251,71 +2259,12 @@ class MainDialog(QMainWindow):
         """优化的文件上传功能"""
         ssh_conn = self.ssh()
 
-        # 跟踪正在上传的文件数量和状态
-        ssh_conn.active_uploads = set()  # 跟踪正在上传的文件ID
-        ssh_conn.completed_uploads = set()  # 跟踪已完成的文件ID
-        ssh_conn.failed_uploads = set()  # 跟踪失败的文件ID
-
         # 使用QFileDialog获取文件
         files, _ = QFileDialog.getOpenFileNames(self, self.tr("选择文件"), "", self.tr("所有文件 (*)"))
         if not files:
             return
 
-        # 创建上传器
-        self.uploader = SFTPUploaderCore(ssh_conn.open_sftp())
-        self.progress_adapter = ProgressAdapter()
-        self.progress_adapter.connect_signals(self.uploader)
-
-        # 批量准备上传任务
-        upload_tasks = []
-        progress_bars = {}
-
-        # 阻止布局更新，提高效率
-        self.ui.download_with_resume.blockSignals(True)
-
-        for local_path in files:
-            file_id = str(uuid.uuid4())
-            filename = os.path.basename(local_path)
-            remote_path = f"{ssh_conn.pwd}/{filename}"
-
-            # 添加到正在上传的集合
-            ssh_conn.active_uploads.add(file_id)
-
-            # 创建进度条组件
-            progress_group = QWidget()
-            progress_layout = QHBoxLayout(progress_group)
-            progress_layout.setContentsMargins(1, 1, 1, 1)
-
-            label = QLabel(filename)
-            progress_bar = QProgressBar()
-            progress_bar.setRange(0, 100)
-
-            progress_layout.addWidget(label, 1)
-            progress_layout.addWidget(progress_bar, 2)
-
-            # 添加到主布局
-            self.ui.download_with_resume.addWidget(progress_group)
-
-            # 保存引用
-            progress_bars[file_id] = progress_bar
-            self.progress_adapter.register_pyside_progress_bar(file_id, progress_bar, label)
-
-            # 准备上传任务
-            upload_tasks.append((file_id, local_path, remote_path))
-
-        # 恢复布局更新
-        self.ui.download_with_resume.blockSignals(False)
-
-        # 使用QThreadPool批量执行上传任务
-        for file_id, local_path, remote_path in upload_tasks:
-            self.uploader.upload_file(file_id, local_path, remote_path)
-
-        # 保存进度条引用
-        self.progress_bars = progress_bars
-
-        # 监听完成和失败信号
-        self.uploader.upload_completed.connect(self.on_upload_completed)
-        self.uploader.upload_failed.connect(self.on_upload_failed)
+        self._start_uploads(ssh_conn, files)
 
     def on_upload_completed(self, file_id, filename):
         """上传完成时隐藏进度条"""
@@ -2353,7 +2302,7 @@ class MainDialog(QMainWindow):
                     background-color: #ecf0f1;
                     text-align: center;
                 }
-                
+
                 QProgressBar::chunk {
                     background-color: #e74c3c; /* 红色 */
                     border-radius: 2px;
@@ -2387,10 +2336,9 @@ class MainDialog(QMainWindow):
 
     # 上传更新进度条
     def upload_update_progress(self, value):
-        self.ui.download_with_resume.setValue(value)
-        # 设置进度条为完成
+        self.ui.download_with_resume1.setValue(value)
         if value >= 100:
-            self.ui.download_with_resume.setVisible(False)
+            self.ui.download_with_resume1.setVisible(False)
             self.refreshDirs()
 
     # 刷新
@@ -2546,28 +2494,90 @@ class MainDialog(QMainWindow):
 
     # 拖拉拽上传文件
     def dropEvent(self, event: QDropEvent):
-        ssh_conn = self.ssh()
-        mime_data = event.mimeData()
-        if mime_data.hasUrls():
-            for url in mime_data.urls():
-                file_path = url.toLocalFile()
-                if os.path.isfile(file_path):
-                    self.fileEvent = file_path
-                    sftp = ssh_conn.open_sftp()
-                    try:
-                        self.ui.download_with_resume.setVisible(True)
+        try:
+            if hasattr(self, 'drag_overlay'):
+                self.drag_overlay.hide()
+            ssh_conn = self.ssh()
+            mime_data = event.mimeData()
+            files = []
+            if mime_data.hasUrls():
+                for url in mime_data.urls():
+                    local_path = url.toLocalFile()
+                    if os.path.isfile(local_path):
+                        files.append(local_path)
+            if files:
+                # 统一走批量上传接口（与普通上传一致）
+                self._start_batch_upload(files)
+        except Exception as e:
+            util.logger.error(f"dropEvent error: {e}")
+            QMessageBox.critical(self, self.tr("上传失败"), self.tr(f"文件上传失败: {e}"))
 
-                        # 转换为 KB
-                        self.upload_thread = UploadThread(sftp, file_path,
-                                                          ssh_conn.pwd + '/' + os.path.basename(file_path))
-                        self.upload_thread.start()
-                        self.upload_thread.progress.connect(self.upload_update_progress)
-                        # sftp.put(file_path, ssh_conn.pwd + '/' + os.path.basename(file_path))
-                        # sftp.put(file_path, os.path.join(ssh_conn.pwd, os.path.basename(file_path)))
-                    except (IOError, OSError) as e:
-                        util.logger.error(f"Failed to upload file: {e}")
-                        QMessageBox.critical(self, self.tr("上传失败"), self.tr(f"文件上传失败: {e}"))
-            self.refreshDirs()
+    def _on_upload_thread_finished(self, thread):
+        try:
+            if thread in self.active_upload_threads:
+                self.active_upload_threads.remove(thread)
+        finally:
+            try:
+                thread.deleteLater()
+            except Exception:
+                pass
+
+    def _start_batch_upload(self, files):
+        ssh_conn = self.ssh()
+        if not ssh_conn or not files:
+            return
+        self._start_uploads(ssh_conn, files)
+
+    def _start_uploads(self, ssh_conn, files):
+        if not hasattr(ssh_conn, 'active_uploads'):
+            ssh_conn.active_uploads = set()
+        if not hasattr(ssh_conn, 'completed_uploads'):
+            ssh_conn.completed_uploads = set()
+        if not hasattr(ssh_conn, 'failed_uploads'):
+            ssh_conn.failed_uploads = set()
+
+        self.uploader = SFTPUploaderCore(ssh_conn.open_sftp())
+        self.progress_adapter = ProgressAdapter()
+        self.progress_adapter.connect_signals(self.uploader)
+
+        upload_tasks = []
+        progress_bars = {}
+
+        self.ui.download_with_resume.blockSignals(True)
+
+        for local_path in files:
+            file_id = str(uuid.uuid4())
+            filename = os.path.basename(local_path)
+            remote_path = f"{ssh_conn.pwd}/{filename}"
+
+            ssh_conn.active_uploads.add(file_id)
+
+            progress_group = QWidget()
+            progress_layout = QHBoxLayout(progress_group)
+            progress_layout.setContentsMargins(1, 1, 1, 1)
+
+            label = QLabel(filename)
+            progress_bar = QProgressBar()
+            progress_bar.setRange(0, 100)
+
+            progress_layout.addWidget(label, 1)
+            progress_layout.addWidget(progress_bar, 2)
+
+            self.ui.download_with_resume.addWidget(progress_group)
+
+            progress_bars[file_id] = progress_bar
+            self.progress_adapter.register_pyside_progress_bar(file_id, progress_bar, label)
+
+            upload_tasks.append((file_id, local_path, remote_path))
+
+        self.ui.download_with_resume.blockSignals(False)
+
+        for file_id, local_path, remote_path in upload_tasks:
+            self.uploader.upload_file(file_id, local_path, remote_path)
+
+        self.progress_bars = progress_bars
+        self.uploader.upload_completed.connect(self.on_upload_completed)
+        self.uploader.upload_failed.connect(self.on_upload_failed)
 
     # 信息提示窗口
     def alarm(self, alart):
@@ -2589,10 +2599,15 @@ class MainDialog(QMainWindow):
         msg_box.exec()
 
     # 成功提示窗口
+    @Slot(str)
     def success(self, alart):
         """
         创建一个成功消息框，并设置自定义图标
         """
+        if QThread.currentThread() != QCoreApplication.instance().thread():
+            QMetaObject.invokeMethod(self, "success", Qt.QueuedConnection, Q_ARG(str, alart))
+            return
+
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle(self.tr('操作成功'))
         msg_box.setText(f'{alart}' + self.tr('成功'))
@@ -2915,18 +2930,78 @@ class Communicate(QObject):
     refresh_parent = Signal()
 
 
-# 上传文件
-class UploadThread(QThread):
-    progress = Signal(int)
+# 批量结束进程线程
+class KillProcessThread(QThread):
+    success_sig = Signal(str)
+    warning_sig = Signal(str, str)
+    update_sig = Signal()
 
-    def __init__(self, sftp, local_path, remote_path):
+    def __init__(self, ssh, command, pids_args, original_pids):
         super().__init__()
-        self.sftp = sftp
-        self.local_path = local_path
-        self.remote_path = remote_path
+        self.ssh = ssh
+        self.command = command
+        self.pids_args = pids_args
+        self.original_pids = original_pids
 
     def run(self):
-        util.resume_upload(self.sftp, self.local_path, self.remote_path, self.progress.emit)
+        try:
+            if not self.ssh:
+                return
+            # 1. 发送终止信号
+            self.ssh.conn.exec_command(self.command, timeout=10)
+
+            # 2. 循环检测进程是否结束
+            # 使用更通用的 shell 命令检测：遍历 PID，如果 kill -0 成功(进程存在)则输出该 PID
+            # 这种方式兼容性更好，不仅限于支持 ps -p 的系统
+            check_cmd = f"for pid in {self.pids_args}; do kill -0 $pid 2>/dev/null && echo $pid; done"
+
+            # 初始化为 None，区分"未检测"和"空列表"
+            remaining_pids = None
+
+            # 使用 while 循环持续检测
+            # 设置 30 秒超时保护，防止进程无法结束导致死循环
+            start_time = time.time()
+            timeout = 30
+
+            while True:
+                try:
+                    stdin, stdout, stderr = self.ssh.conn.exec_command(check_cmd, timeout=5)
+                    # 获取仍然存活的 PID
+                    alive_output = stdout.read().decode('utf-8').strip()
+
+                    if not alive_output:
+                        # 没有输出意味着没有进程存活
+                        remaining_pids = []
+                        break
+
+                    remaining_pids = alive_output.split()
+                except Exception as e:
+                    util.logger.error(f"Kill process error: {e}")
+                    pass
+
+                if time.time() - start_time > timeout:
+                    break
+
+                time.sleep(0.5)
+
+            # 刷新列表
+            self.update_sig.emit()
+
+            if remaining_pids is None:
+                # 无法确认进程状态（可能是检测命令执行失败）
+                self.warning_sig.emit("无法验证进程状态", "无法确认进程是否已结束，请手动刷新列表查看。")
+            elif not remaining_pids:
+                # 所有进程都已消失，验证成功
+                self.success_sig.emit(f"进程 {self.original_pids} 已成功终止")
+            else:
+                # 仍有进程存在
+                alive_str = ", ".join(remaining_pids)
+                self.warning_sig.emit("部分进程未结束", f"以下进程仍在运行 (可能需要强制结束): {alive_str}")
+
+        except Exception as e:
+            self.warning_sig.emit("执行终止命令失败", str(e))
+            # 发生异常也要刷新
+            self.update_sig.emit()
 
 
 class CustomWidget(QWidget):
@@ -3599,16 +3674,21 @@ class SSHQTermWidget(QTermWidget):
 
         current_size = util.THEME.get('font_size', 14)
 
+        # 提前获取可用字体列表，避免直接创建不存在的 QFont 导致系统开销和警告
+        available_families = set(QFontDatabase.families())
+
         for font_name in fonts_to_try:
-            font = QFont(font_name, current_size)
-            if font.exactMatch():
-                if hasattr(self, 'setTerminalFont'):
-                    self.setTerminalFont(font)
-                    print(f"使用代码字体: {font_name}")
-                    return
+            if font_name in available_families:
+                font = QFont(font_name, current_size)
+                if font.exactMatch():
+                    if hasattr(self, 'setTerminalFont'):
+                        self.setTerminalFont(font)
+                        print(f"使用代码字体: {font_name}")
+                        return
 
         # 使用系统默认等宽字体
         font = QFont("monospace", current_size)
+        font.setStyleHint(QFont.Monospace)
         if hasattr(self, 'setTerminalFont'):
             self.setTerminalFont(font)
             print("使用系统默认等宽字体")

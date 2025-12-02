@@ -3,6 +3,7 @@ import time
 from collections import deque
 from typing import Dict, Any
 
+import re
 import paramiko
 import uuid
 
@@ -335,14 +336,13 @@ class SshClient(object):
 
     @staticmethod
     def del_more_space(line: str) -> list:
-        l = line.split(' ')
-        ln = []
-        for ll in l:
-            if ll == ' ' or ll == '':
-                pass
-            elif ll != ' ' and ll != '':
-                ln.append(ll)
-        return ln
+        s = line.strip()
+        if not s or s.startswith('total'):
+            return []
+        parts = re.split(r'\s+', s)
+        if len(parts) < 9:
+            return []
+        return parts[:8] + [' '.join(parts[8:])]
 
     def get_cpu_stats(self) -> Dict[str, Any]:
         """获取详细的CPU使用率统计

@@ -36,13 +36,15 @@ from PySide6.QtWidgets import (
 from qtermwidget.character import (
     Character, ColorEntry, CharacterColor,
     RE_BOLD, RE_BLINK, RE_UNDERLINE, RE_REVERSE,
-    RE_ITALIC, RE_CURSOR, RE_STRIKEOUT, RE_CONCEAL, RE_OVERLINE,
+    RE_ITALIC, RE_CURSOR,
+    RE_STRIKEOUT, RE_CONCEAL, RE_OVERLINE,
     DEFAULT_FORE_COLOR, DEFAULT_BACK_COLOR
 )
 from qtermwidget.character_color import TABLE_COLORS  # Character color definitions
 # Import the already implemented modules
 from qtermwidget.filter import FilterChain, Filter, TerminalImageFilterChain  # Filter.h implementation
 from qtermwidget.screen_window import ScreenWindow  # ScreenWindow implementation
+from qtermwidget.wcwidth import konsole_wcwidth
 
 # 避免循环导入 - QTermWidget将在需要时动态导入
 # from .qtermwidget import QTermWidget  # LineFont.h
@@ -452,7 +454,7 @@ class TerminalDisplay(QWidget):
 
         # Selection
         self._i_pnt_sel = QPoint()  # Initial selection point
-        self._pnt_sel = QPoint()    # Current selection point
+        self._pnt_sel = QPoint()  # Current selection point
         self._triple_sel_begin = QPoint()  # Help avoid flicker
         self._act_sel = 0
         self._word_selection_mode = False
@@ -537,71 +539,71 @@ class TerminalDisplay(QWidget):
 
     def _init_widget(self):
         """正确的初始化顺序 - 修复版本"""
-        print("开始TerminalDisplay初始化...")
+        print("🔧 开始TerminalDisplay初始化...")
 
         # 1. 设置基本属性
         self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
-        print("布局方向已设置")
+        print("✅ 布局方向已设置")
 
         # 2. 创建滚动条
         self._scroll_bar = ScrollBar(self)
         self._scroll_bar.hide()
-        print("滚动条已创建")
+        print("✅ 滚动条已创建")
 
         # 3. 设置布局
         self._grid_layout = QGridLayout(self)
         self._grid_layout.setContentsMargins(0, 0, 0, 0)
         self.setLayout(self._grid_layout)
-        print("布局已设置")
+        print("✅ 布局已设置")
 
         # 4. 连接信号
         self._setup_timers()
-        print("定时器已设置")
+        print("✅ 定时器已设置")
 
         # 5. 设置颜色表（关键修复）
         # 颜色表已在构造函数中正确初始化，无需额外设置
-        print("颜色表已使用默认值")
+        print("✅ 颜色表已使用默认值")
 
         # 6. 设置焦点和其他属性
         self.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
-        print("焦点和属性已设置")
+        print("✅ 焦点和属性已设置")
 
         # 7. 确保图像初始化
         self._make_image()
-        print("图像缓冲区已初始化")
+        print("✅ 图像缓冲区已初始化")
 
         # 8. 修复：正确设置默认鼠标选择状态（与C++版本保持一致）
         # C++版本默认启用鼠标选择，除非终端程序特别请求鼠标事件
         self._mouse_marks = True  # 直接设置变量，避免过早的信号发送
         cursor = Qt.CursorShape.IBeamCursor if self._mouse_marks else Qt.CursorShape.ArrowCursor
         self.setCursor(cursor)
-        print("鼠标选择功能已启用（默认状态）")
+        print("✅ 鼠标选择功能已启用（默认状态）")
 
-        print("TerminalDisplay初始化完成！")
+        print("🎉 TerminalDisplay初始化完成！")
 
     def _default_color_table(self):
         """默认颜色表"""
         from .character_color import ColorEntry
         from PySide6.QtGui import QColor
         return [
-            ColorEntry(QColor(0, 0, 0)),        # Black
-            ColorEntry(QColor(178, 24, 24)),    # Red
-            ColorEntry(QColor(24, 178, 24)),    # Green
-            ColorEntry(QColor(178, 104, 24)),   # Yellow
-            ColorEntry(QColor(24, 24, 178)),    # Blue
-            ColorEntry(QColor(178, 24, 178)),   # Magenta
-            ColorEntry(QColor(24, 178, 178)),   # Cyan
+            ColorEntry(QColor(0, 0, 0)),  # Black
+            ColorEntry(QColor(178, 24, 24)),  # Red
+            ColorEntry(QColor(24, 178, 24)),  # Green
+            ColorEntry(QColor(178, 104, 24)),  # Yellow
+            ColorEntry(QColor(24, 24, 178)),  # Blue
+            ColorEntry(QColor(178, 24, 178)),  # Magenta
+            ColorEntry(QColor(24, 178, 178)),  # Cyan
             ColorEntry(QColor(178, 178, 178)),  # White
             # 重复明亮版本
             ColorEntry(QColor(104, 104, 104)),  # Bright Black
-            ColorEntry(QColor(255, 84, 84)),    # Bright Red
-            ColorEntry(QColor(84, 255, 84)),    # Bright Green
-            ColorEntry(QColor(255, 255, 84)),   # Bright Yellow
-            ColorEntry(QColor(84, 84, 255)),    # Bright Blue
-            ColorEntry(QColor(255, 84, 255)),   # Bright Magenta
-            ColorEntry(QColor(84, 255, 255)),   # Bright Cyan
+            ColorEntry(QColor(255, 84, 84)),  # Bright Red
+            ColorEntry(QColor(84, 255, 84)),  # Bright Green
+            ColorEntry(QColor(255, 255, 84)),  # Bright Yellow
+            ColorEntry(QColor(84, 84, 255)),  # Bright Blue
+            ColorEntry(QColor(255, 84, 255)),  # Bright Magenta
+            ColorEntry(QColor(84, 255, 255)),  # Bright Cyan
             ColorEntry(QColor(255, 255, 255)),  # Bright White
         ]
 
@@ -1038,7 +1040,7 @@ class TerminalDisplay(QWidget):
         # 验证是否为等宽字体（可选，仅用于日志或状态）
         # char_widths = [fm.horizontalAdvance(c) for c in REPCHAR]
         # self._fixed_font = len(set(char_widths)) == 1
-        self._fixed_font = True # 强制假设为等宽字体处理，以启用优化的绘制路径
+        self._fixed_font = True  # 强制假设为等宽字体处理，以启用优化的绘制路径
         self._fixed_font_original = self._fixed_font
 
         if self._fontWidth < 1:
@@ -1343,8 +1345,7 @@ class TerminalDisplay(QWidget):
             # Draw contents
             region_to_draw = event.region() & cr
             for rect in region_to_draw:
-                # 修复：直接使用颜色表中的背景色，而不是palette，避免受全局样式表影响
-                self._draw_background(painter, rect, self._color_table[DEFAULT_BACK_COLOR].color, True)
+                self._draw_background(painter, rect, self.palette().window().color(), True)
                 self._draw_contents(painter, rect)
 
             # Draw filters (在内容之后绘制，确保覆盖)
@@ -1489,15 +1490,17 @@ class TerminalDisplay(QWidget):
                 char = self._image[line_start + x]
 
                 # 修复：更严格的属性比较
-                if (hasattr(char, 'foregroundColor') and hasattr(current_attrs, 'foregroundColor') and
-                        char.foregroundColor != current_attrs.foregroundColor):
-                    break
-                if (hasattr(char, 'backgroundColor') and hasattr(current_attrs, 'backgroundColor') and
-                        char.backgroundColor != current_attrs.backgroundColor):
-                    break
-                if (hasattr(char, 'rendition') and hasattr(current_attrs, 'rendition') and
-                        char.rendition != current_attrs.rendition):
-                    break
+                # Ignore attribute check for continuation characters (char.character == 0)
+                if char.character != 0:
+                    if (hasattr(char, 'foregroundColor') and hasattr(current_attrs, 'foregroundColor') and
+                            char.foregroundColor != current_attrs.foregroundColor):
+                        break
+                    if (hasattr(char, 'backgroundColor') and hasattr(current_attrs, 'backgroundColor') and
+                            char.backgroundColor != current_attrs.backgroundColor):
+                        break
+                    if (hasattr(char, 'rendition') and hasattr(current_attrs, 'rendition') and
+                            char.rendition != current_attrs.rendition):
+                        break
 
                 # 修复：更安全的字符处理
                 if char.character and char.character != 0:
@@ -1507,7 +1510,10 @@ class TerminalDisplay(QWidget):
                         if ord(char_str) >= 32 or char_str in ['\t']:  # 可打印字符或制表符
                             text += char_str
                             if self._fixed_font:
-                                text_width += self._fontWidth
+                                # 使用 konsole_wcwidth 计算字符宽度
+                                w = konsole_wcwidth(ord(char_str))
+                                if w <= 0: w = 1  # 默认至少1个宽度
+                                text_width += w * self._fontWidth
                             else:
                                 text_width += fm.horizontalAdvance(char_str)
                     except (ValueError, OverflowError):
@@ -1527,7 +1533,8 @@ class TerminalDisplay(QWidget):
 
                 self._draw_text_fragment(painter, text_area, text, current_attrs, False)
 
-    def _draw_text_fragment(self, painter: QPainter, rect: QRect, text: str, style: Character, invert_colors: bool = False):
+    def _draw_text_fragment(self, painter: QPainter, rect: QRect, text: str, style: Character,
+                            invert_colors: bool = False):
         """Draw text and cursor fragment - 彻底简化版本，避免选择相关的复杂颜色处理"""
         painter.save()
 
@@ -1576,28 +1583,23 @@ class TerminalDisplay(QWidget):
             fm = QFontMetrics(painter.font())
             current_x = rect.x()
             for char in text:
-                # 优化：居中绘制窄字符
-                # 计算字符实际宽度，将其居中放置在网格内
+                # 计算字符实际宽度
                 char_width = fm.horizontalAdvance(char)
 
-                # 如果字符宽度小于网格宽度，则居中绘制
-                if char_width < self._fontWidth:
-                    # 居中偏移量
-                    offset = (self._fontWidth - char_width) / 2
-                    painter.drawText(current_x + offset, rect.y() + self._fontAscent + self._line_spacing, char)
-                else:
-                    # 如果字符宽度大于等于网格宽度（如 'M', 'W'），我们不能简单地让它超出网格，
-                    # 否则会导致重叠。
-                    # 策略：
-                    # 1. 依然尝试在网格起始位置绘制（如果只是略宽，重叠一点可能比压缩好）
-                    # 2. 或者，我们可以稍微压缩绘制（但这比较复杂且可能模糊）
-                    # 3. 居中绘制，允许两边都溢出一点点（通常视觉上最好）
+                # 使用 konsole_wcwidth 计算字符应占用的网格宽度
+                w = konsole_wcwidth(ord(char))
+                if w <= 0: w = 1  # 默认至少1个宽度
 
-                    # 这里采用居中绘制（允许溢出），这样重叠是均匀的
-                    offset = (self._fontWidth - char_width) / 2
-                    painter.drawText(current_x + offset, rect.y() + self._fontAscent + self._line_spacing, char)
+                target_width = w * self._fontWidth
 
-                current_x += self._fontWidth
+                # 居中绘制（无论是单宽还是双宽）
+                # 如果字符实际宽度小于目标宽度，则居中
+                # 如果字符实际宽度大于目标宽度，也居中（允许两边溢出）
+                offset = (target_width - char_width) / 2
+
+                painter.drawText(current_x + offset, rect.y() + self._fontAscent + self._line_spacing, char)
+
+                current_x += target_width
         else:
             painter.drawText(rect.x(), rect.y() + self._fontAscent + self._line_spacing, text)
 
@@ -1666,7 +1668,7 @@ class TerminalDisplay(QWidget):
         if self._cursor_shape == KeyboardCursorShape.BlockCursor:
             # 绘制块状光标
             pen_width = max(1, painter.pen().width())
-            painter.drawRect(cursor_rect.adjusted(pen_width/2, pen_width/2, -pen_width/2, -pen_width/2))
+            painter.drawRect(cursor_rect.adjusted(pen_width / 2, pen_width / 2, -pen_width / 2, -pen_width / 2))
 
             if self.hasFocus():
                 painter.fillRect(cursor_rect, cursor_color)
@@ -1702,10 +1704,10 @@ class TerminalDisplay(QWidget):
         # 根据背景亮度选择基础对比色
         if bg_brightness > 128:
             # 背景较亮，优先使用深色光标
-            contrast_color = QColor(0, 0, 0)      # 黑色
+            contrast_color = QColor(0, 0, 0)  # 黑色
         else:
             # 背景较暗，优先使用亮色光标
-            contrast_color = QColor(255, 255, 255) # 白色
+            contrast_color = QColor(255, 255, 255)  # 白色
 
         # 如果对比色与前景色太接近，选择另一种颜色
         contrast_brightness = (0.299 * contrast_color.red() +
@@ -1715,7 +1717,7 @@ class TerminalDisplay(QWidget):
         if abs(contrast_brightness - fg_brightness) < 50:
             # 对比度不够，选择醒目的彩色
             if bg_brightness > 128:
-                return QColor(255, 0, 0)    # 红色（在亮背景上）
+                return QColor(255, 0, 0)  # 红色（在亮背景上）
             else:
                 return QColor(255, 255, 0)  # 黄色（在暗背景上）
 
@@ -1741,7 +1743,6 @@ class TerminalDisplay(QWidget):
 
         # VT100图形字符范围检查
         return self._draw_line_chars and (char_code & 0xFF80) == 0x2500
-
 
     def _is_line_char_string(self, text: str) -> bool:
         """正确判断是否为线字符串"""
@@ -2161,18 +2162,28 @@ class TerminalDisplay(QWidget):
         line = int((widget_point.y() - self.contentsRect().top() - self._topMargin) / self._fontHeight)
         line = max(0, min(line, self._usedLines - 1))
 
-        x = widget_point.x() + self._fontWidth // 2 - self.contentsRect().left() - self._leftMargin
+        x = widget_point.x() - self.contentsRect().left() - self._leftMargin
 
-        if self._fixed_font:
-            column = int(x / self._fontWidth)
-        else:
-            column = 0
-            # For variable width fonts, find the closest character
-            while column + 1 < self._usedColumns:
-                char_width = self._text_width(0, column + 1, line)
-                if x <= char_width:
-                    break
-                column += 1
+        # Always use accumulated width calculation to support variable width characters (CJK)
+        # This fixes the crash/misalignment when selecting Chinese text
+        column = 0
+        current_width = 0
+
+        while column < self._usedColumns:
+            char_idx = line * self._columns + column
+            w = 1
+            if char_idx < len(self._image):
+                # Ensure consistent width calculation with _draw_contents
+                w = konsole_wcwidth(self._image[char_idx].character)
+                if w <= 0: w = 1
+
+            char_pixel_width = w * self._fontWidth
+
+            if current_width + char_pixel_width > x:
+                break
+
+            current_width += char_pixel_width
+            column += 1
 
         column = max(0, min(column, self._usedColumns))
         return line, column
@@ -2211,7 +2222,8 @@ class TerminalDisplay(QWidget):
         current_pen = painter.pen()
 
         # Apply bold if needed
-        if hasattr(attributes, 'rendition') and (attributes.rendition & RE_BOLD) and self._boldIntense:  # 修复：使用RE_BOLD常量
+        if hasattr(attributes, 'rendition') and (
+                attributes.rendition & RE_BOLD) and self._boldIntense:  # 修复：使用RE_BOLD常量
             bold_pen = QPen(current_pen)
             bold_pen.setWidth(3)
             painter.setPen(bold_pen)
@@ -2660,7 +2672,6 @@ class TerminalDisplay(QWidget):
                     self.updateImage()
                 except Exception:
                     pass
-
 
     def showEvent(self, event: QShowEvent):
         """Handle show events"""
@@ -3559,8 +3570,6 @@ class TerminalDisplay(QWidget):
             # 捕获所有异常以防止段错误
             print(f"Warning: keyPressEvent 错误: {e}")
             event.ignore()
-
-
 
     def event(self, event: QEvent) -> bool:
         """Handle general events"""

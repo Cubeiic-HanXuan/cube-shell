@@ -21,7 +21,6 @@ nuitka --windows-console-mode=disable --windows-icon-from-ico=icons/logo.ico ^
   --output-dir=deploy ^
   --standalone ^
   --enable-plugin=pyside6 ^
-  --follow-imports ^
   --include-module=qdarktheme ^
   --include-module=deepdiff ^
   --include-module=pygments ^
@@ -29,13 +28,13 @@ nuitka --windows-console-mode=disable --windows-icon-from-ico=icons/logo.ico ^
   --include-module=yaml ^
   --include-module=pygments.formatters.html ^
   --include-module=pygments.lexers.shell ^
-  --include-package=core,function,style,ui,icons ^
+  --include-package=qtermwidget,core,function,style,ui,icons ^
   --include-data-dir=conf=conf ^
   --include-data-dir=frp=frp ^
   --company-name=HanXuan ^
   --product-name="cubeShell" ^
-  --file-version=1.7.2.0 ^
-  --product-version=1.7.2 ^
+  --file-version=2.0.1.0 ^
+  --product-version=2.0.1 ^
   --file-description="A powerful shell application" ^
   cube-shell.py
 
