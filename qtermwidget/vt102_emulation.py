@@ -216,12 +216,15 @@ class Vt102Emulation(Emulation):
     # 公共槽方法 - 对应C++头文件中的public slots
     # ============================================================================
 
-    def sendString(self, s: str, length: int = -1):
+    def sendString(self, s: str | bytes, length: int = -1):
         """发送字符串 - 对应C++: void sendString(const char*,int length = -1) override"""
-        if length >= 0:
-            data = s[:length].encode('utf-8')
+        if isinstance(s, bytes):
+            data = s[:length] if length >= 0 else s
         else:
-            data = s.encode('utf-8')
+            if length >= 0:
+                data = s[:length].encode('utf-8')
+            else:
+                data = s.encode('utf-8')
         self.sendData.emit(data, len(data))
 
     def sendText(self, text: str):

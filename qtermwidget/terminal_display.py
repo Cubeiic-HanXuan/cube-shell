@@ -539,49 +539,39 @@ class TerminalDisplay(QWidget):
 
     def _init_widget(self):
         """正确的初始化顺序 - 修复版本"""
-        print("🔧 开始TerminalDisplay初始化...")
 
         # 1. 设置基本属性
         self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
-        print("✅ 布局方向已设置")
 
         # 2. 创建滚动条
         self._scroll_bar = ScrollBar(self)
         self._scroll_bar.hide()
-        print("✅ 滚动条已创建")
 
         # 3. 设置布局
         self._grid_layout = QGridLayout(self)
         self._grid_layout.setContentsMargins(0, 0, 0, 0)
         self.setLayout(self._grid_layout)
-        print("✅ 布局已设置")
 
         # 4. 连接信号
         self._setup_timers()
-        print("✅ 定时器已设置")
 
         # 5. 设置颜色表（关键修复）
         # 颜色表已在构造函数中正确初始化，无需额外设置
-        print("✅ 颜色表已使用默认值")
 
         # 6. 设置焦点和其他属性
         self.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
-        print("✅ 焦点和属性已设置")
+        self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
 
         # 7. 确保图像初始化
         self._make_image()
-        print("✅ 图像缓冲区已初始化")
 
         # 8. 修复：正确设置默认鼠标选择状态（与C++版本保持一致）
         # C++版本默认启用鼠标选择，除非终端程序特别请求鼠标事件
         self._mouse_marks = True  # 直接设置变量，避免过早的信号发送
         cursor = Qt.CursorShape.IBeamCursor if self._mouse_marks else Qt.CursorShape.ArrowCursor
         self.setCursor(cursor)
-        print("✅ 鼠标选择功能已启用（默认状态）")
-
-        print("🎉 TerminalDisplay初始化完成！")
 
     def _default_color_table(self):
         """默认颜色表"""
@@ -1302,8 +1292,15 @@ class TerminalDisplay(QWidget):
     # Event handling methods
     def paintEvent(self, event: QPaintEvent):
         """绘制事件处理"""
+        # 关键修复：使用 begin/end 模式代替直接构造 QPainter(self)
+        # 这能更好地处理复杂的绘制状态和多重调用
+        painter = QPainter()
+        if not painter.begin(self):
+            # 如果无法开始绘制（例如已经在绘制中），则直接返回
+            return
+
         try:
-            painter = QPainter(self)
+            # 再次检查活动状态
             if not painter.isActive():
                 return
 
@@ -1354,11 +1351,11 @@ class TerminalDisplay(QWidget):
             # Draw input method preedit string
             self._draw_input_method_preedit_string(painter, self._preedit_rect())
 
-            # Qt会自动管理painter的end()，不需要手动调用
-
         except Exception as e:
             print(f"Warning: Paint event failed: {e}")
-            # painter会被Qt自动清理，不需要手动处理
+        finally:
+            # 确保结束绘制
+            painter.end()
 
     def _draw_background_zoom(self, painter: QPainter, cr: QRect):
         """Draw background image in zoom mode"""
@@ -2531,7 +2528,8 @@ class TerminalDisplay(QWidget):
         self._resizing = (old_lines != self._lines) or (old_columns != self._columns)
 
         if self._resizing:
-            self._show_resize_notification()
+            # TODO 实时显示终端大小信息小tips，测试的时候可以打开
+            #self._show_resize_notification()
             self.changedContentSizeSignal.emit(self._content_height, self._content_width)
 
         self._resizing = False
@@ -3429,6 +3427,10 @@ class TerminalDisplay(QWidget):
 
     def _char_class(self, ch: Character) -> str:
         """Get character class for word selection"""
+        # 修复：处理宽字符的第二部分（character为0），将其视为字母数字
+        if ch.character == 0:
+            return 'a'
+
         char = chr(ch.character) if ch.character > 0 else ' '
 
         if char.isspace():
@@ -3611,8 +3613,10 @@ class TerminalDisplay(QWidget):
     # Input method handling
     def inputMethodEvent(self, event: QInputMethodEvent):
         """Handle input method events"""
-        key_event = QKeyEvent(QEvent.Type.KeyPress, 0, Qt.KeyboardModifier.NoModifier, event.commitString())
-        self.keyPressedSignal.emit(key_event, False)
+        if event.commitString():
+            # 修复：直接发送UTF-8编码的字节到模拟器，而不是通过QKeyEvent
+            # 这样可以正确处理中文等多字节字符
+            self.sendStringToEmu.emit(event.commitString().encode('utf-8'))
 
         self._input_method_data['preedit_string'] = event.preeditString()
         self.update(self._preedit_rect() | self._input_method_data.get('previous_preedit_rect', QRect()))

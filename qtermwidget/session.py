@@ -25,7 +25,8 @@ from typing import List, Optional, Dict
 
 from PySide6.QtCore import (
     QObject, QTimer, QProcess, QSize, QDir,
-    Signal, Slot, Property, QProcessEnvironment
+    Signal, Slot, Property, QProcessEnvironment,
+    QThread, QMetaObject, Qt
 )
 from PySide6.QtGui import QColor, QKeyEvent
 
@@ -973,6 +974,11 @@ class Session(QObject):
         
         这向终端进程发送挂起信号(SIGHUP)并导致发出done(Session*)信号。
         """
+        # 线程安全检查：如果不是在对象所属线程调用，则通过invokeMethod调度
+        if self.thread() != QThread.currentThread():
+            QMetaObject.invokeMethod(self, "close", Qt.QueuedConnection)
+            return
+
         self._autoClose = True
         self._wantedClose = True
 
@@ -1017,14 +1023,15 @@ class Session(QObject):
                             if hasattr(self._shellProcess, 'waitForFinished'):
                                 self._shellProcess.waitForFinished(100)
                             
-                            # 再次检查并强制设置状态（如果可能）
-                            if hasattr(self._shellProcess, 'state') and self._shellProcess.state() != QProcess.ProcessState.NotRunning:
-                                if hasattr(self._shellProcess, 'setProcessState'):
-                                     # 尝试访问 protected 方法（PySide6允许）
-                                     try:
-                                         self._shellProcess.setProcessState(QProcess.ProcessState.NotRunning)
-                                     except:
-                                         pass
+                        # 确保状态更新
+                        if hasattr(self._shellProcess, 'state') and self._shellProcess.state() != QProcess.ProcessState.NotRunning:
+                             try:
+                                 # 某些平台/版本下，setProcessState可能是只读的或内部方法
+                                 # 尝试模拟状态改变
+                                 if hasattr(self._shellProcess, 'setProcessState'):
+                                     self._shellProcess.setProcessState(QProcess.ProcessState.NotRunning)
+                             except:
+                                 pass
                     except Exception:
                         pass
 

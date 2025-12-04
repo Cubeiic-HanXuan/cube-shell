@@ -37,7 +37,7 @@ class Filter(QObject):
     
     对应C++: class Filter : public QObject
     """
-    
+
     class HotSpot:
         """
         表示匹配特定过滤器模式的文本区域。
@@ -47,13 +47,13 @@ class Filter(QObject):
         
         对应C++: class Filter::HotSpot
         """
-        
+
         class Type(Enum):
             """热点类型枚举"""
-            NotSpecified = 0   # 未指定类型 - C++风格命名
-            Link = 1           # 可点击链接
-            Marker = 2         # 标记
-            Highlight = 3      # 自定义高亮 (新增)
+            NotSpecified = 0  # 未指定类型 - C++风格命名
+            Link = 1  # 可点击链接
+            Marker = 2  # 标记
+            Highlight = 3  # 自定义高亮 (新增)
 
         def __init__(self, startLine: int, startColumn: int, endLine: int, endColumn: int):
             """
@@ -74,45 +74,45 @@ class Filter(QObject):
             self._type = self.Type.NotSpecified
             self._foregroundColor = None
             self._backgroundColor = None
-        
+
         def foregroundColor(self):
             """返回前景色 (用于 Highlight 类型)"""
             return self._foregroundColor
-            
+
         def backgroundColor(self):
             """返回背景色 (用于 Highlight 类型)"""
             return self._backgroundColor
-            
+
         def setColors(self, fg=None, bg=None):
             """设置颜色 (用于 Highlight 类型)"""
             self._foregroundColor = fg
             self._backgroundColor = bg
             self.setType(self.Type.Highlight)
-        
+
         def startLine(self) -> int:
             """返回热点区域开始的行 - C++风格方法命名"""
             return self._startLine
-        
+
         def endLine(self) -> int:
             """返回热点区域结束的行"""
             return self._endLine
-        
+
         def startColumn(self) -> int:
             """返回热点区域在起始行的开始列"""
             return self._startColumn
-        
+
         def endColumn(self) -> int:
             """返回热点区域在结束行的结束列"""
             return self._endColumn
-        
+
         def type(self) -> 'Filter.HotSpot.Type':
             """返回热点类型"""
             return self._type
-        
+
         def setType(self, hotType: 'Filter.HotSpot.Type'):
             """设置热点类型 - C++风格方法命名"""
             self._type = hotType
-        
+
         @abstractmethod
         def activate(self, action: str = ""):
             """
@@ -124,7 +124,7 @@ class Filter(QObject):
             对应C++: virtual void activate(const QString& action = QString()) = 0
             """
             pass
-        
+
         def actions(self) -> List[QAction]:
             """
             返回与热点关联的动作列表，可用于菜单或工具栏
@@ -135,7 +135,7 @@ class Filter(QObject):
             对应C++: virtual QList<QAction*> actions()
             """
             return []
-    
+
     def __init__(self):
         """
         构造新的过滤器
@@ -148,7 +148,7 @@ class Filter(QObject):
         self._hotspotList: List[Filter.HotSpot] = []
         self._linePositions: Optional[List[int]] = None
         self._buffer: Optional[str] = None
-    
+
     @abstractmethod
     def process(self):
         """
@@ -157,7 +157,7 @@ class Filter(QObject):
         对应C++: virtual void process() = 0
         """
         pass
-    
+
     def reset(self):
         """
         清空过滤器的内部缓冲区并将行计数重置为0。
@@ -168,7 +168,7 @@ class Filter(QObject):
         # C++版本: qDeleteAll(_hotspotList); _hotspots.clear(); _hotspotList.clear();
         self._hotspots.clear()
         self._hotspotList.clear()
-    
+
     def hotSpotAt(self, line: int, column: int) -> Optional['Filter.HotSpot']:
         """
         返回覆盖给定行和列的热点，如果没有热点覆盖该区域则返回None
@@ -184,7 +184,7 @@ class Filter(QObject):
         """
         if line not in self._hotspots:
             return None
-        
+
         # 模拟C++的QListIterator<HotSpot*> spotIter(_hotspots.values(line))
         for spot in self._hotspots[line]:
             if spot.startLine() == line and spot.startColumn() > column:
@@ -192,9 +192,9 @@ class Filter(QObject):
             if spot.endLine() == line and spot.endColumn() < column:
                 continue
             return spot
-        
+
         return None
-    
+
     def hotSpots(self) -> List['Filter.HotSpot']:
         """
         返回过滤器识别的热点列表
@@ -205,7 +205,7 @@ class Filter(QObject):
         对应C++: QList<HotSpot*> hotSpots() const
         """
         return self._hotspotList.copy()
-    
+
     def hotSpotsAtLine(self, line: int) -> List['Filter.HotSpot']:
         """
         返回过滤器在给定行识别的热点列表
@@ -219,7 +219,7 @@ class Filter(QObject):
         对应C++: QList<HotSpot*> hotSpotsAtLine(int line) const
         """
         return self._hotspots.get(line, []).copy()
-    
+
     def setBuffer(self, buffer: str, linePositions: List[int]):
         """
         设置缓冲区和行位置
@@ -232,7 +232,7 @@ class Filter(QObject):
         """
         self._buffer = buffer
         self._linePositions = linePositions
-    
+
     def addHotSpot(self, spot: 'Filter.HotSpot'):
         """
         向列表添加新热点
@@ -243,13 +243,13 @@ class Filter(QObject):
         对应C++: void addHotSpot(HotSpot*)
         """
         self._hotspotList.append(spot)
-        
+
         # C++版本的逻辑：for (int line = spot->startLine() ; line <= spot->endLine() ; line++)
         for line in range(spot.startLine(), spot.endLine() + 1):
             if line not in self._hotspots:
                 self._hotspots[line] = []
             self._hotspots[line].append(spot)
-    
+
     def buffer(self) -> Optional[str]:
         """
         返回内部缓冲区
@@ -260,7 +260,7 @@ class Filter(QObject):
         对应C++: const QString* buffer()
         """
         return self._buffer
-    
+
     def getLineColumn(self, position: int) -> tuple[int, int]:
         """
         将buffer()中的字符位置转换为行和列
@@ -275,20 +275,20 @@ class Filter(QObject):
         """
         if not self._linePositions or not self._buffer:
             return 0, 0
-        
+
         # 精确复制C++逻辑
         for i in range(len(self._linePositions)):
             if i == len(self._linePositions) - 1:
                 nextLine = len(self._buffer) + 1
             else:
                 nextLine = self._linePositions[i + 1]
-            
+
             if self._linePositions[i] <= position < nextLine:
                 startLine = i
                 text_segment = self._buffer[self._linePositions[i]:position]
                 startColumn = string_width(text_segment)
                 return startLine, startColumn
-        
+
         return 0, 0
 
 
@@ -300,7 +300,7 @@ class RegExpFilter(Filter):
     
     对应C++: class RegExpFilter : public Filter
     """
-    
+
     class HotSpot(Filter.HotSpot):
         """
         RegExpFilter创建的热点类型。
@@ -308,7 +308,7 @@ class RegExpFilter(Filter):
         
         对应C++: class RegExpFilter::HotSpot : public Filter::HotSpot
         """
-        
+
         def __init__(self, startLine: int, startColumn: int, endLine: int, endColumn: int):
             """
             构造RegExp热点
@@ -318,7 +318,7 @@ class RegExpFilter(Filter):
             super().__init__(startLine, startColumn, endLine, endColumn)
             self.setType(Filter.HotSpot.Type.Marker)
             self._capturedTexts: List[str] = []
-        
+
         def activate(self, action: str = ""):
             """
             激活热点（默认实现为空）
@@ -326,7 +326,7 @@ class RegExpFilter(Filter):
             对应C++: void activate(const QString& action = QString()) override
             """
             pass
-        
+
         def setCapturedTexts(self, texts: List[str]):
             """
             设置与此热点关联的捕获文本
@@ -337,7 +337,7 @@ class RegExpFilter(Filter):
             对应C++: void setCapturedTexts(const QStringList& texts)
             """
             self._capturedTexts = texts.copy()
-        
+
         def capturedTexts(self) -> List[str]:
             """
             返回过滤器匹配正则表达式时找到的文本
@@ -348,7 +348,7 @@ class RegExpFilter(Filter):
             对应C++: QStringList capturedTexts() const
             """
             return self._capturedTexts.copy()
-    
+
     def __init__(self):
         """
         构造新的正则表达式过滤器
@@ -357,7 +357,7 @@ class RegExpFilter(Filter):
         """
         super().__init__()
         self._searchText: Optional[re.Pattern] = None
-    
+
     def setRegExp(self, regExp: re.Pattern):
         """
         设置过滤器在文本块中搜索的正则表达式
@@ -368,7 +368,7 @@ class RegExpFilter(Filter):
         对应C++: void setRegExp(const QRegularExpression& text)
         """
         self._searchText = regExp
-    
+
     def regExp(self) -> Optional[re.Pattern]:
         """
         返回过滤器在文本块中搜索的正则表达式
@@ -380,7 +380,7 @@ class RegExpFilter(Filter):
         """
         return self._searchText
 
-    def newHotSpot(self, startLine: int, startColumn: int, 
+    def newHotSpot(self, startLine: int, startColumn: int,
                    endLine: int, endColumn: int) -> 'RegExpFilter.HotSpot':
         """
         当遇到正则表达式匹配时调用。子类应重新实现此方法以返回自定义热点类型
@@ -412,26 +412,28 @@ class RegExpFilter(Filter):
             # 获取匹配位置
             start = match.start()
             end = match.end()
-            
+
             # 转换为行/列
             startLine, startColumn = self.getLineColumn(start)
             endLine, endColumn = self.getLineColumn(end)
-            
+
             # 创建热点
             hotspot = self.newHotSpot(startLine, startColumn, endLine, endColumn)
-            
+
             # 设置捕获文本
-            captured = [match.group(i) for i in range(match.lastindex + 1)] if match.lastindex is not None else [match.group(0)]
+            captured = [match.group(i) for i in range(match.lastindex + 1)] if match.lastindex is not None else [
+                match.group(0)]
             if isinstance(hotspot, RegExpFilter.HotSpot):
                 hotspot.setCapturedTexts(captured)
-            
+
             self.addHotSpot(hotspot)
-    
+
+
 class HighlightFilter(RegExpFilter):
     """
     自定义高亮过滤器，用于根据正则表达式高亮显示文本
     """
-    
+
     def __init__(self, regex_pattern, fg_color=None, bg_color=None):
         super().__init__()
         self.setRegExp(re.compile(regex_pattern))
@@ -443,30 +445,33 @@ class HighlightFilter(RegExpFilter):
         # 设置颜色属性
         hotspot.setColors(self._fg_color, self._bg_color)
         return hotspot
-        
+
+
 class PermissionHighlightFilter(RegExpFilter):
     """
     权限字符串高亮过滤器 (drwxr-xr-x)
     d -> 紫色, r -> 蓝色, w -> 黄色, x -> 红色
     """
-    
+
     def __init__(self):
         super().__init__()
         # 匹配像 drwxr-xr-x. 这样的权限字符串
         self.setRegExp(re.compile(r'[-d](?:[-r][-w][-x]){3}[\.\+]?'))
-        
+
     def newHotSpot(self, startLine, startColumn, endLine, endColumn):
         # 创建一个普通热点，但在 paintEvent 中我们会特殊处理它
         hotspot = super().newHotSpot(startLine, startColumn, endLine, endColumn)
-        hotspot.setColors(None, None) # 不设置统一颜色，而是使用特殊标记
+        hotspot.setColors(None, None)  # 不设置统一颜色，而是使用特殊标记
         hotspot.setType(Filter.HotSpot.Type.Highlight)
         # 我们利用 type 来标记这是一个权限字符串，在绘制时再细分颜色
         # 但由于 Filter 架构的限制，我们可能需要扩展 HotSpot 或者在 paintEvent 中重新解析
         # 为了简化，我们这里创建一个特殊的子类热点
         return PermissionHotSpot(startLine, startColumn, endLine, endColumn)
 
+
 class PermissionHotSpot(RegExpFilter.HotSpot):
     """权限字符串专用热点"""
+
     def __init__(self, startLine, startColumn, endLine, endColumn):
         super().__init__(startLine, startColumn, endLine, endColumn)
         self.setType(Filter.HotSpot.Type.Highlight)
@@ -478,9 +483,9 @@ class FilterObject(QObject):
     
     对应C++: class FilterObject : public QObject
     """
-    
+
     activated = Signal(QUrl, bool)  # (url, fromContextMenu)
-    
+
     def __init__(self, hotSpot: Filter.HotSpot):
         """
         构造FilterObject
@@ -490,7 +495,7 @@ class FilterObject(QObject):
         """
         super().__init__()
         self._filter = hotSpot  # C++版本使用_filter命名
-    
+
     def emitActivated(self, url: QUrl, fromContextMenu: bool):
         """
         发射activated信号
@@ -502,7 +507,7 @@ class FilterObject(QObject):
         对应C++: void emitActivated(const QUrl& url, bool fromContextMenu)
         """
         self.activated.emit(url, fromContextMenu)
-    
+
     @Slot()
     def activate(self):
         """
@@ -521,17 +526,18 @@ class UrlFilter(RegExpFilter):
     
     对应C++: class UrlFilter : public RegExpFilter
     """
-    
+
     activated = Signal(QUrl, bool)  # (url, fromContextMenu)
-    
+
     # 正则表达式常量 - 与C++完全匹配
     # C++: "(www\\.(?!\\.)|[a-z][a-z0-9+.-]*://)[^\\s<>'\"]+[^!,\\.\\s<>'\"\\]]"
     FullUrlRegExp = re.compile(r"(www\.(?!\.)|[a-z][a-z0-9+.-]*://)[^\s<>'\"]+[^!,\.\s<>'\"\\]")
     # C++: "\\b(\\w|\\.|-)+@(\\w|\\.|-)+\\.\\w+\\b"  
     EmailAddressRegExp = re.compile(r"\b(\w|\.|-)+@(\w|\.|-)+\.\w+\b")
     # 组合正则表达式：匹配完整URL或邮件地址
-    CompleteUrlRegExp = re.compile(r"((www\.(?!\.)|[a-z][a-z0-9+.-]*://)[^\s<>'\"]+[^!,\.\s<>'\"\\]|\b(\w|\.|-)+@(\w|\.|-)+\.\w+\b)")
-    
+    CompleteUrlRegExp = re.compile(
+        r"((www\.(?!\.)|[a-z][a-z0-9+.-]*://)[^\s<>'\"]+[^!,\.\s<>'\"\\]|\b(\w|\.|-)+@(\w|\.|-)+\.\w+\b)")
+
     class HotSpot(RegExpFilter.HotSpot):
         """
         UrlFilter实例创建的热点类型。
@@ -539,13 +545,13 @@ class UrlFilter(RegExpFilter):
         
         对应C++: class UrlFilter::HotSpot : public RegExpFilter::HotSpot
         """
-        
+
         class UrlType(Enum):
             """URL类型枚举"""
-            StandardUrl = 0    # C++风格命名
+            StandardUrl = 0  # C++风格命名
             Email = 1
             Unknown = 2
-        
+
         def __init__(self, startLine: int, startColumn: int, endLine: int, endColumn: int):
             """
             构造URL热点
@@ -555,7 +561,7 @@ class UrlFilter(RegExpFilter):
             super().__init__(startLine, startColumn, endLine, endColumn)
             self.setType(Filter.HotSpot.Type.Link)
             self._urlObject = FilterObject(self)
-        
+
         def urlType(self) -> 'UrlFilter.HotSpot.UrlType':
             """
             确定URL类型
@@ -567,16 +573,16 @@ class UrlFilter(RegExpFilter):
             """
             if not self.capturedTexts():
                 return self.UrlType.Unknown
-            
+
             url = self.capturedTexts()[0]
-            
+
             if UrlFilter.FullUrlRegExp.search(url):
                 return self.UrlType.StandardUrl
             elif UrlFilter.EmailAddressRegExp.search(url):
                 return self.UrlType.Email
             else:
                 return self.UrlType.Unknown
-        
+
         def activate(self, actionName: str = ""):
             """
             在当前URL打开网页浏览器
@@ -588,26 +594,26 @@ class UrlFilter(RegExpFilter):
             """
             if not self.capturedTexts():
                 return
-            
+
             url = self.capturedTexts()[0]
             kind = self.urlType()
-            
+
             if actionName == "copy-action":
                 QApplication.clipboard().setText(url)
                 return
-            
+
             if not actionName or actionName in ["open-action", "click-action"]:
                 if kind == self.UrlType.StandardUrl:
                     if "://" not in url:
                         url = "http://" + url
                 elif kind == self.UrlType.Email:
                     url = "mailto:" + url
-                
+
                 # 使用StrictMode解析URL，如C++版本
                 qurl = QUrl()
                 qurl.setUrl(url, QUrl.ParsingMode.StrictMode)
                 self._urlObject.emitActivated(qurl, actionName != "click-action")
-        
+
         def getUrlObject(self) -> FilterObject:
             """
             获取URL对象
@@ -618,7 +624,7 @@ class UrlFilter(RegExpFilter):
             对应C++: FilterObject* getUrlObject() const
             """
             return self._urlObject
-        
+
         def actions(self) -> List[QAction]:
             """
             返回动作列表
@@ -630,28 +636,28 @@ class UrlFilter(RegExpFilter):
             """
             actionsList = []
             kind = self.urlType()
-            
+
             if kind in [self.UrlType.StandardUrl, self.UrlType.Email]:
                 openAction = QAction(self._urlObject)
                 copyAction = QAction(self._urlObject)
-                
+
                 if kind == self.UrlType.StandardUrl:
                     openAction.setText("打开链接")
                     copyAction.setText("复制链接地址")
                 elif kind == self.UrlType.Email:
                     openAction.setText("发送邮件到...")
                     copyAction.setText("复制邮件地址")
-                
+
                 openAction.setObjectName("open-action")
                 copyAction.setObjectName("copy-action")
-                
+
                 openAction.triggered.connect(self._urlObject.activate)
                 copyAction.triggered.connect(self._urlObject.activate)
-                
+
                 actionsList.extend([openAction, copyAction])
-            
+
             return actionsList
-    
+
     def __init__(self):
         """
         构造URL过滤器
@@ -660,8 +666,8 @@ class UrlFilter(RegExpFilter):
         """
         super().__init__()
         self.setRegExp(self.CompleteUrlRegExp)
-    
-    def newHotSpot(self, startLine: int, startColumn: int, 
+
+    def newHotSpot(self, startLine: int, startColumn: int,
                    endLine: int, endColumn: int) -> 'UrlFilter.HotSpot':
         """
         创建新的URL热点
@@ -682,7 +688,7 @@ class FilterChain(list):
     
     对应C++: class FilterChain : protected QList<Filter*>
     """
-    
+
     def __init__(self):
         """
         构造过滤器链
@@ -690,7 +696,7 @@ class FilterChain(list):
         对应C++: FilterChain()
         """
         super().__init__()
-    
+
     def addFilter(self, filterObj: Filter):
         """
         向链中添加新过滤器。链将在销毁时删除此过滤器
@@ -701,7 +707,7 @@ class FilterChain(list):
         对应C++: void addFilter(Filter* filter)
         """
         self.append(filterObj)
-    
+
     def removeFilter(self, filterObj: Filter):
         """
         从链中移除过滤器
@@ -714,7 +720,7 @@ class FilterChain(list):
         # C++: removeAll(filter)
         while filterObj in self:
             self.remove(filterObj)
-    
+
     def containsFilter(self, filterObj: Filter) -> bool:
         """
         返回链是否包含指定过滤器
@@ -728,7 +734,7 @@ class FilterChain(list):
         对应C++: bool containsFilter(Filter* filter)
         """
         return filterObj in self
-    
+
     def clear(self):
         """
         从链中移除所有过滤器
@@ -736,7 +742,7 @@ class FilterChain(list):
         对应C++: void clear()
         """
         super().clear()
-    
+
     def reset(self):
         """
         重置链中的每个过滤器
@@ -745,7 +751,7 @@ class FilterChain(list):
         """
         for filterObj in self:
             filterObj.reset()
-    
+
     def process(self):
         """
         处理链中的每个过滤器
@@ -754,7 +760,7 @@ class FilterChain(list):
         """
         for filterObj in self:
             filterObj.process()
-    
+
     def setBuffer(self, buffer: str, linePositions: List[int]):
         """
         为链中的每个过滤器设置要处理的缓冲区
@@ -767,7 +773,7 @@ class FilterChain(list):
         """
         for filterObj in self:
             filterObj.setBuffer(buffer, linePositions)
-    
+
     def hotSpotAt(self, line: int, column: int) -> Optional[Filter.HotSpot]:
         """
         返回在指定位置出现的第一个热点
@@ -786,7 +792,7 @@ class FilterChain(list):
             if spot:
                 return spot
         return None
-    
+
     def hotSpots(self) -> List[Filter.HotSpot]:
         """
         返回所有链中过滤器的所有热点列表
@@ -800,7 +806,7 @@ class FilterChain(list):
         for filterObj in self:
             allSpots.extend(filterObj.hotSpots())
         return allSpots
-    
+
     def hotSpotsAtLine(self, line: int) -> List[Filter.HotSpot]:
         """
         返回所有链中过滤器在指定行的热点列表
@@ -820,7 +826,7 @@ class FilterChain(list):
             spots = filterObj.hotSpotsAtLine(line)
             allSpots.extend(spots)
         return allSpots
-    
+
     def empty(self) -> bool:
         """
         返回过滤器链是否为空
@@ -837,7 +843,7 @@ class TerminalImageFilterChain(FilterChain):
     
     对应C++: class TerminalImageFilterChain : public FilterChain
     """
-    
+
     def __init__(self):
         """
         构造终端图像过滤器链
@@ -847,7 +853,7 @@ class TerminalImageFilterChain(FilterChain):
         super().__init__()
         self._buffer: Optional[str] = None
         self._linePositions: Optional[List[int]] = None
-    
+
     def __del__(self):
         """
         析构函数 - 清理内存
@@ -857,9 +863,9 @@ class TerminalImageFilterChain(FilterChain):
         # Python的垃圾回收会自动处理内存，但我们可以显式清理
         self._buffer = None
         self._linePositions = None
-    
-    def setImage(self, image: List[Character], lines: int, columns: int, 
-                lineProperties: List[LineProperty]):
+
+    def setImage(self, image: List[Character], lines: int, columns: int,
+                 lineProperties: List[LineProperty]):
         """
         设置当前终端图像
         
@@ -874,38 +880,38 @@ class TerminalImageFilterChain(FilterChain):
         """
         if self.empty():
             return
-        
+
         # 重置所有过滤器和热点
         self.reset()
-        
+
         # 为过滤器设置新的共享缓冲区
         newBuffer = ""
         newLinePositions = []
-        
+
         # 更新缓冲区引用
         self.setBuffer(newBuffer, newLinePositions)
-        
+
         # 释放旧缓冲区
         self._buffer = newBuffer
         self._linePositions = newLinePositions
-        
+
         # 处理每一行
         for i in range(lines):
             self._linePositions.append(len(self._buffer))
-            
+
             # 解码该行
             lineStart = i * columns
             lineChars = image[lineStart:lineStart + columns] if lineStart + columns <= len(image) else image[lineStart:]
-            
+
             # 确保我们有足够的字符
             if len(lineChars) < columns:
                 # 用空字符填充不足的部分
                 lineChars.extend([Character() for _ in range(columns - len(lineChars))])
-            
+
             # 简化的字符解码逻辑 - 直接转换为字符串，包含尾随空白
             lineText = self._decodeLineToString(lineChars, columns, True)
             self._buffer += lineText
-            
+
             # 假装每行都以换行符结尾
             # 这可以防止出现在一行末尾的链接被视为出现在下一行开头的链接的一部分
             #
@@ -916,10 +922,10 @@ class TerminalImageFilterChain(FilterChain):
             lineProp = lineProperties[i] if i < len(lineProperties) else LINE_DEFAULT
             if not (lineProp & LINE_WRAPPED):
                 self._buffer += '\n'
-        
+
         # 设置缓冲区给所有过滤器
         self.setBuffer(self._buffer, self._linePositions)
-    
+
     def _decodeLineToString(self, characters: List[Character], count: int, includeTrailingWhitespace: bool) -> str:
         """
         简化的字符行解码函数，将字符列表转换为字符串
@@ -934,12 +940,12 @@ class TerminalImageFilterChain(FilterChain):
         """
         if not characters:
             return ""
-        
+
         # 构建字符串而不是逐字符写入流，这样更高效
         plainTextParts = []
-        
+
         outputCount = count
-        
+
         # 如果禁用尾随空白，则找到行的结尾
         if not includeTrailingWhitespace:
             for i in range(count - 1, -1, -1):
@@ -947,11 +953,11 @@ class TerminalImageFilterChain(FilterChain):
                     break
                 else:
                     outputCount -= 1
-        
+
         i = 0
         while i < outputCount:
             char = characters[i]
-            
+
             # 检查是否为扩展字符（如果有扩展字符表）
             if hasattr(char, 'rendition') and char.rendition & 0x20000000:  # RE_EXTENDED_CHAR
                 # 处理扩展字符 - 如果有扩展字符表的话
@@ -981,18 +987,18 @@ class TerminalImageFilterChain(FilterChain):
                         plainTextParts.append(' ')  # 无效字符用空格替代
                 except (ValueError, OverflowError):
                     plainTextParts.append(' ')  # 异常时用空格替代
-                
+
                 # 考虑字符宽度（如果可用的话）
                 try:
                     i += max(1, string_width(chr(charCode)) if 0 <= charCode <= 0x10FFFF else 1)
                 except:
                     i += 1
-        
+
         # 连接所有字符
         return "".join(plainTextParts)
-    
+
     # 兼容性方法
-    def set_image(self, image: List[Character], lines: int, columns: int, 
-                 line_properties: List[LineProperty]):
+    def set_image(self, image: List[Character], lines: int, columns: int,
+                  line_properties: List[LineProperty]):
         """兼容性方法：snake_case版本"""
-        return self.setImage(image, lines, columns, line_properties) 
+        return self.setImage(image, lines, columns, line_properties)

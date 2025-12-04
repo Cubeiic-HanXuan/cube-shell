@@ -4,19 +4,20 @@ import logging
 import os
 import pickle
 import platform
+import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
 import uuid
+from collections import defaultdict
+from socket import socket
+
 import PySide6
 import appdirs
 import qdarktheme
 import toml
-from collections import defaultdict
-from socket import socket
-
 from PySide6.QtCore import QTimer, Signal, Qt, QPoint, QRect, QEvent, QObject, Slot, QUrl, QCoreApplication, \
     QSize, QThread, QMetaObject, Q_ARG, QProcessEnvironment
 from PySide6.QtGui import QColor
@@ -33,16 +34,16 @@ from pygments.lexers import BashLexer
 
 from core.docker.docker_compose_editor import DockerComposeEditor
 from core.docker.docker_installer_ui import DockerInstallerWidget
-from core.frequently_used_commands import TreeSearchApp
 from core.forwarder import ForwarderManager
+from core.frequently_used_commands import TreeSearchApp
 from core.uploader.progress_adapter import ProgressAdapter
 from core.uploader.sftp_uploader_core import SFTPUploaderCore
 from core.vars import ICONS, CONF_FILE, CMDS, KEYS
 from function import util, about, theme, traversal
 from function.ssh_func import SshClient
 from function.util import format_file_size, has_valid_suffix
-from qtermwidget.qtermwidget import QTermWidget
 from qtermwidget.filter import HighlightFilter, PermissionHighlightFilter
+from qtermwidget.qtermwidget import QTermWidget
 from style.style import updateColor, InstalledButtonStyle, InstallButtonStyle
 from ui import add_config, text_editor, confirm, main, docker_install, auth
 from ui.add_tunnel_config import Ui_AddTunnelConfig
@@ -80,13 +81,113 @@ def abspath(path):
     return os.path.join(current_dir, 'conf', path)
 
 
+class DockerInfoThread(QThread):
+    """后台获取 Docker 信息的线程"""
+    data_ready = Signal(dict, list)  # groups, container_list
+
+    def __init__(self, ssh_conn):
+        super().__init__()
+        self.ssh_conn = ssh_conn
+
+    def run(self):
+        if not self.ssh_conn or not self.ssh_conn.active:
+            self.data_ready.emit({}, [])
+            return
+
+        groups = defaultdict(list)
+        container_list = []
+        try:
+            # 获取 compose 项目和配置文件列表
+            ls = self.ssh_conn.sudo_exec("docker compose ls -a")
+            if ls:
+                lines = ls.strip().splitlines()
+                for compose_ls in lines[1:]:
+                    parts = compose_ls.rsplit(None, 1)
+                    if len(parts) >= 2:
+                        config = parts[-1]
+                        ps_cmd = f"docker compose --file {config} ps -a --format '{{{{json .}}}}'"
+                        conn_exec = self.ssh_conn.sudo_exec(ps_cmd)
+
+                        current_containers = []
+                        for ps in conn_exec.strip().splitlines():
+                            if ps.strip():
+                                try:
+                                    data = json.loads(ps)
+                                    current_containers.append(data)
+                                except:
+                                    pass
+
+                        for item in current_containers:
+                            project_name = item.get('Project', '未知')
+                            groups[project_name].append(item)
+
+            # 如果没有 compose 组，或者作为 fallback，获取普通 docker 容器
+            if not groups:
+                conn_exec = self.ssh_conn.exec("docker ps -a --format '{{json .}}'")
+                for ps in conn_exec.strip().splitlines():
+                    if ps.strip():
+                        try:
+                            data = json.loads(ps)
+                            container_list.append(data)
+                        except:
+                            pass
+
+            self.data_ready.emit(groups, container_list)
+
+        except Exception as e:
+            util.logger.error(f"Docker info fetch error: {e}")
+            self.data_ready.emit({}, [])
+
+
+class CommonContainersThread(QThread):
+    """后台获取常用容器信息的线程"""
+    data_ready = Signal(dict, bool)  # services_config, has_docker
+
+    def __init__(self, ssh_conn, config_path):
+        super().__init__()
+        self.ssh_conn = ssh_conn
+        self.config_path = config_path
+
+    def run(self):
+        if not self.ssh_conn or not self.ssh_conn.active:
+            self.data_ready.emit({}, False)
+            return
+
+        try:
+            data_ = self.ssh_conn.sudo_exec('docker --version')
+            if not data_:
+                self.data_ready.emit({}, False)
+                return
+
+            conn_exec = self.ssh_conn.sudo_exec("docker ps -a --format '{{json .}}'")
+            container_list = []
+            for ps in conn_exec.strip().splitlines():
+                if ps.strip():
+                    try:
+                        data = json.loads(ps)
+                        container_list.append(data)
+                    except:
+                        pass
+
+            services = util.get_compose_service(self.config_path)
+            services_config = util.update_has_attribute(services, container_list)
+
+            self.data_ready.emit(services_config, True)
+
+        except Exception as e:
+            util.logger.error(f"Common containers fetch error: {e}")
+            self.data_ready.emit({}, False)
+
+
 # 主界面逻辑
 class MainDialog(QMainWindow):
     initSftpSignal = Signal()
-    finished = Signal(str, str)  # 信号：成功结果 (命令, 输出)
-    error = Signal(str, str)  # 信号：错误 (命令, 错误信息)
-    # 🔧 新增：主题切换信号
-    themeChanged = Signal(bool)  # 参数：is_dark_theme
+    # 信号：成功结果 (命令, 输出)
+    finished = Signal(str, str)
+    # 信号：错误 (命令, 错误信息)
+    error = Signal(str, str)
+    # 新增：主题切换信号，参数：is_dark_theme
+    themeChanged = Signal(bool)
 
     # 异步更新UI信号
     update_file_tree_signal = Signal(str, str, list)  # connection_id, pwd, file_list
@@ -192,6 +293,9 @@ class MainDialog(QMainWindow):
 
         # 记录当前文件树显示的连接ID
         self.current_displayed_connection_id = None
+
+        # 连接状态防抖
+        self.is_connecting_lock = False
 
     def on_NAT_traversal(self):
         device = self.ui.comboBox.currentText()
@@ -310,7 +414,8 @@ class MainDialog(QMainWindow):
                     shell.close()
                     # 关键：处理挂起的事件，确保closeEvent被完整执行，进程被清理
                     QApplication.processEvents()
-                except Exception:
+                except Exception as e:
+                    util.logger.error(f"Failed to delete tab: {e}")
                     pass
 
             # 2. 获取 Widget 引用
@@ -333,7 +438,8 @@ class MainDialog(QMainWindow):
                     try:
                         shell.close()
                         QApplication.processEvents()
-                    except Exception:
+                    except Exception as e:
+                        util.logger.error(f"Failed to delete tab: {e}")
                         pass
 
                 # 2. 获取 Widget 引用
@@ -348,46 +454,52 @@ class MainDialog(QMainWindow):
                 break
 
     # 增加标签页 - 修改为支持 QTermWidget
-    def add_new_tab(self):
-        focus = self.ui.treeWidget.currentIndex().row()
-        if focus != -1:
-            name = self.ui.treeWidget.topLevelItem(focus).text(0)
-            self.tab = QWidget()
-            self.tab.setObjectName("tab")
-
-            self.verticalLayout_index = QVBoxLayout(self.tab)
-            self.verticalLayout_index.setSpacing(0)
-            self.verticalLayout_index.setObjectName(u"verticalLayout_index")
-            self.verticalLayout_index.setContentsMargins(0, 0, 0, 0)
-
-            self.verticalLayout_shell = QVBoxLayout()
-            self.verticalLayout_shell.setObjectName(u"verticalLayout_shell")
-
-            # 使用自定义的SSHQTermWidget，提供右键菜单支持
-            self.Shell = SSHQTermWidget(self.tab)
-
-            self.Shell.setObjectName(u"Shell")
-
-            # 🔧 修复：使用addWidget并设置拉伸因子确保完全填充
-            self.verticalLayout_shell.addWidget(self.Shell, 0)  # 拉伸因子1
-            self.verticalLayout_index.addLayout(self.verticalLayout_shell, 0)  # 拉伸因子1
-
-            tab_name = self.generate_unique_tab_name(name)
-            tab_index = self.ui.ShellTab.addTab(self.tab, tab_name)
-            self.ui.ShellTab.setCurrentIndex(tab_index)
-
-            if tab_index > 0:
-                close_button = QPushButton(self)
-                close_button.setCursor(QCursor(Qt.PointingHandCursor))
-                close_button.setIcon(self.style().standardIcon(QStyle.SP_TitleBarCloseButton))
-                close_button.setMaximumSize(QSize(16, 16))
-                close_button.setFlat(True)
-                close_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-
-                close_button.clicked.connect(lambda: self.off(tab_index, tab_name))
-                self.ui.ShellTab.tabBar().setTabButton(tab_index, QTabBar.LeftSide, close_button)
+    def add_new_tab(self, name=None):
+        if name is None:
+            focus = self.ui.treeWidget.currentIndex().row()
+            if focus != -1:
+                name = self.ui.treeWidget.topLevelItem(focus).text(0)
             else:
-                self.ui.ShellTab.tabBar().setTabButton(tab_index, QTabBar.LeftSide, None)
+                return -1, None
+
+        self.tab = QWidget()
+        self.tab.setObjectName("tab")
+
+        self.verticalLayout_index = QVBoxLayout(self.tab)
+        self.verticalLayout_index.setSpacing(0)
+        self.verticalLayout_index.setObjectName(u"verticalLayout_index")
+        self.verticalLayout_index.setContentsMargins(0, 0, 0, 0)
+
+        self.verticalLayout_shell = QVBoxLayout()
+        self.verticalLayout_shell.setObjectName(u"verticalLayout_shell")
+
+        # 使用自定义的SSHQTermWidget，提供右键菜单支持
+        self.Shell = SSHQTermWidget(self.tab)
+
+        self.Shell.setObjectName(u"Shell")
+
+        # 🔧 修复：使用addWidget并设置拉伸因子确保完全填充
+        self.verticalLayout_shell.addWidget(self.Shell, 0)  # 拉伸因子1
+        self.verticalLayout_index.addLayout(self.verticalLayout_shell, 0)  # 拉伸因子1
+
+        tab_name = self.generate_unique_tab_name(name)
+        tab_index = self.ui.ShellTab.addTab(self.tab, tab_name)
+        self.ui.ShellTab.setCurrentIndex(tab_index)
+
+        if tab_index > 0:
+            close_button = QPushButton(self)
+            close_button.setCursor(QCursor(Qt.PointingHandCursor))
+            close_button.setIcon(self.style().standardIcon(QStyle.SP_TitleBarCloseButton))
+            close_button.setMaximumSize(QSize(16, 16))
+            close_button.setFlat(True)
+            close_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+            close_button.clicked.connect(lambda: self.off(tab_index, tab_name))
+            self.ui.ShellTab.tabBar().setTabButton(tab_index, QTabBar.LeftSide, close_button)
+        else:
+            self.ui.ShellTab.tabBar().setTabButton(tab_index, QTabBar.LeftSide, None)
+
+        return tab_index, self.Shell
 
     # 生成标签名
     def generate_unique_tab_name(self, base_name):
@@ -436,7 +548,8 @@ class MainDialog(QMainWindow):
             elif terminal:
                 # 如果没有记录主题，默认设置 Ubuntu
                 terminal.setColorScheme("Ubuntu")
-        except Exception:
+        except Exception as e:
+            util.logger.error(f"Failed to changed shell tab: {e}")
             pass
 
         # 切换标签页时，先重置当前显示的连接ID，确保 refreshDirs 能强制刷新UI
@@ -582,7 +695,8 @@ class MainDialog(QMainWindow):
         try:
             processes = self.get_filtered_process_list(ssh_conn)
             self.update_process_list_signal.emit(ssh_conn.id, processes)
-        except Exception:
+        except Exception as e:
+            util.logger.error(f"Failed to update process list: {e}")
             pass
 
     @Slot(str, list)
@@ -602,6 +716,14 @@ class MainDialog(QMainWindow):
         self.apply_filter(self.ui.search_box.text())
 
     def display_processes(self):
+        # 设置列头
+        headers = ["PID", "用户", "内存", "CPU", "端口", "命令行"]
+        if self.ui.result.columnCount() != len(headers):
+            self.ui.result.setColumnCount(len(headers))
+        
+        self.ui.result.setHorizontalHeaderLabels(headers)
+        self.ui.result.horizontalHeader().setVisible(True)
+        
         self.ui.result.setRowCount(0)
         for row_num, process in enumerate(self.filtered_processes):
             self.ui.result.insertRow(row_num)
@@ -609,7 +731,7 @@ class MainDialog(QMainWindow):
             self.ui.result.setItem(row_num, 1, QTableWidgetItem(process['user']))
             self.ui.result.setItem(row_num, 2, QTableWidgetItem(str(process['memory'])))
             self.ui.result.setItem(row_num, 3, QTableWidgetItem(str(process['cpu'])))
-            self.ui.result.setItem(row_num, 4, QTableWidgetItem(process['name']))
+            self.ui.result.setItem(row_num, 4, QTableWidgetItem(process.get('port', '')))
             self.ui.result.setItem(row_num, 5, QTableWidgetItem(process['command']))
             self.ui.result.item(row_num, 0).setData(Qt.UserRole, str(process['pid']))
 
@@ -624,41 +746,86 @@ class MainDialog(QMainWindow):
             if ssh_conn is None:
                 ssh_conn = self.ssh()
                 if not ssh_conn: return []
-                # 在远程服务器上执行命令获取进程信息
-                stdin, stdout, stderr = ssh_conn.conn.exec_command(timeout=10, command="ps aux --no-headers",
-                                                                   get_pty=False)
-            else:
-                # 后台线程使用
-                stdin, stdout, stderr = ssh_conn.conn.exec_command(timeout=10, command="ps aux --no-headers",
-                                                                   get_pty=False)
 
-            output = stdout.readlines()
+            # 1. 获取进程列表
+            stdin, stdout, stderr = ssh_conn.conn.exec_command(timeout=10, command="ps aux --no-headers",
+                                                               get_pty=False)
+            ps_output = stdout.readlines()
 
-            # 解析输出结果
+            # 2. 获取端口信息 (使用 ss 命令)
+            # -t: tcp, -u: udp, -l: listening, -n: numeric, -p: processes, -e: extended
+            # 2>/dev/null 忽略错误输出
+            stdin, stdout, stderr = ssh_conn.conn.exec_command(timeout=10, command="ss -tulnpe 2>/dev/null",
+                                                               get_pty=False)
+            ss_output = stdout.readlines()
+
+            # 解析端口信息
+            pid_ports = defaultdict(list)
+            for line in ss_output:
+                # 跳过标题行
+                if line.startswith('Netid') or line.startswith('State'):
+                    continue
+                
+                try:
+                    fields = line.strip().split()
+                    if len(fields) < 5: continue
+
+                    # 获取本地地址:端口
+                    local_addr = fields[4]
+                    if ':' in local_addr:
+                        port = local_addr.split(':')[-1]
+                    else:
+                        continue
+                    
+                    # 获取 PID
+                    # 格式示例: users:(("sshd",pid=123,fd=3))
+                    if 'users:' in line:
+                        # 使用正则提取所有 pid
+                        pids = re.findall(r'pid=(\d+)', line)
+                        for pid in pids:
+                            if port not in pid_ports[pid]:
+                                pid_ports[pid].append(port)
+                except Exception:
+                    pass
+
+            # 解析进程列表
             process_list = []
-            system_users = []  # 添加系统用户列表
-            for line in output:
-                fields = line.strip().split()
-                user = fields[0]
-                if user not in system_users:
-                    pid = fields[1]
-                    memory = fields[3]
-                    cpu = fields[2]
-                    name = fields[-1] if len(fields[-1]) <= 15 else fields[-1][:12] + "..."
-                    command = " ".join(fields[10:])
-                    process_list.append({
-                        'pid': pid,
-                        'user': user,
-                        'memory': memory,
-                        'cpu': cpu,
-                        'name': name,
-                        'command': command
-                    })
+            system_users = []
+            for line in ps_output:
+                try:
+                    fields = line.strip().split()
+                    if len(fields) < 11: continue
+
+                    user = fields[0]
+                    # 这里原本的逻辑似乎想过滤系统用户，但 system_users 列表是空的且只是被添加到列表中
+                    # 并没有实际的过滤逻辑，所以保留原样
+                    if user not in system_users:
+                        pid = fields[1]
+                        memory = fields[3]
+                        cpu = fields[2]
+                        # name = fields[-1] if len(fields[-1]) <= 15 else fields[-1][:12] + "..." # 原代码
+                        
+                        # 获取端口
+                        ports = pid_ports.get(pid, [])
+                        port_str = ",".join(ports) if ports else ""
+                        
+                        command = " ".join(fields[10:])
+                        
+                        process_list.append({
+                            'pid': pid,
+                            'user': user,
+                            'memory': memory,
+                            'cpu': cpu,
+                            'port': port_str,  # 替换 name 为 port
+                            'command': command
+                        })
+                except Exception:
+                    pass
 
             return process_list
 
         except Exception as e:
-            QMessageBox.critical(self, "Error", self.tr("连接或检索进程列表失败") + f": {e}")
+            util.logger.error(f"Failed to connect or retrieve process list: {e}")
             return []
 
     def kill_selected_process(self):
@@ -924,53 +1091,54 @@ class MainDialog(QMainWindow):
                 item.setSelected(True)
 
     # 连接服务器
-    def run(self):
-        focus = self.ui.treeWidget.currentIndex().row()
-        if focus != -1:
-            name = self.ui.treeWidget.topLevelItem(focus).text(0)
-
-            with open(get_config_path('config.dat'), 'rb') as c:
-                conf = pickle.loads(c.read())[name]
-                c.close()
-
-            username, password, host, key_type, key_file = '', '', '', '', ''
-
-            if len(conf) == 3:
-                username, password, host = conf[0], conf[1], conf[2]
+    def run(self, name=None, terminal=None):
+        if name is None:
+            focus = self.ui.treeWidget.currentIndex().row()
+            if focus != -1:
+                name = self.ui.treeWidget.topLevelItem(focus).text(0)
             else:
-                username, password, host, key_type, key_file = conf[0], conf[1], conf[2], conf[3], conf[4]
-
-            # 检查服务器是否可以连接
-            if not util.check_server_accessibility(host.split(':')[0], int(host.split(':')[1])):
-                # 删除当前的 tab 并显示警告消息
-                self._delete_tab()
-                QMessageBox.warning(self, self.tr("连接超时"), self.tr("服务器无法连接，请检查网络或服务器状态"))
+                self.alarm(self.tr('请选择一台设备！'))
                 return
 
-            try:
+        with open(get_config_path('config.dat'), 'rb') as c:
+            conf = pickle.loads(c.read())[name]
+            c.close()
+
+        username, password, host, key_type, key_file = '', '', '', '', ''
+
+        if len(conf) == 3:
+            username, password, host = conf[0], conf[1], conf[2]
+        else:
+            username, password, host, key_type, key_file = conf[0], conf[1], conf[2], conf[3], conf[4]
+
+        # 移除同步阻塞的网络检查
+        # if not util.check_server_accessibility(host.split(':')[0], int(host.split(':')[1])): ...
+
+        try:
+            if terminal is None:
                 current_index = self.ui.ShellTab.currentIndex()
                 terminal = self.get_text_browser_from_tab(current_index)
-                # 🔧 修复：使用记录的主题，而不是硬编码
-                if hasattr(terminal, 'current_theme_name'):
-                    terminal.setColorScheme(terminal.current_theme_name)
-                else:
-                    terminal.setColorScheme("Ubuntu")
 
-                # 🔧 修正：分离主机地址和端口
-                host_ip = host.split(':')[0]  # 纯IP地址
-                host_port = int(host.split(':')[1])  # 端口号
-                self._connect_with_qtermwidget(host_ip, host_port, username, password, key_type, key_file, terminal)
+            # 🔧 修复：使用记录的主题，而不是硬编码
+            if hasattr(terminal, 'current_theme_name'):
+                terminal.setColorScheme(terminal.current_theme_name)
+            else:
+                terminal.setColorScheme("Ubuntu")
 
-            except Exception as e:
-                util.logger.error(str(e))
-                self.Shell.setPlaceholderText(str(e))
-        else:
-            self.alarm(self.tr('请选择一台设备！'))
+            # 🔧 修正：分离主机地址和端口
+            host_ip = host.split(':')[0]  # 纯IP地址
+            host_port = int(host.split(':')[1])  # 端口号
+            self._connect_with_qtermwidget(host_ip, host_port, username, password, key_type, key_file, terminal)
+
+        except Exception as e:
+            util.logger.error(str(e))
+            if terminal:
+                terminal.setPlaceholderText(str(e))
 
     def _connect_with_qtermwidget(self, host, port, username, password, key_type, key_file, terminal):
         """使用 QTermWidget 直接处理 SSH 连接"""
         try:
-            print(f"Connecting to {host}:{port} via QTermWidget...")
+            util.logger.info(f"Connecting to {host}:{port} via QTermWidget...")
 
             # 设置终端程序为bash
             # terminal.setShellProgram("/bin/bash")
@@ -1015,8 +1183,8 @@ class MainDialog(QMainWindow):
                     # 设置密钥文件权限为600
                     try:
                         os.chmod(key_file_path, 0o600)
-                    except Exception as e1:
-                        print(f"设置密钥权限失败: {e1}")
+                    except Exception as e:
+                        util.logger.error(f"设置密钥权限失败: {e}")
 
                     ssh_args.extend(["-i", key_file_path])
 
@@ -1046,55 +1214,45 @@ class MainDialog(QMainWindow):
                 QTimer.singleShot(1500, auto_input_password)
 
             # 为了支持 SFTP 等功能，建立后台 SSH 连接
-            print("建立后台 SSH 连接用于 SFTP...")
+            util.logger.info("建立后台 SSH 连接用于 SFTP...")
             self._establish_background_ssh(host, port, username, password, key_type, key_file)
 
         except Exception as e2:
-            print(f"QTermWidget SSH 连接失败: {e2}")
+            util.logger.error(f"QTermWidget SSH 连接失败: {e2}")
             # 回退到原有方式
             self._fallback_to_original_ssh(host, port, username, password, key_type, key_file)
 
     def _establish_background_ssh(self, host, port, username, password, key_type, key_file):
         """建立后台 SSH 连接用于 SFTP 等功能"""
         try:
-            # 异步建立后台连接
-            QMetaObject.invokeMethod(
-                self.ssh_connector,
-                "connect_ssh",
-                Qt.QueuedConnection,
-                Q_ARG(str, host),  # 这里已经是纯IP地址
-                Q_ARG(int, port),  # 这里已经是数字端口
-                Q_ARG(str, username),
-                Q_ARG(str, password),
-                Q_ARG(str, key_type),
-                Q_ARG(str, key_file)
-            )
+            # 直接调用连接器的方法（因为现在是线程池模式，connect_ssh 内部已经是非阻塞的了）
+            # 不需要 invokeMethod，因为 connect_ssh 不再是在另一个线程中运行的槽
+            self.ssh_connector.connect_ssh(host, port, username, password, key_type, key_file)
         except Exception as e:
-            print(f"建立后台 SSH 连接失败: {e}")
+            util.logger.error(f"建立后台 SSH 连接失败: {e}")
 
     def _fallback_to_original_ssh(self, host, port, username, password, key_type, key_file):
         """回退到原有 SSH 连接方式"""
         print("回退到原有 SSH 连接方式")
-        QMetaObject.invokeMethod(
-            self.ssh_connector,
-            "connect_ssh",
-            Qt.QueuedConnection,
-            Q_ARG(str, host),  # 这里已经是纯IP地址
-            Q_ARG(int, port),  # 这里已经是数字端口
-            Q_ARG(str, username),
-            Q_ARG(str, password),
-            Q_ARG(str, key_type),
-            Q_ARG(str, key_file)
-        )
+        # 同理，直接调用
+        self.ssh_connector.connect_ssh(host, port, username, password, key_type, key_file)
 
     def on_ssh_connected(self, ssh_conn):
         """SSH连接成功回调 - 区分 QTermWidget 模式和传统模式"""
+        # 修复：确保在主线程中执行 UI 操作
+        if QThread.currentThread() != QCoreApplication.instance().thread():
+            QMetaObject.invokeMethod(self, "on_ssh_connected", Qt.QueuedConnection, Q_ARG(object, ssh_conn))
+            return
+
         current_index = self.ui.ShellTab.currentIndex()
         ssh_conn.Shell = self.Shell
         self.ui.ShellTab.setTabWhatsThis(current_index, ssh_conn.id)
 
         # 将连接实例存储到本地字典，替代 mux
         self.ssh_clients[ssh_conn.id] = ssh_conn
+
+        # 修复：保存当前连接 ID，以便 refreshDirs 能通过安全检查
+        self.current_displayed_connection_id = ssh_conn.id
 
         # 初始化 SFTP
         self.initSftpSignal.emit()
@@ -1137,7 +1295,7 @@ class MainDialog(QMainWindow):
         except socket.timeout:
             self.error.emit(cmd, "Error: Connection or execution timeout.")
         except Exception as e:
-            # self.ui.result.append(e)
+            util.logger.error(f"Failed to get data: {e}")
             return 'error'
 
     #  操作docker 成功
@@ -1179,8 +1337,35 @@ class MainDialog(QMainWindow):
             else:
                 self.editFile()
         elif not self.isConnected:
-            self.add_new_tab()
-            self.run()
+            # 防抖：如果正在连接中，忽略本次点击
+            if self.is_connecting_lock:
+                return
+
+            # 获取选中的设备名称
+            focus = self.ui.treeWidget.currentIndex().row()
+            if focus != -1:
+                name = self.ui.treeWidget.topLevelItem(focus).text(0)
+
+                # 标记开始连接
+                self.is_connecting_lock = True
+
+                # 创建新 Tab 并立即启动连接
+                # 使用 QTimer.singleShot 将连接过程推迟到事件循环的下一次迭代，确保 UI 响应
+                # 同时解锁防抖
+                def start_connect_sequence():
+                    try:
+                        # 传递 name 参数，避免依赖 UI 焦点
+                        tab_index, terminal = self.add_new_tab(name)
+                        if tab_index != -1:
+                            self.run(name, terminal)
+                    finally:
+                        # 释放锁
+                        self.is_connecting_lock = False
+
+                QTimer.singleShot(10, start_connect_sequence)
+            else:
+                self.add_new_tab()
+                self.run()
 
     # 回车获取目录
     def on_return_pressed(self):
@@ -1209,6 +1394,7 @@ class MainDialog(QMainWindow):
                 ssh_conn.close()
                 del self.ssh_clients[this]
         except Exception as e:
+            util.logger.error(f"Failed to off ssh client: {e}")
             pass
 
         self.isConnected = False
@@ -1283,7 +1469,8 @@ class MainDialog(QMainWindow):
                     if shell:
                         try:
                             shell.close()
-                        except Exception:
+                        except Exception as e:
+                            util.logger.error(f"Failed to close all ShellTab: {e}")
                             pass
 
             # 停止SSH连接器
@@ -1321,19 +1508,18 @@ class MainDialog(QMainWindow):
                                 pass
                             if hasattr(ssh_conn, 'process_thread') and ssh_conn.process_thread.is_alive():
                                 pass
-                        except Exception:
+                        except Exception as e:
+                            util.logger.error(f"Failed to close all client: {e}")
                             pass
 
                 def cleanup_ssh_connections(conns):
-                    try:
-                        for ssh_conn in conns:
-                            if ssh_conn:
-                                try:
-                                    ssh_conn.close()
-                                except Exception:
-                                    pass
-                    except Exception as e:
-                        util.logger.error(f"Error during async cleanup: {e}")
+                    for conn in conns:
+                        try:
+                            if conn:
+                                conn.close()
+                        except Exception as e1:
+                            util.logger.error(f"Failed to cleanup conn: {e1}")
+                            pass
 
                 threading.Thread(target=cleanup_ssh_connections, args=(connections,), daemon=True).start()
                 self.ssh_clients.clear()
@@ -1704,11 +1890,40 @@ class MainDialog(QMainWindow):
     def refreshDirs_thread(self, ssh_conn):
         """后台线程获取目录数据"""
         try:
-            pwd, files = self.getDirNow(ssh_conn)
+            # 检查连接是否有效
+            if not ssh_conn or not ssh_conn.active or not ssh_conn.is_connected():
+                return
+
+            # 使用线程安全的方式调用
+            # 注意：这里是在子线程中运行，self 是 MainDialog (QObject)
+            # 发送信号是线程安全的
+
+            # 尝试获取数据
+            result = self.getDirNow(ssh_conn)
+            if not result:
+                return
+
+            pwd, files = result
+
+            # 再次检查连接状态（因为获取数据是耗时操作）
+            if not ssh_conn.active:
+                return
+
             if pwd:  # 确保获取成功
+                # 检查 MainDialog 是否还在运行
+                # 在 C++ / PySide 中，很难直接检查 self 是否被销毁，
+                # 但可以通过捕获 RuntimeError 来处理
                 self.update_file_tree_signal.emit(ssh_conn.id, pwd, files[1:])
+
+        except RuntimeError:
+            # 捕获 "wrapped C/C++ object of type MainDialog has been deleted"
+            pass
         except Exception as e:
-            util.logger.error(f"Error in refreshDirs_thread: {e}")
+            # 忽略特定的运行时错误
+            if "Signal source has been deleted" in str(e):
+                pass
+            else:
+                util.logger.error(f"Error in refreshDirs_thread: {e}")
 
     @Slot(str, str, list)
     def handle_file_tree_updated(self, conn_id, pwd, files):
@@ -2068,143 +2283,184 @@ class MainDialog(QMainWindow):
                 # 允许调整列宽
                 header.setSectionResizeMode(QHeaderView.Interactive)
 
-                groups = self.compose_container_list()
-                if len(groups) != 0:
-                    # 有项目的情况
-                    for project, containers in groups.items():
-                        # 创建项目顶层节点
-                        project_item = QTreeWidgetItem()
-                        project_item.setText(0, project)
-                        bold_font = QFont()
-                        bold_font.setBold(True)
-                        project_item.setFont(0, bold_font)
-                        # 设置项目名称居中
-                        for i in range(self.ui.treeWidgetDocker.columnCount()):
-                            project_item.setTextAlignment(i, Qt.AlignCenter)
-                        self.ui.treeWidgetDocker.addTopLevelItem(project_item)
+                # 显示加载状态
+                loading_item = QTreeWidgetItem()
+                loading_item.setText(0, "正在加载 Docker 信息...")
+                self.ui.treeWidgetDocker.addTopLevelItem(loading_item)
 
-                        if containers:  # 有容器，添加子节点
-                            for c in containers:
-                                container_item = QTreeWidgetItem()
-                                container_item.setText(1, c.get('ID', ""))
-                                container_item.setText(2, c.get('Name', ""))
-                                container_item.setText(3, c.get('Image', ""))
-                                container_item.setText(4, c.get('State', ""))
-                                container_item.setText(5, c.get('Command', ""))
-                                container_item.setText(6, c.get('CreatedAt', ""))
-                                container_item.setText(7, c.get('Ports', ""))
-                                container_item.setIcon(0, QIcon(":icons8-docker-48.png"))
-                                # 设置容器信息居中
-                                # container_item.setTextAlignment(4, Qt.AlignCenter)
-                                # 设置项目名称居中
-                                for i in range(self.ui.treeWidgetDocker.columnCount()):
-                                    container_item.setTextAlignment(i, Qt.AlignCenter)
-                                project_item.addChild(container_item)
-                elif len(groups) == 0:
-                    container_list = self.docker_container_list()
-                    # 只有容器的情况
-                    for c in container_list:
-                        container_item = QTreeWidgetItem()
-                        container_item.setText(1, c.get('ID', ""))
-                        container_item.setText(2, c.get('Names', ""))
-                        container_item.setText(3, c.get('Image', ""))
-                        container_item.setText(4, c.get('State', ""))
-                        container_item.setText(5, c.get('Command', ""))
-                        container_item.setText(6, c.get('CreatedAt', ""))
-                        container_item.setText(7, c.get('Ports', ""))
-                        container_item.setIcon(0, QIcon(":icons8-docker-48.png"))
-                        # 设置容器信息居中
-                        for i in range(self.ui.treeWidgetDocker.columnCount()):
-                            container_item.setTextAlignment(i, Qt.AlignCenter)
-                        self.ui.treeWidgetDocker.addTopLevelItem(container_item)
-                else:
-                    self.ui.treeWidgetDocker.addTopLevelItem(QTreeWidgetItem(0))
-                    self.ui.treeWidgetDocker.topLevelItem(0).setText(0, self.tr('服务器还没有安装docker容器'))
+                # 启动后台线程
+                # 如果已有线程正在运行，先停止它（可选，或者忽略新请求）
+                # 这里选择忽略新请求如果正在加载
+                if hasattr(self, 'docker_thread') and self.docker_thread.isRunning():
+                    return
 
-                # 展开所有节点
-                self.ui.treeWidgetDocker.expandAll()
+                self.docker_thread = DockerInfoThread(self.ssh())
+                self.docker_thread.data_ready.connect(self.update_docker_ui)
+                # 关键修复：不要在 finished 信号中调用 deleteLater，因为线程可能还在处理事件循环
+                # 使用 cleanup_thread 仅解除引用，让 Python GC 处理（或者手动安全管理）
+                # self.docker_thread.finished.connect(lambda: self.cleanup_thread('docker_thread'))
+                self.docker_thread.start()
 
         else:
             self.ui.treeWidgetDocker.clear()
             self.ui.treeWidgetDocker.addTopLevelItem(QTreeWidgetItem(0))
             self.ui.treeWidgetDocker.topLevelItem(0).setText(0, self.tr('没有可用的docker容器'))
 
+    @Slot(dict, list)
+    def update_docker_ui(self, groups, container_list):
+        """更新 Docker UI (槽函数)"""
+        self.ui.treeWidgetDocker.clear()
+
+        if groups:
+            # 有项目的情况
+            for project, containers in groups.items():
+                # 创建项目顶层节点
+                project_item = QTreeWidgetItem()
+                project_item.setText(0, project)
+                bold_font = QFont()
+                bold_font.setBold(True)
+                project_item.setFont(0, bold_font)
+                # 设置项目名称居中
+                for i in range(self.ui.treeWidgetDocker.columnCount()):
+                    project_item.setTextAlignment(i, Qt.AlignCenter)
+                self.ui.treeWidgetDocker.addTopLevelItem(project_item)
+
+                if containers:  # 有容器，添加子节点
+                    for c in containers:
+                        self._add_container_item(c, project_item)
+        elif container_list:
+            # 只有容器的情况
+            for c in container_list:
+                self._add_container_item(c, None)
+        else:
+            self.ui.treeWidgetDocker.addTopLevelItem(QTreeWidgetItem(0))
+            self.ui.treeWidgetDocker.topLevelItem(0).setText(0, self.tr('服务器还没有安装docker容器'))
+
+        # 展开所有节点
+        self.ui.treeWidgetDocker.expandAll()
+
+        # 更新完成后，安全停止线程
+        if hasattr(self, 'docker_thread') and self.docker_thread:
+            # 不再强制删除，而是等待下一次刷新时覆盖或GC回收
+            pass
+
+    def _add_container_item(self, c, parent_item):
+        """添加容器项到树"""
+        container_item = QTreeWidgetItem()
+        container_item.setText(1, c.get('ID', ""))
+        container_item.setText(2, c.get('Name', "") or c.get('Names', ""))  # 兼容不同格式
+        container_item.setText(3, c.get('Image', ""))
+        container_item.setText(4, c.get('State', ""))
+        container_item.setText(5, c.get('Command', ""))
+        container_item.setText(6, c.get('CreatedAt', ""))
+        container_item.setText(7, c.get('Ports', ""))
+        container_item.setIcon(0, QIcon(":icons8-docker-48.png"))
+
+        # 设置居中
+        for i in range(self.ui.treeWidgetDocker.columnCount()):
+            container_item.setTextAlignment(i, Qt.AlignCenter)
+
+        if parent_item:
+            parent_item.addChild(container_item)
+        else:
+            self.ui.treeWidgetDocker.addTopLevelItem(container_item)
+
+    def cleanup_thread(self, thread_name):
+        """清理线程资源"""
+        # 这个方法现在主要用于强制清理，不再自动连接到 finished 信号
+        if hasattr(self, thread_name):
+            thread = getattr(self, thread_name)
+            if thread and thread.isRunning():
+                thread.quit()
+                thread.wait()
+            setattr(self, thread_name, None)
+
     # 刷新docker常用容器信息
     def refresh_docker_common_containers(self):
         if self.isConnected:
-            ssh_conn = self.ssh()
             util.clear_grid_layout(self.ui.gridLayout_7)
-            # 检测服务器是否安装了docker，如果没有安装就不展示常用容器
-            data_ = ssh_conn.sudo_exec('docker --version')
-            if data_:
-                services = util.get_compose_service(abspath('docker-compose-full.yml'))
-                # 每行最多四个小块
-                max_columns = 8
 
-                # 创建滚动区域
-                scroll_area = QScrollArea()
-                scroll_area.setWidgetResizable(True)  # 允许内容自适应大小
-                scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)  # 始终显示垂直滚动条
+            # 显示加载状态
+            loading_label = QLabel("正在加载常用容器信息...")
+            loading_label.setAlignment(Qt.AlignCenter)
+            loading_label.setStyleSheet("font-size: 16px; color: #666;")
+            self.ui.gridLayout_7.addWidget(loading_label)
 
-                # 创建滚动内容容器
-                scroll_content = QWidget()
-                scroll_area.setWidget(scroll_content)
+            if hasattr(self, 'common_docker_thread') and self.common_docker_thread.isRunning():
+                return
 
-                # 使用网格布局管理滚动内容
-                grid_layout = QGridLayout(scroll_content)
-                grid_layout.setContentsMargins(0, 0, 0, 0)  # 设置布局边距
-                grid_layout.setHorizontalSpacing(2)  # 设置水平间距
-                grid_layout.setVerticalSpacing(2)  # 设置垂直间距
+            config_path = abspath('docker-compose-full.yml')
+            self.common_docker_thread = CommonContainersThread(self.ssh(), config_path)
+            self.common_docker_thread.data_ready.connect(self.update_common_containers_ui)
+            # 同理，移除自动 deleteLater
+            # self.common_docker_thread.finished.connect(lambda: self.cleanup_thread('common_docker_thread'))
+            self.common_docker_thread.start()
 
-                # 将滚动区域添加到原布局位置（替换原来的gridLayout_7）
-                self.ui.gridLayout_7.addWidget(scroll_area)
+    @Slot(dict, bool)
+    def update_common_containers_ui(self, services_config, has_docker):
+        """更新常用容器 UI"""
+        ssh_conn = self.ssh()  # CustomWidget 需要 ssh_conn
+        util.clear_grid_layout(self.ui.gridLayout_7)
 
-                conn_exec = ssh_conn.sudo_exec("docker ps -a --format '{{json .}}'")
-                container_list = []
-                for ps in conn_exec.strip().splitlines():
-                    if ps.strip():
-                        data = json.loads(ps)
-                        container_list.append(data)
+        if has_docker:
+            # 每行最多四个小块 (原文是8，注释写每行最多四个但变量是8，保留原逻辑)
+            max_columns = 8
 
-                services_config = util.update_has_attribute(services, container_list)
+            # 创建滚动区域
+            scroll_area = QScrollArea()
+            scroll_area.setWidgetResizable(True)  # 允许内容自适应大小
+            scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)  # 始终显示垂直滚动条
 
-                # 遍历列表创建小块
-                for index, (key, item) in enumerate(services_config.items()):
-                    row = index // max_columns
-                    col = index % max_columns
+            # 创建滚动内容容器
+            scroll_content = QWidget()
+            scroll_area.setWidget(scroll_content)
 
-                    # 创建外层容器
-                    container_widget = QWidget()
-                    container_widget.setFixedSize(95, 143)  # 固定每个小块的尺寸
-                    container_layout = QVBoxLayout(container_widget)
-                    container_layout.setContentsMargins(0, 0, 0, 0)  # 移除内边距
+            # 使用网格布局管理滚动内容
+            grid_layout = QGridLayout(scroll_content)
+            grid_layout.setContentsMargins(0, 0, 0, 0)  # 设置布局边距
+            grid_layout.setHorizontalSpacing(2)  # 设置水平间距
+            grid_layout.setVerticalSpacing(2)  # 设置垂直间距
 
-                    # 创建自定义组件
-                    widget = CustomWidget(key, item, ssh_conn)
-                    container_layout.addWidget(widget)
+            # 将滚动区域添加到原布局位置（替换原来的gridLayout_7）
+            self.ui.gridLayout_7.addWidget(scroll_area)
 
-                    # 添加到网格布局
-                    grid_layout.addWidget(container_widget, row, col)
-            else:
-                # 创建外部容器
+            # 遍历列表创建小块
+            for index, (key, item) in enumerate(services_config.items()):
+                row = index // max_columns
+                col = index % max_columns
+
+                # 创建外层容器
                 container_widget = QWidget()
-                container_layout = QVBoxLayout()
-                container_widget.setLayout(container_layout)
-                container_layout.setContentsMargins(0, 0, 0, 0)  # 去掉布局的内边距
-                container_widget.setStyleSheet("background-color: rgb(187, 232, 221);")
+                container_widget.setFixedSize(95, 143)  # 固定每个小块的尺寸
+                container_layout = QVBoxLayout(container_widget)
+                container_layout.setContentsMargins(0, 0, 0, 0)  # 移除内边距
 
-                text_browser = QTextBrowser(container_widget)
-                text_browser.append("\n")
-                text_browser.append("\n")
-                text_browser.append("\n")
-                text_browser.append(self.tr("服务器还没有安装docker容器"))
-                # 设置内容居中对齐
-                text_browser.setAlignment(Qt.AlignCenter)
+                # 创建自定义组件
+                widget = CustomWidget(key, item, ssh_conn)
+                container_layout.addWidget(widget)
 
-                install_button = QPushButton("服务器还没有安装docker容器，开始安装")
-                install_button.clicked.connect(self.start_installation)
+                # 添加到网格布局
+                grid_layout.addWidget(container_widget, row, col)
+        else:
+            # 创建外部容器
+            container_widget = QWidget()
+            container_layout = QVBoxLayout()
+            container_widget.setLayout(container_layout)
+            container_layout.setContentsMargins(0, 0, 0, 0)  # 去掉布局的内边距
+            container_widget.setStyleSheet("background-color: rgb(187, 232, 221);")
 
-                self.ui.gridLayout_7.addWidget(install_button)
+            text_browser = QTextBrowser(container_widget)
+            text_browser.append("\n")
+            text_browser.append("\n")
+            text_browser.append("\n")
+            text_browser.append(self.tr("服务器还没有安装docker容器"))
+            # 设置内容居中对齐
+            text_browser.setAlignment(Qt.AlignCenter)
+
+            install_button = QPushButton("服务器还没有安装docker容器，开始安装")
+            install_button.clicked.connect(self.start_installation)
+
+            self.ui.gridLayout_7.addWidget(install_button)
 
     def start_installation(self):
         docker_installer = DockerInstallerWidget(self.ssh())
@@ -2519,7 +2775,8 @@ class MainDialog(QMainWindow):
         finally:
             try:
                 thread.deleteLater()
-            except Exception:
+            except Exception as e:
+                util.logger.error(f"Failed to upload file: {e}")
                 pass
 
     def _start_batch_upload(self, files):
@@ -2675,7 +2932,7 @@ class MainDialog(QMainWindow):
                     else:
                         terminal.setColorScheme("Ubuntu")
         except Exception as e:
-            print(f"重新应用终端主题失败: {e}")
+            util.logger.error(f"Failed to changed system theme: {e}")
 
     def on_ssh_failed(self, error_msg):
         """SSH连接失败回调"""
@@ -2697,34 +2954,61 @@ class MainDialog(QMainWindow):
 
 
 class SSHConnector(QObject):
-    """异步 SSH 连接器"""
+    """异步 SSH 连接器 - 使用 QRunnable 和 QThreadPool 管理并发任务"""
     connected = Signal(object)  # 连接成功信号
     failed = Signal(str)  # 连接失败信号
 
     def __init__(self):
         super().__init__()
-        self._thread = QThread()
-        self.moveToThread(self._thread)
-        self._thread.start()
+        # 使用全局线程池或创建专用线程池
+        self.thread_pool = PySide6.QtCore.QThreadPool.globalInstance()
+        # 设置最大线程数，避免过多并发连接耗尽资源
+        self.thread_pool.setMaxThreadCount(10)
 
-    @Slot(str, int, str, str, str, str)
     def connect_ssh(self, host, port, username, password, key_type, key_file):
-        try:
-            ssh_conn = SshClient(host, port, username, password, key_type, key_file)
-            ssh_conn.connect()
-            self.connected.emit(ssh_conn)
-        except Exception as e:
-            self.failed.emit(str(e))
+        # 创建 Runnable 任务
+        task = ConnectRunnable(host, port, username, password, key_type, key_file)
+        # 连接信号转发器（因为 QRunnable 不是 QObject，不能直接发射信号）
+        # 我们将 task 的发射器连接到 SSHConnector 的信号
+        task.signals.connected.connect(self.connected)
+        task.signals.failed.connect(self.failed)
+
+        # 提交到线程池
+        self.thread_pool.start(task)
 
     def stop(self):
-        """停止工作线程"""
-        if self._thread.isRunning():
-            self._thread.quit()
-            # 增加等待时间，如果还在运行则强制终止
-            # 100ms太短，容易导致 QThread: Destroyed while thread is still running
-            if not self._thread.wait(1000):
-                self._thread.terminate()
-                self._thread.wait()
+        """停止连接器（对于线程池，通常不需要手动停止，除非程序退出）"""
+        self.thread_pool.clear()
+
+
+class ConnectSignals(QObject):
+    """用于 Runnable 的信号发射器"""
+    connected = Signal(object)
+    failed = Signal(str)
+
+
+class ConnectRunnable(PySide6.QtCore.QRunnable):
+    """SSH 连接任务 - 独立于 UI 线程运行"""
+
+    def __init__(self, host, port, username, password, key_type, key_file):
+        super().__init__()
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self.key_type = key_type
+        self.key_file = key_file
+        self.signals = ConnectSignals()
+        self.setAutoDelete(True)  # 任务完成后自动删除
+
+    def run(self):
+        try:
+            # 执行耗时的连接操作
+            ssh_conn = SshClient(self.host, self.port, self.username, self.password, self.key_type, self.key_file)
+            ssh_conn.connect()
+            self.signals.connected.emit(ssh_conn)
+        except Exception as e:
+            self.signals.failed.emit(str(e))
 
 
 # 权限确认
@@ -3594,6 +3878,10 @@ class SSHQTermWidget(QTermWidget):
         # startnow=0，不自动启动shell
         super().__init__(0, parent)
 
+        # [New] Install event filter to intercept TerminalDisplay wheel events
+        if hasattr(self, 'm_impl') and hasattr(self.m_impl, 'm_terminalDisplay'):
+            self.m_impl.m_terminalDisplay.installEventFilter(self)
+
         # 缓存剪贴板
         self._clipboard = QApplication.clipboard()
 
@@ -3606,10 +3894,42 @@ class SSHQTermWidget(QTermWidget):
 
         # 记录当前主题
         self.current_theme_name = "Ubuntu"
-        self.setColorScheme(self.current_theme_name)
 
         # 设置语法高亮支持
         self.setup_syntax_highlighting()
+
+        # 初始化主题
+        self.setColorScheme(self.current_theme_name)
+
+    def eventFilter(self, obj, event):
+        """Event filter to handle Ctrl+Wheel zoom"""
+        # Check if the event is from the internal terminal display
+        if hasattr(self, 'm_impl') and hasattr(self.m_impl,
+                                               'm_terminalDisplay') and obj == self.m_impl.m_terminalDisplay:
+            if event.type() == QEvent.Wheel:
+                if event.modifiers() & Qt.ControlModifier:
+                    # Forward to main window for zoom
+                    parent = self.window()
+                    if hasattr(parent, 'zoom_in') and hasattr(parent, 'zoom_out'):
+                        super().setColorScheme(self.current_theme_name)
+                        delta = event.angleDelta().y()
+                        if delta > 0:
+                            parent.zoom_in()
+                        elif delta < 0:
+                            parent.zoom_out()
+                        return True  # Consume the event
+        return super().eventFilter(obj, event)
+
+    def setColorScheme(self, name):
+        """重写 setColorScheme，保存主题并在底层设置"""
+        self.current_theme_name = name
+        super().setColorScheme(name)
+
+    def resizeEvent(self, event):
+        """重写 resizeEvent，在调整大小后恢复主题"""
+        # 延迟恢复主题，确保底层重绘完成后应用
+        if hasattr(self, 'current_theme_name'):
+            super().setColorScheme(self.current_theme_name)
 
     def setup_syntax_highlighting(self):
         """设置语法高亮支持"""
@@ -3632,8 +3952,8 @@ class SSHQTermWidget(QTermWidget):
             filter_chain.addFilter(perm_filter)
 
             # 2. 数字高亮 (紫色)
-            # 匹配独立的数字或者文件大小等
-            number_filter = HighlightFilter(r'\b\d+\b', QColor("#bd93f9"), None)
+            # 匹配独立的数字或者文件大小等，但不匹配包含数字的文件名（如 file1.txt, 123.log）
+            number_filter = HighlightFilter(r'(?<!\S)\d+(?!\S)', QColor("#bd93f9"), None)
             filter_chain.addFilter(number_filter)
 
             # 3. 日期时间高亮 (绿色)
@@ -3646,16 +3966,14 @@ class SSHQTermWidget(QTermWidget):
 
             # 4. 压缩包文件名高亮 (天蓝色)
             # 匹配 .zip, .tar.gz, .rar 等
-            archive_filter = HighlightFilter(
-                r'\b[\w\-\.]+\.(?:zip|tar\.gz|tgz|rar|7z|gz|bz2|xz)\b',
-                QColor("#8be9fd"), None
-            )
-            filter_chain.addFilter(archive_filter)
-
-            print("已加载 WindTerm 风格自定义高亮过滤器")
+            # archive_filter = HighlightFilter(
+            #     r'\b[\w\-\.]+\.(?:zip|tar\.gz|tgz|rar|7z|gz|bz2|xz)\b',
+            #     QColor("#8be9fd"), None
+            # )
+            # filter_chain.addFilter(archive_filter)
 
         except Exception as e:
-            print(f"设置自定义过滤器失败: {e}")
+            util.logger.error(f"Failed to setup custom filters: {e}")
 
     def setup_code_font(self):
         """设置适合代码显示的字体"""
@@ -3708,7 +4026,7 @@ class SSHQTermWidget(QTermWidget):
             print("显示了自定义右键菜单")
 
         except Exception as e:
-            print(f"右键菜单创建失败: {e}")
+            util.logger.error(f"右键菜单创建失败: {e}")
 
     def _apply_dark_menu_style(self, menu):
         """应用暗色主题菜单样式"""
@@ -3773,21 +4091,6 @@ class SSHQTermWidget(QTermWidget):
         theme_action.triggered.connect(self.show_theme_selector)
         menu.addAction(theme_action)
 
-    def wheelEvent(self, event):
-        """处理鼠标滚轮事件（支持Ctrl+滚轮缩放）"""
-        if event.modifiers() & Qt.ControlModifier:
-            # 转发到主窗口处理字体缩放
-            parent = self.window()
-            if hasattr(parent, 'zoom_in') and hasattr(parent, 'zoom_out'):
-                if event.angleDelta().y() > 0:
-                    parent.zoom_in()
-                else:
-                    parent.zoom_out()
-                event.accept()
-                return
-        # 默认处理（滚动）
-        super().wheelEvent(event)
-
     def show_theme_selector(self):
         """显示增强的主题选择器"""
         try:
@@ -3795,7 +4098,7 @@ class SSHQTermWidget(QTermWidget):
             dialog.theme_selected.connect(self.apply_theme)
             dialog.exec()
         except Exception as e:
-            print(f"显示主题选择器失败: {e}")
+            util.logger.error(f"显示主题选择器失败: {e}")
 
     def get_theme_descriptions(self):
         """获取主题描述"""
@@ -3866,7 +4169,7 @@ class SSHQTermWidget(QTermWidget):
             return recommended_available
 
         except Exception as e:
-            print(f"获取推荐主题失败: {e}")
+            util.logger.error(f"获取推荐主题失败: {e}")
             return []
 
 
@@ -4013,7 +4316,7 @@ class TerminalThemeSelector(QDialog):
                 self.highlight_current_theme()
 
         except Exception as e:
-            print(f"加载主题失败: {e}")
+            util.logger.error(f"加载主题失败: {e}")
 
     def create_theme_button(self, theme_name, description):
         """创建主题按钮"""

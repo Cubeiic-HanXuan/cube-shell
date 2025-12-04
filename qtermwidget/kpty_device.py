@@ -18,6 +18,7 @@ Copyright (C) 2010 KDE e.V. <kde-ev-board@kde.org>
 import errno
 import logging
 import os
+import signal
 import sys
 import time
 from typing import Optional, Union
@@ -37,7 +38,7 @@ else:
 # 直接导入PySide6
 from PySide6.QtCore import (
     QIODevice, QObject, Signal, QSocketNotifier, QTimer,
-    QByteArray, QCoreApplication, Slot
+    QByteArray, QCoreApplication, Slot, QThread, QMetaObject, Qt
 )
 
 # 导入KPty模块
@@ -652,10 +653,16 @@ class KPtyDevice(QIODevice, KPty):
 
         return True
 
+    @Slot()
     def close(self):
         """
         关闭pty master/slave对 - 对应C++: void KPtyDevice::close() override
         """
+        # 线程安全检查：如果不是在对象所属线程调用，则通过invokeMethod调度
+        if self.thread() != QThread.currentThread():
+            QMetaObject.invokeMethod(self, "close", Qt.QueuedConnection)
+            return
+
         d = self._d_func()  # 对应C++的Q_D(KPtyDevice)
 
         if self.masterFd() < 0:
@@ -687,6 +694,7 @@ class KPtyDevice(QIODevice, KPty):
         # 调用KPty的close - 对应C++: KPty::close()
         KPty.close(self)
 
+    @Slot(bool)
     def setSuspended(self, suspended: bool):
         """
         设置是否暂停监听PTY数据 - 对应C++: void KPtyDevice::setSuspended(bool suspended)
@@ -700,6 +708,11 @@ class KPtyDevice(QIODevice, KPty):
         Args:
             suspended: 是否暂停
         """
+        # 线程安全检查
+        if self.thread() != QThread.currentThread():
+            QMetaObject.invokeMethod(self, "setSuspended", Qt.QueuedConnection, suspended)
+            return
+
         d = self._d_func()  # 对应C++的Q_D(KPtyDevice)
         d.suspended = suspended
         if d.readNotifier:
@@ -733,7 +746,6 @@ class KPtyDevice(QIODevice, KPty):
         """
         return True
 
-    # @reimp
     def canReadLine(self) -> bool:
         """
         检查是否可以读取完整一行 - 对应C++: bool KPtyDevice::canReadLine() const override
@@ -742,12 +754,8 @@ class KPtyDevice(QIODevice, KPty):
             如果可以读取完整一行则返回True
         """
         d = self._d_func()  # 对应C++的Q_D(const KPtyDevice)
-        if HAS_PYSIDE6:
-            return QIODevice.canReadLine(self) or d.readBuffer.canReadLine()
-        else:
-            return d.readBuffer.canReadLine()
+        return QIODevice.canReadLine(self) or d.readBuffer.canReadLine()
 
-    # @reimp
     def atEnd(self) -> bool:
         """
         检查是否已到达末尾 - 对应C++: bool KPtyDevice::atEnd() const override
@@ -756,12 +764,8 @@ class KPtyDevice(QIODevice, KPty):
             如果已到达末尾则返回True
         """
         d = self._d_func()  # 对应C++的Q_D(const KPtyDevice)
-        if HAS_PYSIDE6:
-            return QIODevice.atEnd(self) and d.readBuffer.isEmpty()
-        else:
-            return d.readBuffer.isEmpty()
+        return QIODevice.atEnd(self) and d.readBuffer.isEmpty()
 
-    # @reimp
     def bytesAvailable(self) -> int:
         """
         返回可读取的字节数 - 对应C++: qint64 KPtyDevice::bytesAvailable() const override
@@ -772,7 +776,6 @@ class KPtyDevice(QIODevice, KPty):
         d = self._d_func()  # 对应C++的Q_D(const KPtyDevice)
         return QIODevice.bytesAvailable(self) + d.readBuffer.size()
 
-    # @reimp
     def bytesToWrite(self) -> int:
         """
         返回待写入的字节数 - 对应C++: qint64 KPtyDevice::bytesToWrite() const override

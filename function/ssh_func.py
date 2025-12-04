@@ -68,7 +68,7 @@ class SshClient(object):
         # 重连相关属性
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = 3
-        self.reconnect_delay = 5  # 初始重连延迟（秒）
+        self.reconnect_delay = 1  # 初始重连延迟（秒）
         self.heartbeat_interval = 30  # 心跳间隔
         self.lock = threading.Lock()  # 线程锁
         self.active = True  # 连接状态标志
@@ -114,44 +114,39 @@ class SshClient(object):
         if callback_param is not None:
             self.callback_param = callback_param
 
-        while self.reconnect_attempts < self.max_reconnect_attempts and self.active:
-            try:
-                if self.private_key:
-                    self.conn.connect(hostname=self.host, port=self.port, username=self.username, pkey=self.private_key,
-                                      timeout=2, banner_timeout=15)
-                else:
-                    self.conn.connect(hostname=self.host, port=self.port, username=self.username,
-                                      password=self.password, timeout=2, banner_timeout=15)
+        # 移除循环重试逻辑，因为这会阻塞线程并可能导致递归调用
+        # 如果连接失败，抛出异常，由调用者（如 ConnectRunnable）处理重试或报错
+        try:
+            if self.private_key:
+                self.conn.connect(hostname=self.host, port=self.port, username=self.username, pkey=self.private_key,
+                                  timeout=5, banner_timeout=15)
+            else:
+                self.conn.connect(hostname=self.host, port=self.port, username=self.username,
+                                  password=self.password, timeout=5, banner_timeout=15)
 
-                # 连接成功后初始化
-                self.transport = self.conn.get_transport()
-                self.transport.set_keepalive(self.heartbeat_interval)
-                self._setup_channel()
-                self._start_heartbeat()
-                self.reconnect_attempts = 0  # 重置重试计数器
+            # 连接成功后初始化
+            self.transport = self.conn.get_transport()
+            self.transport.set_keepalive(self.heartbeat_interval)
+            self._setup_channel()
+            self._start_heartbeat()
+            self.reconnect_attempts = 0  # 重置重试计数器
 
-                # 调用连接成功的回调函数
-                if self.on_connect_success:
-                    try:
-                        self.on_connect_success(self, self.callback_param)
-                    except Exception as callback_error:
-                        util.logger.error(f"Error in connection success callback: {callback_error}")
+            # 调用连接成功的回调函数
+            if self.on_connect_success:
+                try:
+                    self.on_connect_success(self, self.callback_param)
+                except Exception as callback_error:
+                    util.logger.error(f"Error in connection success callback: {callback_error}")
 
-                return
-            except paramiko.ssh_exception.AuthenticationException:
-                util.logger.error("Authentication failed.")
-                raise
-            except Exception as e:
-                util.logger.error(f"Connection error: {e}")
-                self.reconnect_attempts += 1
-                delay = self.reconnect_delay * 2 ** (self.reconnect_attempts - 1)
-                util.logger.warning(
-                    f"连接失败 ({self.reconnect_attempts}/{self.max_reconnect_attempts}), {delay}秒后重试...")
-                time.sleep(delay)
-
-        # 重试失败处理
-        self.active = False
-        raise ConnectionError(f"无法建立连接，已尝试 {self.max_reconnect_attempts} 次")
+            return
+        except paramiko.ssh_exception.AuthenticationException:
+            util.logger.error("Authentication failed.")
+            self.active = False
+            raise
+        except Exception as e:
+            util.logger.error(f"Connection error: {e}")
+            self.active = False
+            raise
 
     def _setup_channel(self):
         """设置会话通道"""
@@ -176,18 +171,49 @@ class SshClient(object):
                     time.sleep(self.heartbeat_interval)
                 except Exception as e:
                     util.logger.warning(f"心跳失败: {str(e)}")
-                    self._trigger_reconnect()
+                    # 心跳失败通常意味着连接已断开
+                    # 不要在心跳线程中触发重连，这会导致复杂的线程交互和递归问题
+                    # 只需退出循环，后续操作会因连接断开而失败，并可能触发重连
+                    break 
 
-        threading.Thread(target=heartbeat, daemon=True).start()
+        # 只有在没有正在运行的心跳线程时才启动
+        if not hasattr(self, '_heartbeat_thread') or not self._heartbeat_thread.is_alive():
+            self._heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
+            self._heartbeat_thread.start()
 
     def _trigger_reconnect(self):
-        """触发重新连接"""
-        if self.active and self.reconnect_attempts < self.max_reconnect_attempts:
+        """触发重新连接 - 简化版"""
+        # 只有当连接被标记为活动时才尝试重连
+        if not self.active:
+            return
+
+        with self.lock:
+            # 检查是否已经超过最大重试次数
+            if self.reconnect_attempts >= self.max_reconnect_attempts:
+                util.logger.error("达到最大重连次数，停止重连")
+                return
+
             util.logger.info("尝试重新连接...")
             try:
+                # 增加重试计数
+                self.reconnect_attempts += 1
+                
+                # 关闭旧连接
+                try:
+                    if self.channel:
+                        self.channel.close()
+                    if self.conn:
+                        self.conn.close()
+                except:
+                    pass
+                    
+                # 重新连接 - 注意：这可能会阻塞，最好在非UI线程调用
+                # 由于 connect() 移除了循环，这里可以捕获异常
                 self.connect()
+                
             except Exception as e:
                 util.logger.error(f"重连失败: {str(e)}")
+                # 不要在这里递归调用或等待，让下一次操作触发重连或由用户手动重试
 
     def safe_execute(self, func, *args, **kwargs):
         """执行操作的通用安全包装"""
@@ -197,28 +223,23 @@ class SshClient(object):
 
         try:
             if not self.is_connected():
-                if self.active:
-                    self._trigger_reconnect()
-                else:
+                self._trigger_reconnect()
+                if not self.is_connected():
                     return None
             return func(*args, **kwargs)
-        except (paramiko.SSHException, EOFError) as e:
-            if not self.active:
-                return None
+        except (paramiko.SSHException, EOFError, OSError) as e:
             util.logger.error(f"连接异常: {str(e)}")
             self._trigger_reconnect()
-            return self.safe_execute(func, *args, **kwargs)
-        except AttributeError as e:
-            # 处理断开连接时的并发竞争条件
-            if not self.active and ("open_session" in str(e) or "NoneType" in str(e)):
-                return None
-            util.logger.error(f"操作失败: {str(e)}")
-            raise
+            # 尝试一次重连后，如果成功则重试操作，否则返回None
+            if self.is_connected():
+                try:
+                    return func(*args, **kwargs)
+                except:
+                    return None
+            return None
         except Exception as e:
-            if not self.active:
-                return None
             util.logger.error(f"操作失败: {str(e)}")
-            raise
+            return None
 
     # 下面是一个便利方法，可以在已经连接的客户端上设置回调并立即触发
     def set_and_trigger_connect_callback(self, callback, callback_param=None):
