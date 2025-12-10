@@ -35,6 +35,11 @@ echo "{}" > cube-shell.app/Contents/MacOS/conf/tunnel.json
 echo "5: Deleting config.dat file..."
 rm -f cube-shell.app/Contents/MacOS/conf/config.dat
 
+cp -r qtermwidget/color-schemes cube-shell.app/Contents/MacOS
+cp -r qtermwidget/kb-layouts cube-shell.app/Contents/MacOS
+cp -r qtermwidget/translations cube-shell.app/Contents/MacOS
+cp qtermwidget/default.keytab cube-shell.app/Contents/MacOS
+
 echo "5: create-dmg..."
 create-dmg --volname "Cube Shell" \
   --window-size 800 400 \

@@ -46,6 +46,12 @@ REM Step 4: Delete config.dat file
 echo 4: Deleting config.dat file...
 del /Q deploy\cube-shell.dist\conf\config.dat
 
+mkdir "deploy\cube-shell.dist\qtermwidget"
+robocopy "qtermwidget\color-schemes" "deploy\cube-shell.dist\qtermwidget\color-schemes" /E /NFL /NDL /NJH /NJS
+robocopy "qtermwidget\kb-layouts" "deploy\cube-shell.dist\qtermwidget\kb-layouts" /E /NFL /NDL /NJH /NJS
+robocopy "qtermwidget\translations" "deploy\cube-shell.dist\qtermwidget\translations" /E /NFL /NDL /NJH /NJS
+copy "qtermwidget\default.keytab" "deploy\cube-shell.dist\qtermwidget\"
+
 REM Step 5: Deploy using Inno Setup
 echo 5: Deploying using Inno Setup...
 iscc installer.iss
