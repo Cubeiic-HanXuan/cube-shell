@@ -72,6 +72,7 @@ class SshClient(object):
         self.heartbeat_interval = 30  # 心跳间隔
         self.lock = threading.Lock()  # 线程锁
         self.active = True  # 连接状态标志
+        self._reconnecting = False  # 防抑制并发重连
 
         # 初始化时直接创建 SSH 客户端
         self._init_ssh_client()
@@ -152,6 +153,10 @@ class SshClient(object):
         """设置会话通道"""
         with self.lock:
             try:
+                if not self.transport or not self.transport.is_active():
+                    self.transport = self.conn.get_transport()
+                if not self.transport or not self.transport.is_active():
+                    raise RuntimeError("Transport is not active")
                 self.channel = self.transport.open_session()
                 self.channel.get_pty(term="xterm-256color", width=100, height=200)
                 self.channel.invoke_shell()
@@ -166,8 +171,12 @@ class SshClient(object):
         def heartbeat():
             while self.active and self.is_connected():
                 try:
-                    # 使用现有通道发送空包
-                    self.channel.send("\x00")
+                    # 使用transport心跳，避免通道被占用或已关闭导致异常
+                    if self.transport and self.transport.is_active():
+                        try:
+                            self.transport.send_ignore()
+                        except Exception:
+                            pass
                     time.sleep(self.heartbeat_interval)
                 except Exception as e:
                     util.logger.warning(f"心跳失败: {str(e)}")
@@ -188,9 +197,13 @@ class SshClient(object):
             return
 
         with self.lock:
+            if self._reconnecting:
+                return
+            self._reconnecting = True
             # 检查是否已经超过最大重试次数
             if self.reconnect_attempts >= self.max_reconnect_attempts:
                 util.logger.error("达到最大重连次数，停止重连")
+                self._reconnecting = False
                 return
 
             util.logger.info("尝试重新连接...")
@@ -207,13 +220,21 @@ class SshClient(object):
                 except:
                     pass
                     
+                # 轻微延迟，避免复用刚关闭的连接导致通道打开失败
+                time.sleep(min(1.0, 0.2 * self.reconnect_attempts))
+                # 重新初始化客户端对象，避免旧state残留
+                self._init_ssh_client()
                 # 重新连接 - 注意：这可能会阻塞，最好在非UI线程调用
                 # 由于 connect() 移除了循环，这里可以捕获异常
-                self.connect()
+                try:
+                    self.connect()
+                finally:
+                    self._reconnecting = False
                 
             except Exception as e:
                 util.logger.error(f"重连失败: {str(e)}")
                 # 不要在这里递归调用或等待，让下一次操作触发重连或由用户手动重试
+                self._reconnecting = False
 
     def safe_execute(self, func, *args, **kwargs):
         """执行操作的通用安全包装"""
@@ -300,6 +321,13 @@ class SshClient(object):
             if self.channel:
                 self.conn.close()
                 self.close_sig = 0
+            # 结束心跳线程
+            try:
+                if hasattr(self, '_heartbeat_thread') and self._heartbeat_thread.is_alive():
+                    # 心跳线程将因active=False自然退出，这里小幅等待
+                    time.sleep(0.05)
+            except:
+                pass
         except Exception as e:
             util.logger.debug(f"关闭连接时出错: {str(e)}")
         # finally:

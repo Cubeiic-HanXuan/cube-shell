@@ -296,6 +296,8 @@ class MainDialog(QMainWindow):
 
         # 连接状态防抖
         self.is_connecting_lock = False
+        self._last_connect_attempt_ts = 0
+        self.is_closing = False
 
     def on_NAT_traversal(self):
         device = self.ui.comboBox.currentText()
@@ -693,7 +695,11 @@ class MainDialog(QMainWindow):
 
     def update_process_list_thread(self, ssh_conn):
         try:
+            if self.is_closing or not ssh_conn or not ssh_conn.is_connected():
+                return
             processes = self.get_filtered_process_list(ssh_conn)
+            if self.is_closing:
+                return
             self.update_process_list_signal.emit(ssh_conn.id, processes)
         except Exception as e:
             util.logger.error(f"Failed to update process list: {e}")
@@ -720,10 +726,10 @@ class MainDialog(QMainWindow):
         headers = ["PID", "用户", "内存", "CPU", "端口", "命令行"]
         if self.ui.result.columnCount() != len(headers):
             self.ui.result.setColumnCount(len(headers))
-        
+
         self.ui.result.setHorizontalHeaderLabels(headers)
         self.ui.result.horizontalHeader().setVisible(True)
-        
+
         self.ui.result.setRowCount(0)
         for row_num, process in enumerate(self.filtered_processes):
             self.ui.result.insertRow(row_num)
@@ -746,18 +752,18 @@ class MainDialog(QMainWindow):
             if ssh_conn is None:
                 ssh_conn = self.ssh()
                 if not ssh_conn: return []
+            if not ssh_conn.is_connected():
+                return []
 
-            # 1. 获取进程列表
-            stdin, stdout, stderr = ssh_conn.conn.exec_command(timeout=10, command="ps aux --no-headers",
-                                                               get_pty=False)
-            ps_output = stdout.readlines()
+            # 1. 获取进程列表（安全包装）
+            ps_text = ssh_conn.exec(cmd="ps aux --no-headers", pty=False) or ""
+            ps_output = ps_text.splitlines()
 
             # 2. 获取端口信息 (使用 ss 命令)
             # -t: tcp, -u: udp, -l: listening, -n: numeric, -p: processes, -e: extended
             # 2>/dev/null 忽略错误输出
-            stdin, stdout, stderr = ssh_conn.conn.exec_command(timeout=10, command="ss -tulnpe 2>/dev/null",
-                                                               get_pty=False)
-            ss_output = stdout.readlines()
+            ss_text = ssh_conn.exec(cmd="ss -tulnpe 2>/dev/null", pty=False) or ""
+            ss_output = ss_text.splitlines()
 
             # 解析端口信息
             pid_ports = defaultdict(list)
@@ -765,7 +771,7 @@ class MainDialog(QMainWindow):
                 # 跳过标题行
                 if line.startswith('Netid') or line.startswith('State'):
                     continue
-                
+
                 try:
                     fields = line.strip().split()
                     if len(fields) < 5: continue
@@ -776,7 +782,7 @@ class MainDialog(QMainWindow):
                         port = local_addr.split(':')[-1]
                     else:
                         continue
-                    
+
                     # 获取 PID
                     # 格式示例: users:(("sshd",pid=123,fd=3))
                     if 'users:' in line:
@@ -804,13 +810,13 @@ class MainDialog(QMainWindow):
                         memory = fields[3]
                         cpu = fields[2]
                         # name = fields[-1] if len(fields[-1]) <= 15 else fields[-1][:12] + "..." # 原代码
-                        
+
                         # 获取端口
                         ports = pid_ports.get(pid, [])
                         port_str = ",".join(ports) if ports else ""
-                        
+
                         command = " ".join(fields[10:])
-                        
+
                         process_list.append({
                             'pid': pid,
                             'user': user,
@@ -1256,6 +1262,8 @@ class MainDialog(QMainWindow):
 
         # 初始化 SFTP
         self.initSftpSignal.emit()
+        # 释放连接锁
+        self.is_connecting_lock = False
 
     @Slot(str, str)  # 将其标记为槽
     def warning(self, title, message):
@@ -1337,8 +1345,11 @@ class MainDialog(QMainWindow):
             else:
                 self.editFile()
         elif not self.isConnected:
-            # 防抖：如果正在连接中，忽略本次点击
+            # 防抖：如果正在连接中，忽略本次点击；快速点击节流500ms
+            now_ms = int(time.time() * 1000)
             if self.is_connecting_lock:
+                return
+            if now_ms - getattr(self, "_last_connect_attempt_ts", 0) < 500:
                 return
 
             # 获取选中的设备名称
@@ -1348,10 +1359,11 @@ class MainDialog(QMainWindow):
 
                 # 标记开始连接
                 self.is_connecting_lock = True
+                self._last_connect_attempt_ts = now_ms
 
                 # 创建新 Tab 并立即启动连接
                 # 使用 QTimer.singleShot 将连接过程推迟到事件循环的下一次迭代，确保 UI 响应
-                # 同时解锁防抖
+                # 锁由回调 on_ssh_connected/on_ssh_failed 释放
                 def start_connect_sequence():
                     try:
                         # 传递 name 参数，避免依赖 UI 焦点
@@ -3971,6 +3983,31 @@ class SSHQTermWidget(QTermWidget):
             #     QColor("#8be9fd"), None
             # )
             # filter_chain.addFilter(archive_filter)
+
+            # 命令行关键字高亮
+            cmd_filter = HighlightFilter(
+                r'(?<![\w\-])(?:sudo\s+)?(?:ls|cd|vi|vim|cat|grep|tail|head|tar|zip|unzip|ssh|scp|find|chmod|chown|ps'
+                r'|kill|ss|systemctl|docker|service|journalctl|top|htop|netstat|ip|ifconfig)\b',
+                QColor("#00A1FF"), None
+            )
+            filter_chain.addFilter(cmd_filter)
+
+            opt_filter = HighlightFilter(r'(?<!\w)(--?[a-zA-Z0-9][\w\-]*)', QColor("#f1c40f"), None)
+            filter_chain.addFilter(opt_filter)
+
+            path_filter = HighlightFilter(r'(?:^|[\s;])((?:/[^ \t\n]+|~[^ \t\n]+))', QColor("#8be9fd"), None)
+            filter_chain.addFilter(path_filter)
+
+            ip_filter = HighlightFilter(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', QColor("#e67e22"), None)
+            filter_chain.addFilter(ip_filter)
+
+            url_filter = HighlightFilter(r'\bhttps?://[^\s]+\b', QColor("#3498db"), None)
+            filter_chain.addFilter(url_filter)
+
+            err_filter = HighlightFilter(
+                r'(command not found|No such file or directory|Permission denied|not recognized)', QColor("#e74c3c"),
+                None)
+            filter_chain.addFilter(err_filter)
 
         except Exception as e:
             util.logger.error(f"Failed to setup custom filters: {e}")
