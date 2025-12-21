@@ -580,7 +580,6 @@ class DockerComposeEditor(QWidget):
         self.services_tree.setAnimated(True)  # 展开/折叠动画
         self.services_tree.setStyleSheet("""
             QTreeWidget {
-                # background-color: #f8f8f8;
                 border: 1px solid #ccc;
                 border-radius: 4px;
                 padding: 5px;
@@ -588,13 +587,19 @@ class DockerComposeEditor(QWidget):
             QTreeWidget::item {
                 padding: 10px;
                 border-bottom: 1px solid #eee;
+                color: #333;
             }
             QTreeWidget::item:selected {
                 background-color: #0078d7;
-                color: white;
+                color: #ffffff;
             }
             QTreeWidget::item:hover {
-                background-color: #e5f1fb;
+                background-color: #e9f5ff;
+                color: #333;
+            }
+            QTreeWidget::item:selected:hover {
+                background-color: #3297e6;
+                color: #ffffff;
             }
         """)
         self.services_tree.setFont(QFont("Arial", 11))
@@ -739,7 +744,7 @@ class DockerComposeEditor(QWidget):
                     if error:
                         if isinstance(error, bytes):
                             error = error.decode('utf-8')
-                        self.append_text(f"错误:\n{error}")
+                        self.append_text(f"\n{error}")
                 except Exception as e:
                     self.append_text(f"读取输出时出错: {str(e)}")
 

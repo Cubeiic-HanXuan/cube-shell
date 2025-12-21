@@ -1932,6 +1932,7 @@ class TerminalDisplay(QWidget):
             painter.save()
 
             # 遍历热点覆盖的每一行
+            cursor_cell = self._cursor_position()
             for line in range(spot.startLine(), spot.endLine() + 1):
                 # 计算当前行的列范围
                 start_column = spot.startColumn() if line == spot.startLine() else 0
@@ -1947,6 +1948,9 @@ class TerminalDisplay(QWidget):
 
                 # 绘制字符
                 for col in range(start_column, end_column):
+                    # 跳过当前键盘光标所在的单元格，避免覆盖导致不可见
+                    if cursor_cell.y() == line and cursor_cell.x() == col:
+                        continue
                     # 计算字符的像素位置
                     x = col * self._fontWidth + left_margin
                     y = line * self._fontHeight + self._top_base_margin
