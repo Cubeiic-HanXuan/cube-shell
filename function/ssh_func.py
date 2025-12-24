@@ -4,6 +4,7 @@ from collections import deque
 from typing import Dict, Any
 
 import re
+import socket
 import paramiko
 import uuid
 
@@ -248,7 +249,14 @@ class SshClient(object):
                 if not self.is_connected():
                     return None
             return func(*args, **kwargs)
-        except (paramiko.SSHException, EOFError, OSError) as e:
+        except (paramiko.SSHException,
+                paramiko.ssh_exception.ChannelException,
+                paramiko.ssh_exception.NoValidConnectionsError,
+                EOFError,
+                OSError,
+                socket.timeout,
+                TimeoutError,
+                BrokenPipeError) as e:
             util.logger.error(f"连接异常: {str(e)}")
             self._trigger_reconnect()
             # 尝试一次重连后，如果成功则重试操作，否则返回None
@@ -644,107 +652,48 @@ class SshClient(object):
 
             return smoothed
 
-    # 整合获取所有系统状态数据
-    def get_system_stats(self) -> Dict[str, Any]:
-        """获取所有系统统计数据
-
-        Returns:
-            包含所有统计信息的字典
-        """
-        try:
-            # 执行批量命令获取数据
-            commands = [
-                "cat /proc/stat",
-                "free -m",
-                "df -h",
-                "cat /proc/net/dev",
-                "cat /proc/meminfo",
-                "uptime"
-            ]
-
-            outputs = {}
-            for cmd in commands:
-                outputs[cmd.split()[0]] = self.exec(cmd)
-
-            # 解析主机信息（如果还没有获取）
-            if not self.system_info_dict:
-                host_info = self.exec(cmd='hostnamectl')
-                self.system_info_dict = parse_data.parse_hostnamectl_output(host_info)
-
-            # 解析所有统计信息
-            cpu_stats = self.get_cpu_stats()
-            memory_stats = self.get_memory_stats()
-            disk_stats = self.get_disk_stats()
-            network_stats = self.get_network_stats()
-
-            # 系统负载信息
-            load_avg = parse_data.parse_load_average(outputs.get('uptime', ''))
-
-            return {
-                'system': self.system_info_dict,
-                'cpu': cpu_stats,
-                'memory': memory_stats,
-                'disk': disk_stats,
-                'network': network_stats,
-                'load': load_avg,
-                'timestamp': time.time()
-            }
-        except Exception as e:
-            util.logger.error(f"获取系统统计信息失败: {str(e)}")
-            return {
-                'system': self.system_info_dict or {},
-                'cpu': {'total_usage': 0},
-                'memory': {'usage_percent': 0},
-                'disk': {'root_usage': 0},
-                'network': {'total_rx_speed': 0, 'total_tx_speed': 0},
-                'load': [0, 0, 0],
-                'timestamp': time.time()
-            }
-
-    def get_datas(self):
+    def get_datas(self, conn):
         """持续监控系统状态的后台线程方法"""
 
         # 获取主机基本信息
         try:
-            host_info = self.exec(cmd='hostnamectl')
-            self.system_info_dict = parse_data.parse_hostnamectl_output(host_info)
+            host_info = conn.exec(cmd='hostnamectl')
+            conn.system_info_dict = parse_data.parse_hostnamectl_output(host_info)
         except Exception as e:
             util.logger.error(f"获取主机信息失败: {str(e)}")
-            self.system_info_dict = {}
+            conn.system_info_dict = {}
 
         # 监控循环
-        while self.active:
+        while conn.active:
             try:
-                if not self.is_connected():
-                    self._trigger_reconnect()
 
-                if self.close_sig == 0:
+                if conn.close_sig == 0:
                     break
 
                 # CPU监控
-                cpu_stats = self.get_cpu_stats()
-                self.cpu_use = cpu_stats['total_usage']
+                cpu_stats = conn.get_cpu_stats()
+                conn.cpu_use = cpu_stats['total_usage']
 
                 # 内存监控
-                memory_stats = self.get_memory_stats()
-                self.mem_use = memory_stats['usage_percent']
+                memory_stats = conn.get_memory_stats()
+                conn.mem_use = memory_stats['usage_percent']
 
                 # 磁盘监控
-                disk_stats = self.get_disk_stats()
-                self.disk_use = disk_stats['root_usage']
+                disk_stats = conn.get_disk_stats()
+                conn.disk_use = disk_stats['root_usage']
 
                 # 网络监控
-                network_stats = self.get_network_stats()
+                network_stats = conn.get_network_stats()
                 # 更新变量由_smooth_value处理
 
                 # 间隔时间
-                time.sleep(max(1.0, self.monitor_interval - 2))  # 减去已用的测量时间
+                time.sleep(max(1.0, conn.monitor_interval - 2))  # 减去已用的测量时间
 
             except EOFError as e:
                 util.logger.error(f"EOFError: {e}")
                 time.sleep(5)
             except Exception as e:
-                if self.active:
+                if conn.active:
                     util.logger.error(f"监控异常: {e}")
                 time.sleep(5)
 

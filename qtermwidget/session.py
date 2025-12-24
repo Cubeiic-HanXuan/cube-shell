@@ -804,7 +804,9 @@ class Session(QObject):
                 existing_size = self._shellProcess.windowSize()
                 # 先稍微增大窗口，然后恢复原大小以触发变化
                 self._shellProcess.setWindowSize(existing_size.height(), existing_size.width() + 1)
-                self._shellProcess.setWindowSize(existing_size.height(), existing_size.width())
+                #self._shellProcess.setWindowSize(existing_size.height(), existing_size.width())
+                # 延迟1ms恢复，给Shell一点反应时间
+                QTimer.singleShot(1, lambda: self._shellProcess.setWindowSize(existing_size.height(), existing_size.width()))
         except Exception as e:
             print(f"Warning: 刷新失败: {e}")
 

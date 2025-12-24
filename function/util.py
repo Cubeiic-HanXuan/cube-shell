@@ -426,7 +426,7 @@ def download_with_resume(sftp, remote_path, local_path, progress_callback):
         remote_file.prefetch(local_file_size)
 
         # 打开本地文件
-        with open(local_path, 'ab', encoding='utf-8') as local_file:
+        with open(local_path, 'ab') as local_file:
             # 从断点处读取
             remote_file.seek(local_file_size)
             while True:
@@ -454,7 +454,7 @@ def resume_upload(sftp, local_path, remote_path, progress_callback):
     except FileNotFoundError:
         remote_file_size = 0
 
-    with open(local_path, 'rb', encoding='utf-8') as f:
+    with open(local_path, 'rb') as f:
         f.seek(remote_file_size)
         with sftp.file(remote_path, 'ab' if remote_file_size > 0 else 'wb') as remote_file:
             while True:

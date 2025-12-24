@@ -22,11 +22,12 @@ from PySide6.QtCore import QTimer, Signal, Qt, QPoint, QRect, QEvent, QObject, S
     QSize, QThread, QMetaObject, Q_ARG, QProcessEnvironment
 from PySide6.QtGui import QColor
 from PySide6.QtGui import QIcon, QAction, QCursor, QCloseEvent, QInputMethodEvent, QPixmap, \
-    QDragEnterEvent, QDropEvent, QFont, QFontDatabase, QDesktopServices, QGuiApplication, QSyntaxHighlighter, \
+    QDragEnterEvent, QDropEvent, QFont, QFontDatabase, QDesktopServices, QGuiApplication, \
     QTextCharFormat
 from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QDialog, QMessageBox, QTreeWidgetItem, \
     QInputDialog, QFileDialog, QTreeWidget, QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QTableWidgetItem, \
-    QHeaderView, QStyle, QTabBar, QTextBrowser, QLineEdit, QScrollArea, QGridLayout, QProgressBar
+    QHeaderView, QStyle, QTabBar, QTextBrowser, QLineEdit, QScrollArea, QGridLayout, QProgressBar, QProgressDialog, \
+    QDockWidget, QCheckBox
 from deepdiff import DeepDiff
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
@@ -48,7 +49,10 @@ from style.style import updateColor, InstalledButtonStyle, InstallButtonStyle
 from ui import add_config, text_editor, confirm, main, docker_install, auth
 from ui.add_tunnel_config import Ui_AddTunnelConfig
 from ui.tunnel import Ui_Tunnel
+from ui.compress_dialog import CompressDialog
+from core.compressor import CompressThread, DecompressThread
 from ui.tunnel_config import Ui_TunnelConfig
+from ui.code_editor import CodeEditor, Highlighter
 
 # Setup logging
 log_dir = os.path.expanduser("~/.cube-shell")
@@ -259,6 +263,12 @@ class MainDialog(QMainWindow):
         self.ui.tabWidget.currentChanged.connect(self.on_tab_changed)
         # 设置选择模式为多选模式
         self.ui.treeWidget.setSelectionMode(QTreeWidget.ExtendedSelection)
+        # 优化左侧图标显示间距
+        self.ui.treeWidget.setStyleSheet("""
+            QTreeWidget::item {
+                padding-left: 5px;
+            }
+        """)
         # 添加事件过滤器
         self.ui.treeWidget.viewport().installEventFilter(self)
 
@@ -1097,14 +1107,14 @@ class MainDialog(QMainWindow):
                 item.setSelected(True)
 
     # 连接服务器
-    def run(self, name=None, terminal=None):
+    def run(self, name=None, terminal=None) -> int:
         if name is None:
             focus = self.ui.treeWidget.currentIndex().row()
             if focus != -1:
                 name = self.ui.treeWidget.topLevelItem(focus).text(0)
             else:
                 self.alarm(self.tr('请选择一台设备！'))
-                return
+                return 0
 
         with open(get_config_path('config.dat'), 'rb') as c:
             conf = pickle.loads(c.read())[name]
@@ -1116,9 +1126,6 @@ class MainDialog(QMainWindow):
             username, password, host = conf[0], conf[1], conf[2]
         else:
             username, password, host, key_type, key_file = conf[0], conf[1], conf[2], conf[3], conf[4]
-
-        # 移除同步阻塞的网络检查
-        # if not util.check_server_accessibility(host.split(':')[0], int(host.split(':')[1])): ...
 
         try:
             if terminal is None:
@@ -1134,14 +1141,16 @@ class MainDialog(QMainWindow):
             # 🔧 修正：分离主机地址和端口
             host_ip = host.split(':')[0]  # 纯IP地址
             host_port = int(host.split(':')[1])  # 端口号
-            self._connect_with_qtermwidget(host_ip, host_port, username, password, key_type, key_file, terminal)
+            return self._connect_with_qtermwidget(host_ip, host_port, username, password, key_type,
+                                                  key_file, terminal)
 
         except Exception as e:
             util.logger.error(str(e))
             if terminal:
                 terminal.setPlaceholderText(str(e))
+            return False
 
-    def _connect_with_qtermwidget(self, host, port, username, password, key_type, key_file, terminal):
+    def _connect_with_qtermwidget(self, host, port, username, password, key_type, key_file, terminal) -> int:
         """使用 QTermWidget 直接处理 SSH 连接"""
         try:
             util.logger.info(f"Connecting to {host}:{port} via QTermWidget...")
@@ -1223,33 +1232,24 @@ class MainDialog(QMainWindow):
             util.logger.info("建立后台 SSH 连接用于 SFTP...")
             self._establish_background_ssh(host, port, username, password, key_type, key_file)
 
+            return terminal.getIsRunning()
+
         except Exception as e2:
             util.logger.error(f"QTermWidget SSH 连接失败: {e2}")
-            # 回退到原有方式
-            self._fallback_to_original_ssh(host, port, username, password, key_type, key_file)
+            return False
 
     def _establish_background_ssh(self, host, port, username, password, key_type, key_file):
         """建立后台 SSH 连接用于 SFTP 等功能"""
         try:
-            # 直接调用连接器的方法（因为现在是线程池模式，connect_ssh 内部已经是非阻塞的了）
-            # 不需要 invokeMethod，因为 connect_ssh 不再是在另一个线程中运行的槽
+            # SSHConnector 内部已封装了线程，这里直接调用即可，既简洁又非阻塞
             self.ssh_connector.connect_ssh(host, port, username, password, key_type, key_file)
         except Exception as e:
             util.logger.error(f"建立后台 SSH 连接失败: {e}")
 
-    def _fallback_to_original_ssh(self, host, port, username, password, key_type, key_file):
-        """回退到原有 SSH 连接方式"""
-        print("回退到原有 SSH 连接方式")
-        # 同理，直接调用
-        self.ssh_connector.connect_ssh(host, port, username, password, key_type, key_file)
-
     def on_ssh_connected(self, ssh_conn):
         """SSH连接成功回调 - 区分 QTermWidget 模式和传统模式"""
-        # 修复：确保在主线程中执行 UI 操作
-        if QThread.currentThread() != QCoreApplication.instance().thread():
-            QMetaObject.invokeMethod(self, "on_ssh_connected", Qt.QueuedConnection, Q_ARG(object, ssh_conn))
-            return
-
+        # 由于现在是同步调用，一定在主线程，不需要 invokeMethod 检查
+        
         current_index = self.ui.ShellTab.currentIndex()
         ssh_conn.Shell = self.Shell
         self.ui.ShellTab.setTabWhatsThis(current_index, ssh_conn.id)
@@ -1281,12 +1281,17 @@ class MainDialog(QMainWindow):
         self.ui.discButton.setEnabled(True)
         self.ui.result.setEnabled(True)
         self.ui.theme.setEnabled(True)
-        threading.Thread(target=ssh_conn.get_datas, daemon=True).start()
-        self.flushSysInfo()
-        self.refreshDirs()
 
+        self.refreshDirs()
         # 进程管理
         self.processInitUI()
+
+        if not hasattr(ssh_conn, 'flush_sys_info_thread') or not ssh_conn.flush_sys_info_thread.is_alive():
+            ssh_conn.flush_sys_info_thread = threading.Thread(target=ssh_conn.get_datas, args=(ssh_conn,), daemon=True)
+            ssh_conn.flush_sys_info_thread.start()
+            self.flushSysInfo()
+
+        # threading.Thread(target=ssh_conn.get_datas, daemon=True).start()
 
     def on_initSftpSignal(self):
         self.initSftp()
@@ -1349,7 +1354,7 @@ class MainDialog(QMainWindow):
             now_ms = int(time.time() * 1000)
             if self.is_connecting_lock:
                 return
-            if now_ms - getattr(self, "_last_connect_attempt_ts", 0) < 500:
+            if now_ms - getattr(self, "_last_connect_attempt_ts", 0) < 800:
                 return
 
             # 获取选中的设备名称
@@ -1362,19 +1367,15 @@ class MainDialog(QMainWindow):
                 self._last_connect_attempt_ts = now_ms
 
                 # 创建新 Tab 并立即启动连接
-                # 使用 QTimer.singleShot 将连接过程推迟到事件循环的下一次迭代，确保 UI 响应
-                # 锁由回调 on_ssh_connected/on_ssh_failed 释放
-                def start_connect_sequence():
-                    try:
-                        # 传递 name 参数，避免依赖 UI 焦点
-                        tab_index, terminal = self.add_new_tab(name)
-                        if tab_index != -1:
-                            self.run(name, terminal)
-                    finally:
-                        # 释放锁
-                        self.is_connecting_lock = False
+                try:
+                    # 传递 name 参数，避免依赖 UI 焦点
+                    tab_index, terminal = self.add_new_tab(name)
+                    if tab_index != -1:
+                        self.run(name, terminal)
+                finally:
+                    # 释放锁
+                    self.is_connecting_lock = False
 
-                QTimer.singleShot(10, start_connect_sequence)
             else:
                 self.add_new_tab()
                 self.run()
@@ -1484,10 +1485,6 @@ class MainDialog(QMainWindow):
                         except Exception as e:
                             util.logger.error(f"Failed to close all ShellTab: {e}")
                             pass
-
-            # 停止SSH连接器
-            if hasattr(self, 'ssh_connector'):
-                self.ssh_connector.stop()
 
             # 停止上传线程
             if hasattr(self, 'upload_thread') and isinstance(self.upload_thread,
@@ -2184,14 +2181,10 @@ class MainDialog(QMainWindow):
             # 使用单个定时器更新多个信息
             if not hasattr(self, 'update_timer'):
                 ssh_conn.timer1 = QTimer()
-                ssh_conn.timer1.timeout.connect(self.refreshAllInfo)
+                ssh_conn.timer1.timeout.connect(self.refreshSysInfo)
                 ssh_conn.timer1.start(1000)
         except Exception as e:
             util.logger.error(f"Error setting up system info update: {e}")
-
-    def refreshAllInfo(self):
-        # 批量更新所有信息
-        self.refreshSysInfo()
 
     # 刷新设备状态信息功能
     def refreshSysInfo(self):
@@ -2215,8 +2208,6 @@ class MainDialog(QMainWindow):
                 self.ui.memRate.setStyleSheet(updateColor(mem_use))
                 self.ui.diskRate.setValue(dissk_use)
                 self.ui.diskRate.setStyleSheet(updateColor(dissk_use))
-
-                # self.ui.networkUpload.setValue(util.format_speed(transmit_speed))
                 # 自定义显示格式
                 self.ui.networkUpload.setText(util.format_speed(transmit_speed))
                 self.ui.networkDownload.setText(util.format_speed(receive_speed))
@@ -2404,8 +2395,6 @@ class MainDialog(QMainWindow):
             config_path = abspath('docker-compose-full.yml')
             self.common_docker_thread = CommonContainersThread(self.ssh(), config_path)
             self.common_docker_thread.data_ready.connect(self.update_common_containers_ui)
-            # 同理，移除自动 deleteLater
-            # self.common_docker_thread.finished.connect(lambda: self.cleanup_thread('common_docker_thread'))
             self.common_docker_thread.start()
 
     @Slot(dict, bool)
@@ -2671,27 +2660,68 @@ class MainDialog(QMainWindow):
             rm_dict.clear()
             self.refreshDirs()
 
-    # 压缩 tar
+    # 压缩
     def zip(self):
         ssh_conn = self.ssh()
-        selected_items = self.ui.treeWidget.selectedItems()
-        # 要压缩的远程文件列表
-        remote_files = []
-        # 压缩文件名
-        output_file = ""
-        # 先取出所有选中项目
-        for item in selected_items:
-            item_text = item.text(0)
-            remote_files.append(ssh_conn.pwd + '/' + item_text)
-            s = str(item_text).lstrip('.')
-            base_name, ext = os.path.splitext(s)
-            output_file = f'{ssh_conn.pwd}/{base_name}.tar.gz'
+        if not ssh_conn:
+            return
 
-        # 构建压缩命令
-        files_str = ' '.join(remote_files)
-        compress_command = f"tar -czf {output_file} {files_str}"
-        ssh_conn.exec(compress_command)
-        self.refreshDirs()
+        selected_items = self.ui.treeWidget.selectedItems()
+        if not selected_items:
+            return
+
+        # 获取第一个选中项作为默认文件名基础
+        first_item_text = selected_items[0].text(0)
+        # 去掉前面的点（如果是隐藏文件）
+        s = str(first_item_text).lstrip('.')
+        base_name = os.path.splitext(s)[0]
+
+        # 弹出对话框
+        dialog = CompressDialog(self, base_name)
+        if dialog.exec():
+            filename, format_type = dialog.get_settings()
+
+            if not filename:
+                self.warning(self.tr("错误"), self.tr("文件名不能为空"))
+                return
+
+            # 补全后缀
+            if format_type == ".tar.gz":
+                if not filename.endswith(".tar.gz") and not filename.endswith(".tgz"):
+                    if filename.endswith(".tar"):
+                        filename += ".gz"
+                    else:
+                        filename += ".tar.gz"
+            elif format_type == ".zip":
+                if not filename.endswith(".zip"):
+                    filename += ".zip"
+
+            files = [item.text(0) for item in selected_items]
+
+            # 启动线程
+            self.compress_thread = CompressThread(ssh_conn, files, filename, format_type, ssh_conn.pwd)
+            self.compress_thread.finished_sig.connect(self.on_compress_finished)
+
+            # 进度对话框
+            self.progress_dialog = QProgressDialog(self.tr("正在压缩..."), self.tr("取消"), 0, 0, self)
+            self.progress_dialog.setWindowTitle(self.tr("请稍候"))
+            self.progress_dialog.setWindowModality(Qt.WindowModal)
+            self.progress_dialog.setMinimumDuration(0)  # 立即显示
+            self.progress_dialog.canceled.connect(self.compress_thread.requestInterruption)
+
+            # 线程结束时关闭对话框
+            self.compress_thread.finished_sig.connect(lambda: self.progress_dialog.close())
+
+            self.compress_thread.start()
+
+    def on_compress_finished(self, success, msg):
+        if success:
+            self.success(self.tr("压缩任务已完成"))
+            self.refreshDirs()
+        else:
+            # 如果是用户取消，可能 msg 为空或特定消息
+            if not self.progress_dialog.wasCanceled():
+                QMessageBox.warning(self, self.tr("压缩失败"), msg)
 
     def rename(self):
         ssh_conn = self.ssh()
@@ -2705,21 +2735,45 @@ class MainDialog(QMainWindow):
                 ssh_conn.exec(f'mv {ssh_conn.pwd}/{item_text} {ssh_conn.pwd}/{new_name}')
                 self.refreshDirs()
 
-    # 解压 tar
+    # 解压
     def unzip(self):
         ssh_conn = self.ssh()
+        if not ssh_conn:
+            return
+
         selected_items = self.ui.treeWidget.selectedItems()
-        # 构建解压命令
-        decompress_commands = []
+        if not selected_items:
+            return
+
+        files = []
         for item in selected_items:
             item_text = item.text(0)
-            tar_file = ssh_conn.pwd + '/' + item_text
-            decompress_commands.append(f"tar -xzvf {tar_file} -C {ssh_conn.pwd}")
+            # 使用完整路径，确保解压工具能找到文件
+            files.append(f"{ssh_conn.pwd}/{item_text}")
 
-        # 合并解压命令
-        combined_command = " && ".join(decompress_commands)
-        ssh_conn.exec(combined_command)
-        self.refreshDirs()
+        # 启动线程
+        self.decompress_thread = DecompressThread(ssh_conn, files, ssh_conn.pwd)
+        self.decompress_thread.finished_sig.connect(self.on_decompress_finished)
+
+        # 进度对话框
+        self.progress_dialog = QProgressDialog(self.tr("正在解压..."), self.tr("取消"), 0, 0, self)
+        self.progress_dialog.setWindowTitle(self.tr("请稍候"))
+        self.progress_dialog.setWindowModality(Qt.WindowModal)
+        self.progress_dialog.setMinimumDuration(0)
+        self.progress_dialog.canceled.connect(self.decompress_thread.requestInterruption)
+
+        # 线程结束时关闭对话框
+        self.decompress_thread.finished_sig.connect(lambda: self.progress_dialog.close())
+
+        self.decompress_thread.start()
+
+    def on_decompress_finished(self, success, msg):
+        if success:
+            self.success(self.tr("解压任务已完成"))
+            self.refreshDirs()
+        else:
+            if not self.progress_dialog.wasCanceled():
+                QMessageBox.warning(self, self.tr("解压失败"), msg)
 
     # 停止docker容器
     def stopDockerContainer(self, container_ids):
@@ -2765,7 +2819,6 @@ class MainDialog(QMainWindow):
         try:
             if hasattr(self, 'drag_overlay'):
                 self.drag_overlay.hide()
-            ssh_conn = self.ssh()
             mime_data = event.mimeData()
             files = []
             if mime_data.hasUrls():
@@ -2966,61 +3019,60 @@ class MainDialog(QMainWindow):
 
 
 class SSHConnector(QObject):
-    """异步 SSH 连接器 - 使用 QRunnable 和 QThreadPool 管理并发任务"""
+    """SSH 连接器 - 内部使用线程实现异步连接"""
     connected = Signal(object)  # 连接成功信号
     failed = Signal(str)  # 连接失败信号
 
     def __init__(self):
         super().__init__()
-        # 使用全局线程池或创建专用线程池
-        self.thread_pool = PySide6.QtCore.QThreadPool.globalInstance()
-        # 设置最大线程数，避免过多并发连接耗尽资源
-        self.thread_pool.setMaxThreadCount(10)
 
     def connect_ssh(self, host, port, username, password, key_type, key_file):
-        # 创建 Runnable 任务
-        task = ConnectRunnable(host, port, username, password, key_type, key_file)
-        # 连接信号转发器（因为 QRunnable 不是 QObject，不能直接发射信号）
-        # 我们将 task 的发射器连接到 SSHConnector 的信号
-        task.signals.connected.connect(self.connected)
-        task.signals.failed.connect(self.failed)
+        # 内部启动线程，对外非阻塞，保持调用方代码整洁
+        threading.Thread(
+            target=self._do_connect,
+            args=(host, port, username, password, key_type, key_file),
+            daemon=True
+        ).start()
 
-        # 提交到线程池
-        self.thread_pool.start(task)
-
-    def stop(self):
-        """停止连接器（对于线程池，通常不需要手动停止，除非程序退出）"""
-        self.thread_pool.clear()
-
-
-class ConnectSignals(QObject):
-    """用于 Runnable 的信号发射器"""
-    connected = Signal(object)
-    failed = Signal(str)
-
-
-class ConnectRunnable(PySide6.QtCore.QRunnable):
-    """SSH 连接任务 - 独立于 UI 线程运行"""
-
-    def __init__(self, host, port, username, password, key_type, key_file):
-        super().__init__()
-        self.host = host
-        self.port = port
-        self.username = username
-        self.password = password
-        self.key_type = key_type
-        self.key_file = key_file
-        self.signals = ConnectSignals()
-        self.setAutoDelete(True)  # 任务完成后自动删除
-
-    def run(self):
+    def _do_connect(self, host, port, username, password, key_type, key_file):
+        """实际执行连接的线程函数"""
         try:
-            # 执行耗时的连接操作
-            ssh_conn = SshClient(self.host, self.port, self.username, self.password, self.key_type, self.key_file)
+            ssh_conn = SshClient(host, port, username, password, key_type, key_file)
             ssh_conn.connect()
-            self.signals.connected.emit(ssh_conn)
+            self.connected.emit(ssh_conn)
         except Exception as e:
-            self.signals.failed.emit(str(e))
+            self.failed.emit(str(e))
+
+
+# 移除不再需要的类
+# class ConnectSignals(QObject):
+#     """用于 Runnable 的信号发射器"""
+#     connected = Signal(object)
+#     failed = Signal(str)
+
+
+# class ConnectRunnable(PySide6.QtCore.QRunnable):
+#     """SSH 连接任务 - 独立于 UI 线程运行"""
+#
+#     def __init__(self, host, port, username, password, key_type, key_file):
+#         super().__init__()
+#         self.host = host
+#         self.port = port
+#         self.username = username
+#         self.password = password
+#         self.key_type = key_type
+#         self.key_file = key_file
+#         self.signals = ConnectSignals()
+#         self.setAutoDelete(True)  # 任务完成后自动删除
+#
+#     def run(self):
+#         try:
+#             # 执行耗时的连接操作
+#             ssh_conn = SshClient(self.host, self.port, self.username, self.password, self.key_type, self.key_file)
+#             ssh_conn.connect()
+#             self.signals.connected.emit(ssh_conn)
+#         except Exception as e:
+#             self.signals.failed.emit(str(e))
 
 
 # 权限确认
@@ -3166,14 +3218,22 @@ class TextEditor(QMainWindow):
 
         self.old_text = old_text
 
-        # 使用Pygments进行语法高亮
-        formatter = HtmlFormatter(style='fruity', noclasses=True)
-        # 高亮代码
-        highlighted = highlight(old_text, BashLexer(), formatter)
-
-        self.te.textEdit.setHtml(highlighted)
-        self.te.textEdit.setStyleSheet('background-color: rgb(17, 17, 17);')
-        self.new_text = self.te.textEdit.toPlainText()
+        # Replace standard QTextEdit with CodeEditor
+        self.te.gridLayout.removeWidget(self.te.textEdit)
+        self.te.textEdit.deleteLater()
+        
+        self.editor = CodeEditor(self)
+        self.te.gridLayout.addWidget(self.editor, 0, 0, 1, 1)
+        
+        # Setup Syntax Highlighting
+        self.highlighter = Highlighter(self.editor.document())
+        
+        # Set text
+        self.editor.setPlainText(old_text)
+        self.new_text = old_text
+        
+        # Setup Search/Replace UI
+        self.setupSearchUI()
 
         self.timer1 = None
         self.flushNewText()
@@ -3181,13 +3241,75 @@ class TextEditor(QMainWindow):
         self.te.action.triggered.connect(lambda: self.saq(1))
         self.te.action_2.triggered.connect(lambda: self.daq(1))
 
+    def setupSearchUI(self):
+        self.searchDock = QDockWidget("查找与替换", self)
+        self.searchDock.setAllowedAreas(Qt.BottomDockWidgetArea | Qt.TopDockWidgetArea)
+        
+        searchWidget = QWidget()
+        layout = QGridLayout(searchWidget)
+        
+        self.findInput = QLineEdit()
+        self.findInput.setPlaceholderText("查找内容...")
+        self.replaceInput = QLineEdit()
+        self.replaceInput.setPlaceholderText("替换为...")
+        
+        self.caseSensCheck = QCheckBox("区分大小写")
+        self.regexCheck = QCheckBox("正则表达式")
+        
+        findBtn = QPushButton("查找下一个")
+        findBtn.clicked.connect(self.findNext)
+        
+        replaceBtn = QPushButton("替换")
+        replaceBtn.clicked.connect(self.replace)
+        
+        replaceAllBtn = QPushButton("全部替换")
+        replaceAllBtn.clicked.connect(self.replaceAll)
+        
+        layout.addWidget(QLabel("查找:"), 0, 0)
+        layout.addWidget(self.findInput, 0, 1)
+        layout.addWidget(findBtn, 0, 2)
+        
+        layout.addWidget(QLabel("替换:"), 1, 0)
+        layout.addWidget(self.replaceInput, 1, 1)
+        layout.addWidget(replaceBtn, 1, 2)
+        layout.addWidget(replaceAllBtn, 1, 3)
+        
+        layout.addWidget(self.caseSensCheck, 2, 0, 1, 2)
+        layout.addWidget(self.regexCheck, 2, 2)
+        
+        self.searchDock.setWidget(searchWidget)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.searchDock)
+
+    def findNext(self):
+        text = self.findInput.text()
+        if not text:
+            return
+        found = self.editor.find_text(text, self.regexCheck.isChecked(), self.caseSensCheck.isChecked())
+        if not found:
+            QMessageBox.information(self, "查找", "未找到匹配项")
+
+    def replace(self):
+        text = self.findInput.text()
+        new_text = self.replaceInput.text()
+        if not text:
+            return
+        self.editor.replace_text(text, new_text, self.regexCheck.isChecked(), self.caseSensCheck.isChecked())
+
+    def replaceAll(self):
+        text = self.findInput.text()
+        new_text = self.replaceInput.text()
+        if not text:
+            return
+        count = self.editor.replace_all(text, new_text, self.regexCheck.isChecked(), self.caseSensCheck.isChecked())
+        QMessageBox.information(self, "替换", f"已替换 {count} 处匹配项")
+
     def flushNewText(self):
         self.timer1 = QTimer()
         self.timer1.start(100)
         self.timer1.timeout.connect(self.autosave)
 
     def autosave(self):
-        text = self.te.textEdit.toPlainText()
+        text = self.editor.toPlainText()
         self.new_text = text
 
     def closeEvent(self, a0: QCloseEvent) -> None:
@@ -3324,7 +3446,6 @@ class CustomWidget(QWidget):
             # 安装按钮
             self.install_button = QPushButton(self.tr("安装"), self)
             self.install_button.setCursor(QCursor(Qt.PointingHandCursor))
-            # self.install_button.clicked.connect(lambda: self.show_install_docker_window(item, ssh_conn))
             self.install_button.clicked.connect(lambda: self.container_orchestration(ssh_conn))
             self.install_button.setStyleSheet(InstallButtonStyle)
             self.button_layout.addWidget(self.install_button)
@@ -3796,20 +3917,6 @@ class Tunnel(QWidget):
             parent.tunnel_refresh()
         else:
             pass
-
-
-class TerminalHighlighter(QSyntaxHighlighter):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        # 你可以在这里定义高亮规则，比如关键字、颜色等
-
-    def highlightBlock(self, text):
-        # 这里可以自定义高亮规则，比如高亮命令、路径、错误等
-        # 示例：高亮以 $ 开头的行
-        if text.strip().startswith("$"):
-            fmt = QTextCharFormat()
-            fmt.setForeground(QColor("#00FF00"))
-            self.setFormat(0, len(text), fmt)
 
 
 def open_data(ssh):

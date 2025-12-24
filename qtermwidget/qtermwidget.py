@@ -583,6 +583,10 @@ class QTermWidget(QWidget, QTermWidgetInterface):
     def getForegroundProcessId(self) -> int:
         """获取前台进程ID"""
         return self.m_impl.m_session.foregroundProcessId()
+
+    def getIsRunning(self) -> bool:
+        """获取会话状态"""
+        return self.m_impl.m_session.isRunning()
     
     def changeDir(self, dir: str):
         """改变工作目录"""
@@ -1017,7 +1021,8 @@ class QTermWidget(QWidget, QTermWidgetInterface):
         """清除终端内容并移动到home位置"""
         emulation = self.m_impl.m_session.emulation()
         if emulation:
-            emulation.reset()
+            # emulation.reset()
+            emulation.clearEntireScreen()
         self.m_impl.m_session.refresh()
         self.m_impl.m_session.clearHistory()
     
@@ -1310,4 +1315,4 @@ def create_term_widget(startnow: int, parent = None):
     Returns:
         QTermWidget: 终端部件对象
     """
-    return QTermWidget(startnow, parent) 
+    return QTermWidget(startnow, parent)

@@ -49,6 +49,8 @@ class Ui_MainWindow(object):
         self.treeWidget.setFocusPolicy(QtCore.Qt.NoFocus)
         self.treeWidget.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.treeWidget.setObjectName(u"treeWidget")
+        self.treeWidget.setRootIsDecorated(False)
+        self.treeWidget.setIndentation(0)
 
         self.gridLayout.addWidget(self.treeWidget, 1, 0, 1, 1)
 
@@ -349,7 +351,7 @@ class Ui_MainWindow(object):
         sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         sizePolicy.setHorizontalStretch(0)
         sizePolicy.setVerticalStretch(0)
-        sizePolicy.setHeightForWidth(self.treeWidget.sizePolicy().hasHeightForWidth())
+        sizePolicy.setHeightForWidth(self.treeWidgetDocker.sizePolicy().hasHeightForWidth())
         self.treeWidgetDocker.setSizePolicy(sizePolicy)
         self.treeWidgetDocker.setCursor(QCursor(Qt.ArrowCursor))
         self.treeWidgetDocker.setFocusPolicy(QtCore.Qt.NoFocus)
