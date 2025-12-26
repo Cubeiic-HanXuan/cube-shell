@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import uuid
+from bisect import bisect_left
 from collections import defaultdict
 from socket import socket
 
@@ -18,16 +19,33 @@ import PySide6
 import appdirs
 import qdarktheme
 import toml
+
+from qtermwidget.vt102_emulation import MODE_AppScreen
+
+log_dir = os.path.expanduser("~/.cube-shell")
+os.makedirs(log_dir, exist_ok=True)
+if platform.system() == "Darwin":
+    try:
+        stdout_path = os.path.join(log_dir, "stdout.log")
+        stderr_path = os.path.join(log_dir, "stderr.log")
+        stdout_fd = os.open(stdout_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        stderr_fd = os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        os.dup2(stdout_fd, 1)
+        os.dup2(stderr_fd, 2)
+        os.close(stdout_fd)
+        os.close(stderr_fd)
+    except Exception:
+        pass
+
 from PySide6.QtCore import QTimer, Signal, Qt, QPoint, QRect, QEvent, QObject, Slot, QUrl, QCoreApplication, \
     QSize, QThread, QMetaObject, Q_ARG, QProcessEnvironment
 from PySide6.QtGui import QColor
 from PySide6.QtGui import QIcon, QAction, QCursor, QCloseEvent, QInputMethodEvent, QPixmap, \
-    QDragEnterEvent, QDropEvent, QFont, QFontDatabase, QDesktopServices, QGuiApplication, \
-    QTextCharFormat
+    QDragEnterEvent, QDropEvent, QFont, QFontDatabase, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QDialog, QMessageBox, QTreeWidgetItem, \
     QInputDialog, QFileDialog, QTreeWidget, QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QTableWidgetItem, \
     QHeaderView, QStyle, QTabBar, QTextBrowser, QLineEdit, QScrollArea, QGridLayout, QProgressBar, QProgressDialog, \
-    QDockWidget, QCheckBox
+    QDockWidget, QCheckBox, QFrame, QListWidget, QListWidgetItem
 from deepdiff import DeepDiff
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
@@ -53,13 +71,10 @@ from ui.compress_dialog import CompressDialog
 from core.compressor import CompressThread, DecompressThread
 from ui.tunnel_config import Ui_TunnelConfig
 from ui.code_editor import CodeEditor, Highlighter
+from function.ssh_prompt_client import load_linux_commands
+from core.ai import AISettingsDialog, open_ai_dialog
 
-# Setup logging
-log_dir = os.path.expanduser("~/.cube-shell")
-if not os.path.exists(log_dir):
-    os.makedirs(log_dir)
-
-# Configure logging to file
+# 配置日志输出到文件
 logging.basicConfig(
     filename=os.path.join(log_dir, "cube-shell.log"),
     level=logging.DEBUG,
@@ -68,9 +83,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("cube-shell")
 
-# Redirect stdout/stderr to files for debugging
-sys.stdout = open(os.path.join(log_dir, 'stdout.log'), 'w', buffering=1, encoding='utf-8')
-sys.stderr = open(os.path.join(log_dir, 'stderr.log'), 'w', buffering=1, encoding='utf-8')
+# 将 stdout/stderr 重定向到文件，便于排查问题
+sys.stdout = open(os.path.join(log_dir, 'stdout.log'), 'a', buffering=1, encoding='utf-8')
+sys.stderr = open(os.path.join(log_dir, 'stderr.log'), 'a', buffering=1, encoding='utf-8')
 
 print("Cube-Shell Starting...")
 
@@ -87,7 +102,7 @@ def abspath(path):
 
 class DockerInfoThread(QThread):
     """后台获取 Docker 信息的线程"""
-    data_ready = Signal(dict, list)  # groups, container_list
+    data_ready = Signal(dict, list)  # 分组信息, 容器列表
 
     def __init__(self, ssh_conn):
         super().__init__()
@@ -145,7 +160,7 @@ class DockerInfoThread(QThread):
 
 class CommonContainersThread(QThread):
     """后台获取常用容器信息的线程"""
-    data_ready = Signal(dict, bool)  # services_config, has_docker
+    data_ready = Signal(dict, bool)  # 服务配置, 是否安装Docker
 
     def __init__(self, ssh_conn, config_path):
         super().__init__()
@@ -194,8 +209,8 @@ class MainDialog(QMainWindow):
     themeChanged = Signal(bool)
 
     # 异步更新UI信号
-    update_file_tree_signal = Signal(str, str, list)  # connection_id, pwd, file_list
-    update_process_list_signal = Signal(str, list)  # connection_id, process_list
+    update_file_tree_signal = Signal(str, str, list)  # 连接ID, 当前目录, 文件列表
+    update_process_list_signal = Signal(str, list)  # 连接ID, 进程列表
 
     def __init__(self, qt_app):
         super().__init__()
@@ -207,7 +222,7 @@ class MainDialog(QMainWindow):
         # 连接异步信号
         self.update_file_tree_signal.connect(self.handle_file_tree_updated)
         self.update_process_list_signal.connect(self.handle_process_list_updated)
-        # Disable InputMethodEnabled to avoid TUINSRemoteViewController errors on macOS
+        # macOS 下禁用输入法相关属性，避免 TUINSRemoteViewController 报错
         self.setAttribute(Qt.WA_InputMethodEnabled, False)
         self.setAttribute(Qt.WA_KeyCompression, True)
         self.setFocusPolicy(Qt.WheelFocus)
@@ -489,6 +504,14 @@ class MainDialog(QMainWindow):
         self.Shell = SSHQTermWidget(self.tab)
 
         self.Shell.setObjectName(u"Shell")
+        try:
+            self.Shell._ssh_config_name = name
+        except Exception:
+            pass
+        try:
+            self.Shell.finished.connect(lambda term=self.Shell: self.on_terminal_session_finished(term))
+        except Exception:
+            pass
 
         # 🔧 修复：使用addWidget并设置拉伸因子确保完全填充
         self.verticalLayout_shell.addWidget(self.Shell, 0)  # 拉伸因子1
@@ -985,6 +1008,11 @@ class MainDialog(QMainWindow):
         theme_action.setStatusTip(self.tr("设置主题"))
         setting_menu.addAction(theme_action)
         theme_action.triggered.connect(self.theme)
+
+        ai_setting_action = QAction(QIcon(":settings.png"), self.tr("&AI 设置"), self)
+        ai_setting_action.setStatusTip(self.tr("配置 GLM-4.7 AI 能力"))
+        setting_menu.addAction(ai_setting_action)
+        ai_setting_action.triggered.connect(self.show_ai_settings)
         #
         # 创建"重做"动作
         # docker_action = QAction(QIcon(":redo.png"), "&容器编排", self)
@@ -1020,6 +1048,10 @@ class MainDialog(QMainWindow):
     def theme(self):
         self.theme_dialog = theme.MainWindow()
         self.theme_dialog.show()
+
+    def show_ai_settings(self):
+        dialog = AISettingsDialog(self)
+        dialog.exec()
 
     # linux 常用命令
     def linux(self):
@@ -1146,9 +1178,114 @@ class MainDialog(QMainWindow):
 
         except Exception as e:
             util.logger.error(str(e))
-            if terminal:
+            if terminal and hasattr(terminal, "setPlaceholderText"):
                 terminal.setPlaceholderText(str(e))
             return False
+
+    def _find_tab_index_by_terminal(self, terminal):
+        try:
+            for i in range(self.ui.ShellTab.count()):
+                t = self.get_text_browser_from_tab(i)
+                if t is terminal:
+                    return i
+        except Exception:
+            return None
+        return None
+
+    def on_terminal_session_finished(self, terminal):
+        tab_index = self._find_tab_index_by_terminal(terminal)
+        if tab_index is None:
+            return
+
+        try:
+            terminal._ssh_needs_reconnect = True
+        except Exception:
+            pass
+
+        try:
+            title = self.ui.ShellTab.tabText(tab_index)
+            if "断开" not in title:
+                self.ui.ShellTab.setTabText(tab_index, f"{title} (断开)")
+        except Exception:
+            pass
+
+        try:
+            conn_id = self.ui.ShellTab.tabWhatsThis(tab_index)
+            if conn_id and conn_id in self.ssh_clients:
+                try:
+                    self.ssh_clients[conn_id].close()
+                except Exception:
+                    pass
+                try:
+                    del self.ssh_clients[conn_id]
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        if self.ui.ShellTab.currentIndex() == tab_index:
+            self.isConnected = False
+            self.current_displayed_connection_id = None
+            try:
+                self.ui.discButton.setEnabled(False)
+                self.ui.result.setEnabled(False)
+                self.ui.theme.setEnabled(False)
+            except Exception:
+                pass
+
+    def reconnect_terminal(self, terminal):
+        tab_index = self._find_tab_index_by_terminal(terminal)
+        if tab_index is None:
+            return False
+
+        try:
+            self.ui.ShellTab.setCurrentIndex(tab_index)
+        except Exception:
+            pass
+
+        name = getattr(terminal, "_ssh_config_name", None)
+        if not name:
+            try:
+                title = self.ui.ShellTab.tabText(tab_index)
+                name = title.replace(" (断开)", "").split(" (")[0]
+            except Exception:
+                name = None
+        if not name:
+            return False
+
+        try:
+            title = self.ui.ShellTab.tabText(tab_index)
+            if " (断开)" in title:
+                self.ui.ShellTab.setTabText(tab_index, title.replace(" (断开)", ""))
+        except Exception:
+            pass
+
+        try:
+            terminal._ssh_needs_reconnect = False
+        except Exception:
+            pass
+
+        try:
+            conn_id = self.ui.ShellTab.tabWhatsThis(tab_index)
+            if conn_id and conn_id in self.ssh_clients:
+                try:
+                    self.ssh_clients[conn_id].close()
+                except Exception:
+                    pass
+                try:
+                    del self.ssh_clients[conn_id]
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            terminal.clear()
+        except Exception:
+            pass
+
+        ok = self.run(name=name, terminal=terminal)
+        return bool(ok)
 
     def _connect_with_qtermwidget(self, host, port, username, password, key_type, key_file, terminal) -> int:
         """使用 QTermWidget 直接处理 SSH 连接"""
@@ -1186,11 +1323,14 @@ class MainDialog(QMainWindow):
             ssh_command = "ssh"
             ssh_args = [
                 "-o", "ConnectTimeout=10",  # 连接超时设置
+                "-o", "ServerAliveInterval=30",
+                "-o", "ServerAliveCountMax=3",
+                "-o", "TCPKeepAlive=yes",
                 "-t"
             ]
             # 构建SSH命令
             if port != 22:
-                ssh_args.extend(["-p", port])
+                ssh_args.extend(["-p", str(port)])
             if key_type and key_file:
                 # 密钥认证：验证密钥文件并设置正确权限
                 key_file_path = os.path.expanduser(key_file)  # 展开~路径
@@ -1226,7 +1366,7 @@ class MainDialog(QMainWindow):
                     terminal.sendText(password + "\n")
 
                 # 等待1.5秒让SSH显示密码提示，然后自动输入
-                QTimer.singleShot(1500, auto_input_password)
+                QTimer.singleShot(1000, auto_input_password)
 
             # 为了支持 SFTP 等功能，建立后台 SSH 连接
             util.logger.info("建立后台 SSH 连接用于 SFTP...")
@@ -1249,7 +1389,7 @@ class MainDialog(QMainWindow):
     def on_ssh_connected(self, ssh_conn):
         """SSH连接成功回调 - 区分 QTermWidget 模式和传统模式"""
         # 由于现在是同步调用，一定在主线程，不需要 invokeMethod 检查
-        
+
         current_index = self.ui.ShellTab.currentIndex()
         ssh_conn.Shell = self.Shell
         self.ui.ShellTab.setTabWhatsThis(current_index, ssh_conn.id)
@@ -3218,21 +3358,21 @@ class TextEditor(QMainWindow):
 
         self.old_text = old_text
 
-        # Replace standard QTextEdit with CodeEditor
+        # 用 CodeEditor 替换原来的 QTextEdit
         self.te.gridLayout.removeWidget(self.te.textEdit)
         self.te.textEdit.deleteLater()
-        
+
         self.editor = CodeEditor(self)
         self.te.gridLayout.addWidget(self.editor, 0, 0, 1, 1)
-        
-        # Setup Syntax Highlighting
+
+        # 初始化语法高亮
         self.highlighter = Highlighter(self.editor.document())
-        
-        # Set text
+
+        # 设置初始文本
         self.editor.setPlainText(old_text)
         self.new_text = old_text
-        
-        # Setup Search/Replace UI
+
+        # 初始化查找/替换 UI
         self.setupSearchUI()
 
         self.timer1 = None
@@ -3244,39 +3384,39 @@ class TextEditor(QMainWindow):
     def setupSearchUI(self):
         self.searchDock = QDockWidget("查找与替换", self)
         self.searchDock.setAllowedAreas(Qt.BottomDockWidgetArea | Qt.TopDockWidgetArea)
-        
+
         searchWidget = QWidget()
         layout = QGridLayout(searchWidget)
-        
+
         self.findInput = QLineEdit()
         self.findInput.setPlaceholderText("查找内容...")
         self.replaceInput = QLineEdit()
         self.replaceInput.setPlaceholderText("替换为...")
-        
+
         self.caseSensCheck = QCheckBox("区分大小写")
         self.regexCheck = QCheckBox("正则表达式")
-        
+
         findBtn = QPushButton("查找下一个")
         findBtn.clicked.connect(self.findNext)
-        
+
         replaceBtn = QPushButton("替换")
         replaceBtn.clicked.connect(self.replace)
-        
+
         replaceAllBtn = QPushButton("全部替换")
         replaceAllBtn.clicked.connect(self.replaceAll)
-        
+
         layout.addWidget(QLabel("查找:"), 0, 0)
         layout.addWidget(self.findInput, 0, 1)
         layout.addWidget(findBtn, 0, 2)
-        
+
         layout.addWidget(QLabel("替换:"), 1, 0)
         layout.addWidget(self.replaceInput, 1, 1)
         layout.addWidget(replaceBtn, 1, 2)
         layout.addWidget(replaceAllBtn, 1, 3)
-        
+
         layout.addWidget(self.caseSensCheck, 2, 0, 1, 2)
         layout.addWidget(self.regexCheck, 2, 2)
-        
+
         self.searchDock.setWidget(searchWidget)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.searchDock)
 
@@ -3824,7 +3964,7 @@ class Tunnel(QWidget):
                 self.start_tunnel()
             except Exception as e:
                 util.logger.error(f"Error starting tunnel: {e}")
-        # Ensure UI is updated after the tunnel operation completes
+        # 隧道操作完成后刷新 UI 状态
         self.update_ui()
 
     def update_ui(self):
@@ -3988,6 +4128,184 @@ def get_config_path(file_name):
 
 
 # 自定义QTermWidget类，使用内置功能
+class _SuggestionPopup(QFrame):
+    def __init__(self, owner):
+        """
+        智能提示候选弹窗（非激活式）。
+
+        设计目标：
+        - 展示补全候选但不抢占终端焦点，避免 QMenu 抢焦点导致的闪烁与输入卡顿
+        - 支持鼠标选择与键盘上下选择
+        - 默认不选中任何候选，避免用户直接回车执行命令时误触发补全
+        """
+        super().__init__(None)
+        # 轻量、非激活式的提示弹窗：展示补全候选但不抢占终端焦点，
+        # 避免“弹窗抢焦点 -> 终端失焦 -> 弹窗关闭”的闪烁，并保证输入流畅。
+        self._owner = owner
+        self._interacting = False
+        self._sig = None
+        self._has_user_selection = False
+        self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setFrameShape(QFrame.Box)
+        self.setLineWidth(1)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(0)
+
+        self.list = QListWidget(self)
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.list.setSelectionMode(QListWidget.SingleSelection)
+        self.list.setFocusPolicy(Qt.NoFocus)
+        self.list.itemClicked.connect(self._on_item_clicked)
+        layout.addWidget(self.list)
+
+        self.setStyleSheet("""
+            QFrame {
+                background-color: #2d2d30;
+                color: #d4d4d4;
+                border: 1px solid #3c3c3c;
+                border-radius: 3px;
+            }
+            QListWidget {
+                background-color: transparent;
+                border: 0px;
+                outline: 0px;
+            }
+            QListWidget::item {
+                padding: 6px 10px;
+            }
+            QListWidget::item:selected {
+                background-color: #094771;
+                color: white;
+            }
+        """)
+
+    def enterEvent(self, event):
+        """鼠标移入弹窗时标记为交互中，用于暂停候选自动刷新。"""
+        self._interacting = True
+        return super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        """鼠标移出弹窗时结束交互状态。"""
+        self._interacting = False
+        return super().leaveEvent(event)
+
+    def isInteracting(self) -> bool:
+        """是否处于用户交互状态（鼠标悬停在候选弹窗内）。"""
+        return bool(self._interacting)
+
+    def updateSuggestions(self, items: list[dict]):
+        """
+        更新候选列表内容。
+
+        items: [{kind: "history"|"token", text: "..."}]
+        """
+        # 候选集合没变时不重建列表，减少 UI 更新开销。
+        sig = tuple((str(it.get("kind") or ""), str(it.get("text") or "")) for it in items[:20])
+        if sig == self._sig and self.isVisible():
+            return
+        self._sig = sig
+        self._has_user_selection = False
+
+        self.list.setUpdatesEnabled(False)
+        try:
+            self.list.clear()
+            for it in items[:20]:
+                text = str(it.get("text") or "")
+                kind = str(it.get("kind") or "")
+                label = text
+                if kind == "history":
+                    label = f"{text}"
+                item = QListWidgetItem(label)
+                item.setData(Qt.UserRole, it)
+                self.list.addItem(item)
+            # 不默认选中第一条，只有用户显式上下选择/点击后才选中。
+            self.list.setCurrentRow(-1)
+        finally:
+            self.list.setUpdatesEnabled(True)
+
+        fm = self.list.fontMetrics()
+        max_w = 180
+        for i in range(self.list.count()):
+            t = self.list.item(i).text()
+            max_w = max(max_w, fm.horizontalAdvance(t) + 36)
+        visible_rows = min(8, max(1, self.list.count()))
+        row_h = self.list.sizeHintForRow(0) if self.list.count() else fm.height() + 10
+        self.list.setFixedHeight(visible_rows * row_h + 4)
+        self.setFixedWidth(min(520, max_w))
+
+    def hasUserSelection(self) -> bool:
+        """是否存在用户显式选择的候选（鼠标点击或上下键导航）。"""
+        try:
+            if not self._has_user_selection:
+                return False
+            return self.list.currentRow() >= 0
+        except Exception:
+            return False
+
+    def selectNext(self):
+        # 弹窗可见时由终端按键处理触发，用于向下选择候选。
+        if self.list.count() <= 0:
+            return
+        row = self.list.currentRow()
+        if row < 0:
+            row = 0
+        else:
+            row = min(self.list.count() - 1, row + 1)
+        self._has_user_selection = True
+        self.list.setCurrentRow(row)
+
+    def selectPrev(self):
+        # 弹窗可见时由终端按键处理触发，用于向上选择候选。
+        if self.list.count() <= 0:
+            return
+        row = self.list.currentRow()
+        if row < 0:
+            row = self.list.count() - 1
+        else:
+            row = max(0, row - 1)
+        self._has_user_selection = True
+        self.list.setCurrentRow(row)
+
+    def applyCurrentIfSelected(self) -> bool:
+        """
+        仅当用户显式选中过候选时应用当前候选。
+
+        返回值：
+        - True：应用了候选（需要消费回车事件）
+        - False：没有用户选择（不应消费回车事件，让终端执行默认回车行为）
+        """
+        # 只有用户显式选中过候选（鼠标点击或上下键导航）才应用，避免回车误触发补全。
+        if not self.hasUserSelection():
+            return False
+        item = self.list.currentItem()
+        if not item:
+            return False
+        payload = item.data(Qt.UserRole) or {}
+        self._owner._apply_suggestion(payload)
+        self.hide()
+        return True
+
+    def popupAt(self, global_pos: QPoint):
+        """在全局坐标位置弹出候选窗口。"""
+        self.move(global_pos)
+        self.show()
+        self.raise_()
+
+    def _on_item_clicked(self, item):
+        """鼠标点击某条候选时应用该候选。"""
+        try:
+            self._has_user_selection = True
+            payload = item.data(Qt.UserRole) or {}
+            self._owner._apply_suggestion(payload)
+        finally:
+            self.hide()
+
+
 class SSHQTermWidget(QTermWidget):
     """
     自定义QTermWidget，使用内置的右键菜单和复制粘贴功能
@@ -4013,6 +4331,46 @@ class SSHQTermWidget(QTermWidget):
 
         # 记录当前主题
         self.current_theme_name = "Ubuntu"
+        self._ssh_needs_reconnect = False
+
+        self._prompt_index = {"commands": [], "options": {}}
+        self._prompt_commands = []
+        self._prompt_options = {}
+        self._prompt_completer = None
+        self._prompt_commands_sorted = []
+        self._prompt_options_sorted = {}
+        self._input_buffer = ""
+        self._last_delete_ts = 0.0
+        self._suggest_timer = QTimer(self)
+        self._suggest_timer.setSingleShot(True)
+        self._suggest_timer.timeout.connect(self._auto_show_suggestions)
+        self._suggest_popup = _SuggestionPopup(self)
+        self._suggest_last_input = ""
+        self._history_path = get_config_path("command_history.json")
+        self._history_data = {"global": [], "by_profile": {}}
+        try:
+            self._history_data = self._load_history_data()
+        except Exception:
+            self._history_data = {"global": [], "by_profile": {}}
+        try:
+            self.termKeyPressed.connect(self._on_term_key_pressed)
+        except Exception:
+            pass
+        try:
+            self._prompt_index = load_linux_commands()
+            self._prompt_commands = list(self._prompt_index.get("commands") or [])
+            self._prompt_options = dict(self._prompt_index.get("options") or {})
+            self._prompt_commands_sorted = sorted(self._prompt_commands)
+            self._prompt_options_sorted = {}
+            for k, v in self._prompt_options.items():
+                if isinstance(v, list):
+                    self._prompt_options_sorted[k] = sorted(v)
+                elif isinstance(v, set):
+                    self._prompt_options_sorted[k] = sorted(list(v))
+                else:
+                    self._prompt_options_sorted[k] = []
+        except Exception as e:
+            util.logger.error(f"加载命令索引失败: {e}")
 
         # 设置语法高亮支持
         self.setup_syntax_highlighting()
@@ -4021,7 +4379,7 @@ class SSHQTermWidget(QTermWidget):
         self.setColorScheme(self.current_theme_name)
 
     def eventFilter(self, obj, event):
-        """Event filter to handle Ctrl+Wheel zoom"""
+        """事件过滤：处理 Ctrl+滚轮 缩放等终端显示层事件"""
         # Check if the event is from the internal terminal display
         if hasattr(self, 'm_impl') and hasattr(self.m_impl,
                                                'm_terminalDisplay') and obj == self.m_impl.m_terminalDisplay:
@@ -4036,8 +4394,331 @@ class SSHQTermWidget(QTermWidget):
                             parent.zoom_in()
                         elif delta < 0:
                             parent.zoom_out()
-                        return True  # Consume the event
+                        return True  # 消费事件，避免继续传递给终端
+            if event.type() == QEvent.KeyPress:
+                try:
+                    popup = getattr(self, "_suggest_popup", None)
+                    if popup and popup.isVisible():
+                        # 仅在提示弹窗可见时拦截“导航/选择”按键；隐藏时所有按键交给终端。
+                        key = event.key()
+                        if key == Qt.Key_Up:
+                            popup.selectPrev()
+                            it = popup.list.currentItem()
+                            if it:
+                                popup.list.scrollToItem(it)
+                            return True
+                        if key == Qt.Key_Down:
+                            popup.selectNext()
+                            it = popup.list.currentItem()
+                            if it:
+                                popup.list.scrollToItem(it)
+                            return True
+                        if key in (Qt.Key_Return, Qt.Key_Enter):
+                            applied = popup.applyCurrentIfSelected()
+                            if applied:
+                                self._hide_suggestions_menu()
+                                return True
+                            self._hide_suggestions_menu()
+                            return False
+                        if key == Qt.Key_Escape:
+                            self._hide_suggestions_menu()
+                            return True
+
+                    if getattr(self, "_ssh_needs_reconnect", False):
+                        parent = self.window()
+                        if hasattr(parent, "reconnect_terminal"):
+                            parent.reconnect_terminal(self)
+                        return True
+                except Exception:
+                    pass
         return super().eventFilter(obj, event)
+
+    def _on_term_key_pressed(self, event):
+        """
+        终端按键事件（来自 QTermWidget.termKeyPressed）。
+
+        只做与智能提示相关的“轻量输入跟踪”：
+        - 维护 _input_buffer（尽力而为，不保证覆盖远端 shell 的所有编辑行为）
+        - 控制提示弹窗显示/隐藏
+        - 记录历史命令（优先从屏幕提取真实命令行）
+        """
+        try:
+            if getattr(self, "_ssh_needs_reconnect", False):
+                return
+            if self._should_disable_command_suggestions():
+                self._hide_suggestions_menu()
+                return
+
+            key = event.key()
+            mods = event.modifiers()
+
+            if (mods & Qt.ControlModifier) and key == Qt.Key_Space:
+                self._show_suggestions_menu()
+                return
+
+            if key in (Qt.Key_Return, Qt.Key_Enter):
+                cmdline = self._get_commandline_for_history()
+                if cmdline:
+                    self._add_history_entry(cmdline)
+                self._input_buffer = ""
+                self._hide_suggestions_menu()
+                return
+
+            if key in (Qt.Key_Backspace, Qt.Key_Delete):
+                # 长按删除键会产生高频重复事件；此时持续计算/刷新提示会明显卡顿。
+                # 直接隐藏弹窗并暂停提示计算，保证终端输入删除顺滑。
+                self._input_buffer = self._input_buffer[:-1]
+                self._last_delete_ts = time.time()
+                self._hide_suggestions_menu()
+                return
+
+            if key == Qt.Key_Escape:
+                self._hide_suggestions_menu()
+                return
+
+            if key in (
+                    Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down, Qt.Key_Home, Qt.Key_End, Qt.Key_PageUp,
+                    Qt.Key_PageDown):
+                self._hide_suggestions_menu()
+                return
+
+            if mods & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
+                self._hide_suggestions_menu()
+                return
+
+            text = event.text() or ""
+            if text and text.isprintable():
+                # 本地维护一个“尽力而为”的输入缓冲用于轻量提示。
+                # 当远端 shell 自己做 Tab 补全时，本地缓冲可能偏离，稍后会从屏幕同步一次。
+                self._input_buffer += text
+                if text == " ":
+                    self._hide_suggestions_menu()
+                    return
+                if time.time() - getattr(self, "_last_delete_ts", 0.0) > 0.25:
+                    self._schedule_suggestions()
+            elif key == Qt.Key_Tab and mods == Qt.NoModifier:
+                # Tab 补全由远端 shell 完成；等待屏幕更新后，从渲染行同步本地缓冲。
+                QTimer.singleShot(60, self._sync_input_buffer_from_screen)
+        except Exception:
+            pass
+
+    def _should_disable_command_suggestions(self) -> bool:
+        """
+        是否需要禁用智能命令提示。
+
+        当终端进入 alternate screen（如 vim/less/top 等全屏 TUI）时，
+        不应弹出“命令补全”提示，避免干扰编辑/交互。
+        """
+        try:
+            session = getattr(self.m_impl, "m_session", None)
+            if not session:
+                return False
+            emu = session.emulation() if hasattr(session, "emulation") else None
+            if emu and hasattr(emu, "getMode"):
+                return bool(emu.getMode(MODE_AppScreen))
+        except Exception:
+            return False
+        return False
+
+    def _current_line_before_cursor(self) -> str:
+        """
+        获取光标所在行在光标前的文本。
+
+        用于在远端 shell 通过 Tab 等方式修改输入后，从屏幕同步出“真实输入”。
+        """
+        try:
+            display = self.m_impl.m_terminalDisplay
+            line = display.inputMethodQuery(Qt.InputMethodQuery.ImSurroundingText) or ""
+            cursor_x = display.inputMethodQuery(Qt.InputMethodQuery.ImCursorPosition)
+            try:
+                cursor_x = int(cursor_x)
+            except Exception:
+                cursor_x = len(line)
+            if cursor_x < 0:
+                cursor_x = 0
+            return line[:cursor_x]
+        except Exception:
+            return ""
+
+    def _extract_command_from_prompt(self, line_before_cursor: str) -> str:
+        # 基于提示符的启发式剥离：从当前光标行提取“真实命令行”。
+        # 当输入被远端 shell 功能（例如 Tab 补全）修改时，这能显著提升历史记录准确性。
+        s = (line_before_cursor or "").rstrip("\r\n")
+        if not s:
+            return ""
+        markers = ["$ ", "# ", "> ", "❯ ", "➜ "]
+        best = -1
+        best_len = 0
+        for m in markers:
+            i = s.rfind(m)
+            if i > best:
+                best = i
+                best_len = len(m)
+        if best >= 0:
+            return s[best + best_len:].strip()
+        return s.strip()
+
+    def _get_commandline_for_history(self) -> str:
+        """用于写入历史命令的命令行提取：优先从屏幕提取，失败再回退到本地缓冲。"""
+        try:
+            line = self._current_line_before_cursor()
+            cmd = self._extract_command_from_prompt(line)
+            if cmd:
+                return cmd
+        except Exception:
+            pass
+        return (self._input_buffer or "").strip()
+
+    def _sync_input_buffer_from_screen(self):
+        """从屏幕当前行同步本地输入缓冲，用于修正 Tab 补全等导致的偏差。"""
+        try:
+            line = self._current_line_before_cursor()
+            cmd = self._extract_command_from_prompt(line)
+            if cmd:
+                self._input_buffer = cmd
+        except Exception:
+            pass
+
+    def _get_history_key(self) -> str:
+        """获取历史分组键：默认 global；如存在 ssh 配置名则按配置名分组。"""
+        name = getattr(self, "_ssh_config_name", None)
+        if not name:
+            return "global"
+        return str(name)
+
+    def _load_history_data(self) -> dict:
+        """加载本地历史命令 JSON 文件（不存在/异常时返回默认结构）。"""
+        try:
+            if not os.path.exists(self._history_path):
+                return {"global": [], "by_profile": {}}
+            with open(self._history_path, "r", encoding="utf-8") as f:
+                data = json.load(f) or {}
+            g = data.get("global") or []
+            bp = data.get("by_profile") or {}
+            if not isinstance(g, list):
+                g = []
+            if not isinstance(bp, dict):
+                bp = {}
+            return {"global": g, "by_profile": bp}
+        except Exception:
+            return {"global": [], "by_profile": {}}
+
+    def _save_history_data(self):
+        """持久化写入历史命令 JSON 文件。"""
+        try:
+            os.makedirs(os.path.dirname(self._history_path), exist_ok=True)
+            with open(self._history_path, "w", encoding="utf-8") as f:
+                json.dump(self._history_data, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def _add_history_entry(self, cmdline: str):
+        """新增一条历史命令（去重、头插、限制长度），同时写入全局与 profile 历史。"""
+        try:
+            cmd = (cmdline or "").strip()
+            if not cmd:
+                return
+            data = self._history_data if isinstance(self._history_data, dict) else {"global": [], "by_profile": {}}
+            g = data.get("global") or []
+            if not isinstance(g, list):
+                g = []
+            g = [x for x in g if x != cmd]
+            g.insert(0, cmd)
+            g = g[:500]
+            data["global"] = g
+
+            key = self._get_history_key()
+            bp = data.get("by_profile") or {}
+            if not isinstance(bp, dict):
+                bp = {}
+            lst = bp.get(key) or []
+            if not isinstance(lst, list):
+                lst = []
+            lst = [x for x in lst if x != cmd]
+            lst.insert(0, cmd)
+            lst = lst[:200]
+            bp[key] = lst
+            data["by_profile"] = bp
+
+            self._history_data = data
+            self._save_history_data()
+        except Exception:
+            pass
+
+    def _history_suggestions(self, prefix: str) -> list[str]:
+        """按前缀匹配历史命令候选（profile 优先，其次 global），并去重限制数量。"""
+        p = (prefix or "").strip()
+        if not p:
+            return []
+        data = self._history_data if isinstance(self._history_data, dict) else {"global": [], "by_profile": {}}
+        key = self._get_history_key()
+        bp = data.get("by_profile") or {}
+        profile = bp.get(key) or []
+        global_hist = data.get("global") or []
+        out = []
+        seen = set()
+        for src in (profile, global_hist):
+            for s in src:
+                if not isinstance(s, str):
+                    continue
+                if not s.startswith(p):
+                    continue
+                if s == p:
+                    continue
+                if s in seen:
+                    continue
+                seen.add(s)
+                out.append(s)
+                if len(out) >= 20:
+                    return out
+        return out
+
+    def _current_last_token(self) -> str:
+        """提取当前输入最后一个 token（用于 token 级候选替换）。"""
+        s = (self._input_buffer or "")
+        if not s or s.endswith((" ", "\t")):
+            return ""
+        m = re.search(r"(\S+)$", s)
+        return m.group(1) if m else ""
+
+    def _apply_suggestion(self, payload: dict):
+        """
+        应用一条候选到终端输入。
+
+        规则：
+        - kind=history：替换整行输入（先退格清空，再写入完整历史命令）
+        - kind=token：替换最后一个 token（退格删除 token，再写入候选）
+        """
+        try:
+            kind = str(payload.get("kind") or "")
+            value = str(payload.get("text") or "")
+            if not value:
+                return
+
+            buf = self._input_buffer or ""
+
+            if kind == "history":
+                erase_len = len(buf)
+                if erase_len:
+                    self.sendText("\x7f" * erase_len)
+                self.sendText(value)
+                self._input_buffer = value
+                return
+
+            last_token = self._current_last_token()
+            erase_len = len(last_token)
+            if erase_len:
+                self.sendText("\x7f" * erase_len)
+                buf = buf[:-erase_len]
+            self.sendText(value)
+            self._input_buffer = f"{buf}{value}"
+
+            stripped = (self._input_buffer or "").strip()
+            if " " not in stripped and value in set(self._prompt_commands):
+                self.sendText(" ")
+                self._input_buffer += " "
+        except Exception:
+            pass
 
     def setColorScheme(self, name):
         """重写 setColorScheme，保存主题并在底层设置"""
@@ -4155,6 +4836,179 @@ class SSHQTermWidget(QTermWidget):
             self.setTerminalFont(font)
             print("使用系统默认等宽字体")
 
+    def _compute_suggestions(self, text: str) -> list[str]:
+        """基于静态命令/选项索引进行前缀匹配，返回候选列表。"""
+        s = (text or "").lstrip()
+        if not s:
+            return list(self._prompt_commands_sorted or self._prompt_commands)
+        parts = s.split()
+        if not parts:
+            return list(self._prompt_commands_sorted or self._prompt_commands)
+        if len(parts) == 1:
+            prefix = parts[0]
+            if not prefix:
+                return list(self._prompt_commands_sorted or self._prompt_commands)
+            lst = self._prompt_commands_sorted or self._prompt_commands
+            lo = bisect_left(lst, prefix)
+            hi = bisect_left(lst, prefix + "\uffff")
+            return lst[lo:min(hi, lo + 80)]
+        cmd = parts[0]
+        last = parts[-1]
+        if last.startswith("-"):
+            opts = self._prompt_options_sorted.get(cmd) or self._prompt_options.get(cmd) or []
+            if not isinstance(opts, list):
+                try:
+                    opts = list(opts)
+                except Exception:
+                    opts = []
+            lo = bisect_left(opts, last)
+            hi = bisect_left(opts, last + "\uffff")
+            return opts[lo:min(hi, lo + 80)]
+        return []
+
+    def _hide_suggestions_menu(self):
+        """隐藏提示弹窗并重置本次输入的提示状态。"""
+        popup = getattr(self, "_suggest_popup", None)
+        if popup:
+            try:
+                popup.hide()
+            except Exception:
+                pass
+        self._suggest_last_input = ""
+
+    def _schedule_suggestions(self):
+        """启动防抖定时器，延迟触发候选计算与弹窗显示。"""
+        try:
+            if getattr(self, "_ssh_needs_reconnect", False):
+                return
+            if self._should_disable_command_suggestions():
+                return
+            if hasattr(self, "_suggest_timer") and self._suggest_timer:
+                self._suggest_timer.start(300)
+        except Exception:
+            pass
+
+    def _get_suggestion_items(self, text: str) -> list[dict]:
+        """
+        生成候选列表（结构化数据）。
+
+        候选来源顺序：
+        1) 历史命令（整行）优先
+        2) 静态索引候选（token 级）
+        """
+        s = (text or "").lstrip()
+        items: list[dict] = []
+        seen = set()
+
+        for h in self._history_suggestions(s):
+            if h in seen:
+                continue
+            seen.add(h)
+            items.append({"kind": "history", "text": h})
+            if len(items) >= 20:
+                return items
+
+        sugg = self._compute_suggestions(s)
+        last_token = ""
+        if s and not s.endswith((" ", "\t")):
+            m = re.search(r"(\S+)$", s)
+            last_token = m.group(1) if m else ""
+
+        candidates = sugg
+        if last_token:
+            candidates = [x for x in sugg if x.startswith(last_token)]
+        if not candidates:
+            candidates = sugg
+
+        for x in candidates:
+            if x in seen:
+                continue
+            seen.add(x)
+            items.append({"kind": "token", "text": x})
+            if len(items) >= 20:
+                break
+
+        return items
+
+    def _auto_show_suggestions(self):
+        """定时器回调：根据当前输入决定是否显示/更新提示弹窗。"""
+        try:
+            popup = getattr(self, "_suggest_popup", None)
+            if popup and popup.isVisible() and popup.isInteracting():
+                return
+            if self._should_disable_command_suggestions():
+                self._hide_suggestions_menu()
+                return
+
+            display_has_focus = False
+            try:
+                display_has_focus = bool(self.m_impl.m_terminalDisplay.hasFocus())
+            except Exception:
+                display_has_focus = False
+
+            if not (self.hasFocus() or display_has_focus):
+                self._hide_suggestions_menu()
+                return
+
+            text = (self._input_buffer or "").lstrip()
+            if not text:
+                self._hide_suggestions_menu()
+                return
+
+            items = self._get_suggestion_items(text)
+            if not items:
+                self._hide_suggestions_menu()
+                return
+
+            if text == getattr(self, "_suggest_last_input", "") and popup and popup.isVisible():
+                return
+            self._suggest_last_input = text
+            self._show_suggestions_menu()
+        except Exception:
+            pass
+
+    def _validate_command(self, cmdline: str) -> str:
+        s = (cmdline or "").strip()
+        if not s:
+            return ""
+        cmd = s.split()[0]
+        if cmd in set(self._prompt_commands):
+            return ""
+        return "unknown_command"
+
+    def _get_completion(self) -> str:
+        s = (self._input_buffer or "").lstrip()
+        if not s:
+            return ""
+        sugg = self._compute_suggestions(s)
+        if not sugg:
+            return ""
+        return sugg[0]
+
+    def _show_suggestions_menu(self):
+        """计算候选并在光标附近弹出提示窗口。"""
+        text = (self._input_buffer or "").lstrip()
+        items = self._get_suggestion_items(text)
+        if not items:
+            self._hide_suggestions_menu()
+            return
+
+        popup = getattr(self, "_suggest_popup", None)
+        if not popup:
+            return
+        try:
+            popup.updateSuggestions(items)
+        except Exception:
+            return
+
+        try:
+            display = self.m_impl.m_terminalDisplay
+            rect = display.inputMethodQuery(Qt.InputMethodQuery.ImCursorRectangle)
+            p = display.mapToGlobal(rect.bottomLeft())
+            popup.popupAt(p)
+        except Exception:
+            popup.popupAt(QCursor.pos())
+
     def contextMenuEvent(self, event):
         """优化的右键菜单实现"""
         try:
@@ -4235,6 +5089,24 @@ class SSHQTermWidget(QTermWidget):
         theme_action.triggered.connect(self.show_theme_selector)
         menu.addAction(theme_action)
 
+        menu.addSeparator()
+        ai_menu = menu.addMenu("🤖 AI")
+        explain_action = QAction("解释文本", self)
+        explain_action.triggered.connect(lambda: open_ai_dialog(self, "explain"))
+        ai_menu.addAction(explain_action)
+
+        script_action = QAction("编写脚本", self)
+        script_action.triggered.connect(lambda: open_ai_dialog(self, "script"))
+        ai_menu.addAction(script_action)
+
+        install_action = QAction("软件环境", self)
+        install_action.triggered.connect(lambda: open_ai_dialog(self, "install"))
+        ai_menu.addAction(install_action)
+
+        log_action = QAction("日志分析", self)
+        log_action.triggered.connect(lambda: open_ai_dialog(self, "log"))
+        ai_menu.addAction(log_action)
+
     def show_theme_selector(self):
         """显示增强的主题选择器"""
         try:
@@ -4263,11 +5135,6 @@ class SSHQTermWidget(QTermWidget):
             "Monokai": "Monokai经典",
             "Ubuntu": "Ubuntu默认风格",
         }
-
-    def setColorScheme(self, name):
-        """重写 setColorScheme 以记录当前主题"""
-        self.current_theme_name = name
-        super().setColorScheme(name)
 
     def apply_theme(self, theme_name):
         """应用终端主题"""

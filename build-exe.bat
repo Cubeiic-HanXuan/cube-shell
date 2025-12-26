@@ -26,6 +26,9 @@ nuitka --windows-console-mode=disable --windows-icon-from-ico=icons/logo.ico ^
   --include-module=pygments ^
   --include-module=paramiko ^
   --include-module=yaml ^
+  --include-module=zai ^
+  --include-module=keyring ^
+  --include-module=prompt_toolkit ^
   --include-module=pygments.formatters.html ^
   --include-module=pygments.lexers.shell ^
   --include-package=qtermwidget,core,function,style,ui,icons ^
