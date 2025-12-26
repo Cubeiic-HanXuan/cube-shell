@@ -1366,7 +1366,7 @@ class MainDialog(QMainWindow):
                     terminal.sendText(password + "\n")
 
                 # 等待1.5秒让SSH显示密码提示，然后自动输入
-                QTimer.singleShot(1000, auto_input_password)
+                QTimer.singleShot(1200, auto_input_password)
 
             # 为了支持 SFTP 等功能，建立后台 SSH 连接
             util.logger.info("建立后台 SSH 连接用于 SFTP...")
