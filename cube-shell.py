@@ -504,14 +504,6 @@ class MainDialog(QMainWindow):
         self.Shell = SSHQTermWidget(self.tab)
 
         self.Shell.setObjectName(u"Shell")
-        try:
-            self.Shell._ssh_config_name = name
-        except Exception:
-            pass
-        try:
-            self.Shell.finished.connect(lambda term=self.Shell: self.on_terminal_session_finished(term))
-        except Exception:
-            pass
 
         # 🔧 修复：使用addWidget并设置拉伸因子确保完全填充
         self.verticalLayout_shell.addWidget(self.Shell, 0)  # 拉伸因子1
@@ -1181,111 +1173,6 @@ class MainDialog(QMainWindow):
             if terminal and hasattr(terminal, "setPlaceholderText"):
                 terminal.setPlaceholderText(str(e))
             return False
-
-    def _find_tab_index_by_terminal(self, terminal):
-        try:
-            for i in range(self.ui.ShellTab.count()):
-                t = self.get_text_browser_from_tab(i)
-                if t is terminal:
-                    return i
-        except Exception:
-            return None
-        return None
-
-    def on_terminal_session_finished(self, terminal):
-        tab_index = self._find_tab_index_by_terminal(terminal)
-        if tab_index is None:
-            return
-
-        try:
-            terminal._ssh_needs_reconnect = True
-        except Exception:
-            pass
-
-        try:
-            title = self.ui.ShellTab.tabText(tab_index)
-            if "断开" not in title:
-                self.ui.ShellTab.setTabText(tab_index, f"{title} (断开)")
-        except Exception:
-            pass
-
-        try:
-            conn_id = self.ui.ShellTab.tabWhatsThis(tab_index)
-            if conn_id and conn_id in self.ssh_clients:
-                try:
-                    self.ssh_clients[conn_id].close()
-                except Exception:
-                    pass
-                try:
-                    del self.ssh_clients[conn_id]
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        if self.ui.ShellTab.currentIndex() == tab_index:
-            self.isConnected = False
-            self.current_displayed_connection_id = None
-            try:
-                self.ui.discButton.setEnabled(False)
-                self.ui.result.setEnabled(False)
-                self.ui.theme.setEnabled(False)
-            except Exception:
-                pass
-
-    def reconnect_terminal(self, terminal):
-        tab_index = self._find_tab_index_by_terminal(terminal)
-        if tab_index is None:
-            return False
-
-        try:
-            self.ui.ShellTab.setCurrentIndex(tab_index)
-        except Exception:
-            pass
-
-        name = getattr(terminal, "_ssh_config_name", None)
-        if not name:
-            try:
-                title = self.ui.ShellTab.tabText(tab_index)
-                name = title.replace(" (断开)", "").split(" (")[0]
-            except Exception:
-                name = None
-        if not name:
-            return False
-
-        try:
-            title = self.ui.ShellTab.tabText(tab_index)
-            if " (断开)" in title:
-                self.ui.ShellTab.setTabText(tab_index, title.replace(" (断开)", ""))
-        except Exception:
-            pass
-
-        try:
-            terminal._ssh_needs_reconnect = False
-        except Exception:
-            pass
-
-        try:
-            conn_id = self.ui.ShellTab.tabWhatsThis(tab_index)
-            if conn_id and conn_id in self.ssh_clients:
-                try:
-                    self.ssh_clients[conn_id].close()
-                except Exception:
-                    pass
-                try:
-                    del self.ssh_clients[conn_id]
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        try:
-            terminal.clear()
-        except Exception:
-            pass
-
-        ok = self.run(name=name, terminal=terminal)
-        return bool(ok)
 
     def _connect_with_qtermwidget(self, host, port, username, password, key_type, key_file, terminal) -> int:
         """使用 QTermWidget 直接处理 SSH 连接"""
@@ -3114,28 +3001,31 @@ class MainDialog(QMainWindow):
         )
 
     def toggleTheme(self):
-        sheet = self.app.styleSheet()
-        stylesheet = qdarktheme.load_stylesheet(custom_colors={"[dark]": {"primary": "#00A1FF", }}, )
-        if self.app.styleSheet() == stylesheet:
+        dark_stylesheet = qdarktheme.load_stylesheet(custom_colors={"[dark]": {"primary": "#00A1FF"}})
+        if self.app.styleSheet() == dark_stylesheet:
             self.setLightTheme()
+            self.themeChanged.emit(False)
         else:
             self.setDarkTheme()
-        # 🔧 发射主题切换信号
-        self.themeChanged.emit(True)
+            self.themeChanged.emit(True)
+
+    def _reapply_all_terminal_themes(self):
+        for index in range(self.ui.ShellTab.count()):
+            terminal = self.get_text_browser_from_tab(index)
+            if not terminal or not hasattr(terminal, 'setColorScheme'):
+                continue
+            if hasattr(terminal, '_schedule_reapply_color_scheme'):
+                terminal._schedule_reapply_color_scheme()
+            elif hasattr(terminal, 'current_theme_name'):
+                terminal.setColorScheme(terminal.current_theme_name)
+            else:
+                terminal.setColorScheme("Ubuntu")
 
     def on_system_theme_changed(self, is_dark_theme):
         """系统主题切换时，重新应用终端主题"""
         try:
-            # 遍历所有终端标签页
-            for index in range(self.ui.ShellTab.count()):
-                terminal = self.get_text_browser_from_tab(index)
-                # 检查是否为 SSHQTermWidget 实例（或具有 setColorScheme 方法）
-                if terminal and hasattr(terminal, 'setColorScheme'):
-                    # 重新应用当前主题，以覆盖系统样式表的影响
-                    if hasattr(terminal, 'current_theme_name'):
-                        terminal.setColorScheme(terminal.current_theme_name)
-                    else:
-                        terminal.setColorScheme("Ubuntu")
+            QTimer.singleShot(0, self._reapply_all_terminal_themes)
+            QTimer.singleShot(50, self._reapply_all_terminal_themes)
         except Exception as e:
             util.logger.error(f"Failed to changed system theme: {e}")
 
@@ -4331,7 +4221,7 @@ class SSHQTermWidget(QTermWidget):
 
         # 记录当前主题
         self.current_theme_name = "Ubuntu"
-        self._ssh_needs_reconnect = False
+        self._theme_reapply_pending = False
 
         self._prompt_index = {"commands": [], "options": {}}
         self._prompt_commands = []
@@ -4378,17 +4268,38 @@ class SSHQTermWidget(QTermWidget):
         # 初始化主题
         self.setColorScheme(self.current_theme_name)
 
+    def _schedule_reapply_color_scheme(self):
+        if self._theme_reapply_pending:
+            return
+        self._theme_reapply_pending = True
+
+        def _do():
+            try:
+                QTermWidget.setColorScheme(self, self.current_theme_name)
+            finally:
+                self._theme_reapply_pending = False
+
+        QTimer.singleShot(0, _do)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.StyleChange, QEvent.PaletteChange):
+            self._schedule_reapply_color_scheme()
+
     def eventFilter(self, obj, event):
         """事件过滤：处理 Ctrl+滚轮 缩放等终端显示层事件"""
         # Check if the event is from the internal terminal display
         if hasattr(self, 'm_impl') and hasattr(self.m_impl,
                                                'm_terminalDisplay') and obj == self.m_impl.m_terminalDisplay:
+            if event.type() in (QEvent.StyleChange, QEvent.PaletteChange):
+                self._schedule_reapply_color_scheme()
+                return False
             if event.type() == QEvent.Wheel:
                 if event.modifiers() & Qt.ControlModifier:
                     # Forward to main window for zoom
                     parent = self.window()
                     if hasattr(parent, 'zoom_in') and hasattr(parent, 'zoom_out'):
-                        super().setColorScheme(self.current_theme_name)
+                        QTermWidget.setColorScheme(self, self.current_theme_name)
                         delta = event.angleDelta().y()
                         if delta > 0:
                             parent.zoom_in()
@@ -4423,12 +4334,6 @@ class SSHQTermWidget(QTermWidget):
                         if key == Qt.Key_Escape:
                             self._hide_suggestions_menu()
                             return True
-
-                    if getattr(self, "_ssh_needs_reconnect", False):
-                        parent = self.window()
-                        if hasattr(parent, "reconnect_terminal"):
-                            parent.reconnect_terminal(self)
-                        return True
                 except Exception:
                     pass
         return super().eventFilter(obj, event)
@@ -4443,8 +4348,6 @@ class SSHQTermWidget(QTermWidget):
         - 记录历史命令（优先从屏幕提取真实命令行）
         """
         try:
-            if getattr(self, "_ssh_needs_reconnect", False):
-                return
             if self._should_disable_command_suggestions():
                 self._hide_suggestions_menu()
                 return
@@ -4879,8 +4782,6 @@ class SSHQTermWidget(QTermWidget):
     def _schedule_suggestions(self):
         """启动防抖定时器，延迟触发候选计算与弹窗显示。"""
         try:
-            if getattr(self, "_ssh_needs_reconnect", False):
-                return
             if self._should_disable_command_suggestions():
                 return
             if hasattr(self, "_suggest_timer") and self._suggest_timer:

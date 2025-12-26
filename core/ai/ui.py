@@ -91,6 +91,13 @@ def _ai_propose_repairs(prefs: AIUserPrefs, *, command: str, stdout: str, stderr
         "数组元素结构：{\"title\": \"...\", \"commands\": [\"...\"], \"retry_original\": true}\n"
         "规则：\n"
         "- commands 必须是可直接执行的单条命令（不要多行脚本/函数/循环）\n"
+        "- 必须根据目标系统选择包管理器，禁止输出不匹配发行版的命令：\n"
+        "  - Debian/Ubuntu: apt\n"
+        "  - CentOS/RHEL 7 / Amazon Linux 2: yum\n"
+        "  - Fedora / RHEL/Rocky/Alma/CentOS 8+: dnf\n"
+        "  - openSUSE/SLES: zypper\n"
+        "  - Alpine: apk\n"
+        "  - Arch: pacman\n"
         "- Debian/Ubuntu 系优先使用 apt（而不是 apt-get）\n"
         "- 危险命令需更保守（避免 rm -rf，除非明确必要且范围最小）\n\n"
         f"distro_id: {distro_id}\n"
@@ -465,6 +472,13 @@ def open_ai_dialog(terminal_widget, mode: str) -> None:
                 "规则：\n"
                 "- cmd 必须是一条可直接在 shell 执行的命令（不要输出函数定义/循环/多行脚本/HereDoc）\n"
                 "- 遇到需要提权的命令必须显式包含 sudo（除非确定 root）\n"
+                "- 必须根据目标系统选择包管理器，禁止输出不匹配发行版的命令：\n"
+                "  - Debian/Ubuntu: apt\n"
+                "  - CentOS/RHEL 7 / Amazon Linux 2: yum\n"
+                "  - Fedora / RHEL/Rocky/Alma/CentOS 8+: dnf\n"
+                "  - openSUSE/SLES: zypper\n"
+                "  - Alpine: apk\n"
+                "  - Arch: pacman\n"
                 "- Debian/Ubuntu 系优先使用 apt（而不是 apt-get）\n"
                 "- 必须包含：环境检查与依赖验证(预处理)、安装/卸载主步骤(执行)、最终状态确认(验证)\n"
                 "- 卸载需覆盖常见来源（包管理器/二进制/源码）并在验证阶段确认已移除\n\n"
@@ -544,7 +558,136 @@ class _AIInstallToTerminalController(QObject):
 
     def start(self):
         self._bridge.send_text("echo '[cube-shell][AI] 正在生成安装/卸载计划…'\n")
-        self._worker.start()
+        threading.Thread(target=self._prepare_and_start_worker_thread, daemon=True).start()
+
+    @Slot()
+    def _start_worker(self):
+        try:
+            self._worker.start()
+        except Exception:
+            pass
+
+    def _prepare_and_start_worker_thread(self):
+        os_info = self._detect_remote_os_info()
+        extra = self._format_os_prompt_hint(os_info)
+        if extra:
+            try:
+                title = (os_info.get("pretty_name") or os_info.get("id") or "").strip()
+                title_safe = title.replace("'", "'\"'\"'")
+                self._bridge.send_text(f"echo '[cube-shell][AI] 目标系统: {title_safe}'\n")
+            except Exception:
+                pass
+
+            try:
+                messages = [dict(m) for m in (self._messages or [])]
+                for m in reversed(messages):
+                    if m.get("role") == "user":
+                        m["content"] = ((m.get("content") or "").rstrip() + "\n\n" + extra).strip()
+                        break
+                self._worker.messages = messages
+            except Exception:
+                pass
+
+        QMetaObject.invokeMethod(self, "_start_worker", Qt.QueuedConnection)
+
+    def _detect_remote_os_info(self) -> dict[str, str]:
+        out = ""
+        try:
+            if hasattr(self._ssh_conn, "exec"):
+                out = self._ssh_conn.exec(cmd="cat /etc/os-release 2>/dev/null || true", pty=False) or ""
+            elif getattr(self._ssh_conn, "conn", None):
+                _, stdout, _ = self._ssh_conn.conn.exec_command(command="cat /etc/os-release 2>/dev/null || true",
+                                                                get_pty=False, timeout=10)
+                out = stdout.read().decode("utf-8", errors="ignore")
+        except Exception:
+            out = ""
+
+        info: dict[str, str] = {}
+        if out:
+            for line in out.splitlines():
+                if "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = (k or "").strip()
+                v = (v or "").strip().strip('"').strip("'")
+                if k:
+                    info[k.lower()] = v
+
+        if not info.get("id"):
+            try:
+                if hasattr(self._ssh_conn, "exec"):
+                    out2 = self._ssh_conn.exec(cmd="cat /etc/redhat-release 2>/dev/null || true", pty=False) or ""
+                elif getattr(self._ssh_conn, "conn", None):
+                    _, stdout, _ = self._ssh_conn.conn.exec_command(
+                        command="cat /etc/redhat-release 2>/dev/null || true", get_pty=False, timeout=10)
+                    out2 = stdout.read().decode("utf-8", errors="ignore")
+                else:
+                    out2 = ""
+            except Exception:
+                out2 = ""
+
+            txt = (out2 or "").strip()
+            if txt:
+                info["pretty_name"] = info.get("pretty_name") or txt
+                low = txt.lower()
+                if "centos" in low:
+                    info["id"] = "centos"
+                elif "red hat" in low or "rhel" in low:
+                    info["id"] = "rhel"
+                m = re.search(r"release\s+(\d+)", low)
+                if m:
+                    info["version_id"] = info.get("version_id") or m.group(1)
+
+        return info
+
+    def _format_os_prompt_hint(self, os_info: dict[str, str]) -> str:
+        if not os_info:
+            return (
+                "目标主机系统未知。\n"
+                "要求：先在 steps 的预处理阶段检测发行版与版本（如读取 /etc/os-release），再按结果选择正确的包管理器。\n"
+            )
+
+        distro_id = (os_info.get("id") or "").strip().lower()
+        version_id = (os_info.get("version_id") or "").strip()
+        id_like = (os_info.get("id_like") or "").strip().lower()
+        pretty_name = (os_info.get("pretty_name") or "").strip()
+
+        major = ""
+        m = re.match(r"^(\d+)", version_id)
+        if m:
+            major = m.group(1)
+
+        pkg_mgr = ""
+        if distro_id in {"ubuntu", "debian"} or "debian" in id_like:
+            pkg_mgr = "apt"
+        elif distro_id in {"fedora"} or "fedora" in id_like:
+            pkg_mgr = "dnf"
+        elif distro_id in {"centos", "rhel", "rocky", "almalinux", "ol"} or any(
+                x in id_like for x in ("rhel", "fedora", "centos")):
+            if major and int(major) >= 8:
+                pkg_mgr = "dnf"
+            else:
+                pkg_mgr = "yum"
+        elif distro_id in {"amzn", "amazon"} or "amzn" in id_like or "amazon" in id_like:
+            pkg_mgr = "yum"
+        elif distro_id in {"opensuse", "sles", "suse"} or "suse" in id_like:
+            pkg_mgr = "zypper"
+        elif distro_id in {"alpine"} or "alpine" in id_like:
+            pkg_mgr = "apk"
+        elif distro_id in {"arch", "manjaro"} or "arch" in id_like:
+            pkg_mgr = "pacman"
+
+        lines = [
+            "目标主机系统信息（已检测，用于生成正确命令）：",
+            f"- PRETTY_NAME: {pretty_name}" if pretty_name else "",
+            f"- ID: {distro_id}" if distro_id else "",
+            f"- VERSION_ID: {version_id}" if version_id else "",
+            f"- ID_LIKE: {id_like}" if id_like else "",
+            f"- 首选包管理器: {pkg_mgr}" if pkg_mgr else "",
+            "",
+            "强约束：生成命令必须适配该发行版；例如在 CentOS/RHEL 上禁止使用 apt。",
+        ]
+        return "\n".join([x for x in lines if x]).strip()
 
     def _on_failed(self, msg: str):
         safe = (msg or "").replace("'", "'\"'\"'")
@@ -587,14 +730,14 @@ class _AIInstallToTerminalController(QObject):
         if not self._bridge.connected:
             return
 
-        def execute_command(command: str, timeout: int = 600, output_callback=None):
+        def execute_command(command: str, sudo_password: str | None = None, timeout: int = 600, output_callback=None):
             cmd = _normalize_apt_command(command)
             cmd_display = (cmd or "").replace("'", "'\"'\"'")
             marker = f"__CUBESHELL_RC_{uuid.uuid4().hex}__"
             wrapped = (
                 f"printf '%s\\n' '[cube-shell] $ {cmd_display}'; "
-                f"{cmd}; "
-                f"printf '\\n{marker}=%d\\r' $?"
+                f"{cmd}; __RC=$?; "
+                f"printf '\\n[cube-shell][rc] {marker}=%d\\n' \"$__RC\""
             )
             self._bridge.send_text(wrapped + "\n")
 
@@ -615,15 +758,10 @@ class _AIInstallToTerminalController(QObject):
                     rc = int(m.group(1))
                     break
             cleaned = buf
-            cleaned = cleaned.replace("\x1b[1A\x1b[2K\r\x1b[1B", "")
-            cleaned = re.sub(
-                rf"(?:\x1b\[[0-9;?]*m)*{re.escape(marker)}=\d+(?:\x1b\[[0-9;?]*m)*",
-                "",
-                cleaned,
-            )
-            cleaned = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", cleaned)
+            cleaned = re.sub(rf"^\[cube-shell\]\[rc\]\s*{re.escape(marker)}=\d+\s*$", "", cleaned, flags=re.MULTILINE)
             return cleaned, "", rc
 
+        distro_id = ""
         try:
             out, _, _ = execute_command("cat /etc/os-release 2>/dev/null | sed -n 's/^ID=//p' | head -n 1", timeout=15)
             distro_id = (out or "").strip().strip('"').strip("'")
