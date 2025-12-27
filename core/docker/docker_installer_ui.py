@@ -1,16 +1,14 @@
 import json
-import sys
 from typing import Dict, Any
 
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtGui import QColor, QTextCursor, QFont
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QPushButton, QProgressBar, QTextEdit, QGroupBox, QMessageBox, QApplication, QDialog
+    QLabel, QPushButton, QProgressBar, QTextEdit, QGroupBox, QMessageBox, QDialog
 )
 
 from core.docker.docker_installer_core import DockerInstallerCore
-from function.ssh_func import SshClient
 
 
 # 将父目录添加到路径中，以便能够导入docker_ssh_sdk
@@ -136,14 +134,6 @@ class DockerInstallerWidget(QWidget):
         self.install_compose_button.setEnabled(False)
         buttons_layout.addWidget(self.install_compose_button)
 
-        self.uninstall_docker_button = QPushButton("卸载Docker")
-        self.uninstall_docker_button.setEnabled(False)
-        buttons_layout.addWidget(self.uninstall_docker_button)
-
-        self.uninstall_compose_button = QPushButton("卸载Docker Compose")
-        self.uninstall_compose_button.setEnabled(False)
-        buttons_layout.addWidget(self.uninstall_compose_button)
-
         self.config_docker_button = QPushButton("配置Docker")
         self.config_docker_button.setEnabled(False)
         buttons_layout.addWidget(self.config_docker_button)
@@ -199,8 +189,6 @@ class DockerInstallerWidget(QWidget):
         self.detect_button.clicked.connect(self.on_detect_clicked)
         self.install_docker_button.clicked.connect(self.on_install_docker_clicked)
         self.install_compose_button.clicked.connect(self.on_install_compose_clicked)
-        self.uninstall_docker_button.clicked.connect(self.on_uninstall_docker_clicked)
-        self.uninstall_compose_button.clicked.connect(self.on_uninstall_compose_clicked)
         self.config_docker_button.clicked.connect(self.on_config_docker_clicked)
         self.test_docker_button.clicked.connect(self.on_test_docker_clicked)
         self.clear_log_button.clicked.connect(self.log_widget.clear_log)
@@ -251,8 +239,6 @@ class DockerInstallerWidget(QWidget):
         # 启用安装按钮
         self.install_docker_button.setEnabled(True)
         self.install_compose_button.setEnabled(True)
-        self.uninstall_docker_button.setEnabled(self.docker_info["installed"])
-        self.uninstall_compose_button.setEnabled(self.docker_compose_info["installed"])
         self.config_docker_button.setEnabled(self.docker_info['installed'])
         self.test_docker_button.setEnabled(self.docker_info['installed'])
 
@@ -320,9 +306,6 @@ class DockerInstallerWidget(QWidget):
                         if error:
                             self.log_widget.append_log(f"错误: {error}", "error")
 
-                if result.get("report_path"):
-                    self.log_widget.append_log(f"执行报告: {result['report_path']}", "info")
-
             else:
                 self.install_completed.emit(False, result['message'])
         except Exception as e:
@@ -382,7 +365,7 @@ class DockerInstallerWidget(QWidget):
     def _install_compose_thread(self):
         """在单独的线程中安装Docker Compose"""
         try:
-            result = self.installer.install_docker_compose(self._on_progress_update, self.ssh_client.password)
+            result = self.installer.install_docker_compose(self._on_progress_update)
 
             # 在安装完成后记录结果
             if result['success']:
@@ -403,149 +386,10 @@ class DockerInstallerWidget(QWidget):
                         if error:
                             self.log_widget.append_log(f"错误: {error}", "error")
 
-                if result.get("report_path"):
-                    self.log_widget.append_log(f"执行报告: {result['report_path']}", "info")
-
             else:
                 self.install_completed.emit(False, result['message'])
         except Exception as e:
             self.install_completed.emit(False, f"安装过程中出现错误: {str(e)}")
-
-    @Slot()
-    def on_uninstall_docker_clicked(self):
-        if self.is_installing:
-            return
-
-        if not self.docker_info or not self.docker_info["installed"]:
-            QMessageBox.information(self, "提示", "未检测到Docker安装。", QMessageBox.Ok)
-            return
-
-        reply = QMessageBox.question(
-            self,
-            "确认卸载",
-            "将卸载 Docker（默认保留 /var/lib/docker 数据）。是否继续？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            return
-
-        self.is_installing = True
-        self.install_started.emit()
-
-        self.detect_button.setEnabled(False)
-        self.install_docker_button.setEnabled(False)
-        self.install_compose_button.setEnabled(False)
-        self.uninstall_docker_button.setEnabled(False)
-        self.uninstall_compose_button.setEnabled(False)
-        self.config_docker_button.setEnabled(False)
-        self.test_docker_button.setEnabled(False)
-
-        self.status_label.setText("正在卸载Docker...")
-        self.progress_bar.setValue(0)
-        self.log_widget.append_log("开始卸载Docker...", "info")
-
-        import threading
-
-        thread = threading.Thread(target=self._uninstall_docker_thread)
-        thread.daemon = True
-        thread.start()
-
-    def _uninstall_docker_thread(self):
-        try:
-            result = self.installer.uninstall_docker(self._on_progress_update, self.ssh_client.password, remove_data=False)
-            if result["success"]:
-                self.install_completed.emit(True, result["message"])
-                for step in result.get("steps", []):
-                    cmd = step.get("cmd", "")
-                    success = step.get("success", False)
-                    output = step.get("output", "")
-                    error = step.get("error", "")
-                    kind = step.get("kind", "step")
-
-                    level = "cmd" if kind == "step" else "warning"
-                    self.log_widget.append_log(f"执行: {cmd}", level)
-                    if success:
-                        if output:
-                            self.log_widget.append_log(output, "info")
-                    else:
-                        if error:
-                            self.log_widget.append_log(f"错误: {error}", "error")
-
-                if result.get("report_path"):
-                    self.log_widget.append_log(f"执行报告: {result['report_path']}", "info")
-            else:
-                self.install_completed.emit(False, result.get("message", "卸载失败"))
-        except Exception as e:
-            self.install_completed.emit(False, f"卸载过程中出现错误: {str(e)}")
-
-    @Slot()
-    def on_uninstall_compose_clicked(self):
-        if self.is_installing:
-            return
-
-        if not self.docker_compose_info or not self.docker_compose_info["installed"]:
-            QMessageBox.information(self, "提示", "未检测到Docker Compose安装。", QMessageBox.Ok)
-            return
-
-        reply = QMessageBox.question(
-            self,
-            "确认卸载",
-            "将卸载 Docker Compose（移除 docker-compose 二进制/软链接）。是否继续？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            return
-
-        self.is_installing = True
-        self.install_started.emit()
-
-        self.detect_button.setEnabled(False)
-        self.install_docker_button.setEnabled(False)
-        self.install_compose_button.setEnabled(False)
-        self.uninstall_docker_button.setEnabled(False)
-        self.uninstall_compose_button.setEnabled(False)
-        self.config_docker_button.setEnabled(False)
-        self.test_docker_button.setEnabled(False)
-
-        self.status_label.setText("正在卸载Docker Compose...")
-        self.progress_bar.setValue(0)
-        self.log_widget.append_log("开始卸载Docker Compose...", "info")
-
-        import threading
-
-        thread = threading.Thread(target=self._uninstall_compose_thread)
-        thread.daemon = True
-        thread.start()
-
-    def _uninstall_compose_thread(self):
-        try:
-            result = self.installer.uninstall_docker_compose(self._on_progress_update, self.ssh_client.password)
-            if result["success"]:
-                self.install_completed.emit(True, result["message"])
-                for step in result.get("steps", []):
-                    cmd = step.get("cmd", "")
-                    success = step.get("success", False)
-                    output = step.get("output", "")
-                    error = step.get("error", "")
-                    kind = step.get("kind", "step")
-
-                    level = "cmd" if kind == "step" else "warning"
-                    self.log_widget.append_log(f"执行: {cmd}", level)
-                    if success:
-                        if output:
-                            self.log_widget.append_log(output, "info")
-                    else:
-                        if error:
-                            self.log_widget.append_log(f"错误: {error}", "error")
-
-                if result.get("report_path"):
-                    self.log_widget.append_log(f"执行报告: {result['report_path']}", "info")
-            else:
-                self.install_completed.emit(False, result.get("message", "卸载失败"))
-        except Exception as e:
-            self.install_completed.emit(False, f"卸载过程中出现错误: {str(e)}")
 
     @Slot()
     def on_test_docker_clicked(self):
@@ -674,8 +518,6 @@ class DockerInstallerWidget(QWidget):
         self.detect_button.setEnabled(True)
         self.install_docker_button.setEnabled(True)
         self.install_compose_button.setEnabled(True)
-        self.uninstall_docker_button.setEnabled(True)
-        self.uninstall_compose_button.setEnabled(True)
         self.config_docker_button.setEnabled(True)
 
         # 更新状态
@@ -691,15 +533,9 @@ class DockerInstallerWidget(QWidget):
                 self.docker_status_label.setText("Docker状态: 已安装")
                 self.docker_version_label.setText(f"Docker版本: {self.docker_info['version']}")
                 self.test_docker_button.setEnabled(True)
-                self.uninstall_docker_button.setEnabled(True)
-            else:
-                self.uninstall_docker_button.setEnabled(False)
 
             if self.docker_compose_info['installed']:
                 self.compose_status_label.setText(f"Docker Compose状态: 已安装 ({self.docker_compose_info['version']})")
-                self.uninstall_compose_button.setEnabled(True)
-            else:
-                self.uninstall_compose_button.setEnabled(False)
         else:
             self.status_label.setText(f"操作失败: {message}")
             self.log_widget.append_log(f"操作失败: {message}", "error")
@@ -832,32 +668,3 @@ class DockerDaemonConfigDialog(QDialog):
             return json.loads(self.editor.toPlainText())
         except json.JSONDecodeError:
             return {}
-
-
-def main():
-    """入口函数"""
-    app = QApplication(sys.argv)
-
-    # 测试用户提供的连接信息
-    hostname = "192.168.199.39"
-    username = "ubuntu"
-    password = "YThx@198201"
-
-    try:
-        ssh_conn = SshClient(hostname, 22, username, password, "", "")
-        ssh_conn.connect()
-        # 创建SSH客户端
-        # ssh_client = DockerSSHClient(hostname, username, password)
-        # 传递SSH客户端对象给主窗口
-        window = DockerInstallerMainWindow(ssh_conn)
-        window.show()
-        sys.exit(app.exec())
-    except Exception as e:
-        print(f"连接失败: {str(e)}")
-        window = DockerInstallerMainWindow()
-        window.show()
-        sys.exit(app.exec())
-
-
-if __name__ == "__main__":
-    main()

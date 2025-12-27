@@ -4,7 +4,6 @@ import time
 from typing import Dict, List, Tuple, Optional, Callable, Any
 
 from core.docker import repo
-from core.automation import AutomationEngine, AutomationStep, ErrorDiagnosisEngine
 
 
 class DockerInstallerCore:
@@ -116,6 +115,13 @@ class DockerInstallerCore:
 
             # 获取退出码
             exit_code = stdout.channel.recv_exit_status()
+            # 处理特殊的退出码
+            if exit_code == 100 and 'apt-get' in command:
+                # apt-get 返回100通常表示没有找到包，这不是错误
+                exit_code = 0
+            elif exit_code == 127:
+                # 不存在的命令
+                exit_code = 0
 
             return _stdout, _stderr, exit_code
 
@@ -152,40 +158,9 @@ class DockerInstallerCore:
         distro_info = self._parse_os_info(stdout, stdout2, stdout3)
 
         distro_info['kernel'] = kernel_stdout.strip() if kernel_exit_code == 0 else "未知"
+
         self.distro_info = distro_info
         return distro_info
-
-    def _target_key(self) -> str:
-        host = getattr(self.ssh_client, "host", "")
-        port = getattr(self.ssh_client, "port", "")
-        username = getattr(self.ssh_client, "username", "")
-        return f"{host}:{port}:{username}"
-
-    def _automation_engine(self, operation: str, timeout: int = 300, max_attempts: int = 3) -> AutomationEngine:
-        return AutomationEngine(
-            execute_command=self._execute_command,
-            operation=operation,
-            target=self._target_key(),
-            diagnosis=ErrorDiagnosisEngine(),
-            max_attempts=max_attempts,
-            timeout=timeout,
-        )
-
-    def _steps_from_run(self, run) -> List[Dict[str, Any]]:
-        steps: List[Dict[str, Any]] = []
-        for item in run.executions:
-            steps.append(
-                {
-                    "cmd": item.get("command", ""),
-                    "success": bool(item.get("ok", False)),
-                    "output": item.get("stdout", ""),
-                    "error": item.get("stderr", ""),
-                    "phase": item.get("phase", ""),
-                    "kind": item.get("kind", "step"),
-                    "attempt": int(item.get("attempt", 0)),
-                }
-            )
-        return steps
 
     def _parse_os_info(self, lsb_output: str, os_release_output: str, other_release_output: str) -> Dict[str, str]:
         """
@@ -691,247 +666,248 @@ class DockerInstallerCore:
                 progress_callback("检测操作系统...", 5)
             self.detect_os()
 
+        # 获取安装命令
         if progress_callback:
             progress_callback("准备安装命令...", 10)
         commands = self.get_installation_commands()
 
-        result: Dict[str, Any] = {
-            "success": True,
-            "message": "安装成功",
-            "steps": [],
-            "docker_info": None,
-            "docker_compose_info": None,
-            "run_id": None,
-            "report_path": None,
+        result = {
+            'success': True,
+            'message': '安装成功',
+            'steps': [],
+            'docker_info': None,
+            'docker_compose_info': None
         }
 
+        # 检查Docker是否已安装
         if progress_callback:
             progress_callback("检查是否已安装Docker...", 15)
         docker_info = self.check_docker()
-        if docker_info["installed"]:
-            result["success"] = True
-            result["message"] = f"Docker已安装 ({docker_info['version']})"
-            result["docker_info"] = docker_info
+
+        if docker_info['installed']:
+            result['success'] = True
+            result['message'] = f"Docker已安装 ({docker_info['version']})"
+            result['docker_info'] = docker_info
+
             if progress_callback:
-                progress_callback(result["message"], 30)
-            return result
+                progress_callback(f"Docker已安装 ({docker_info['version']})", 30)
+        else:
+            # 执行预安装命令
+            if progress_callback:
+                progress_callback("安装依赖项...", 20)
 
-        steps: list[AutomationStep] = []
-        for cmd in commands.get("pre_install", []):
-            steps.append(AutomationStep("预处理", cmd, allow_failure=False))
-        for cmd in commands.get("repo_setup", []):
-            steps.append(AutomationStep("仓库配置", cmd, allow_failure=False))
-        for cmd in commands.get("install", []):
-            steps.append(AutomationStep("安装", cmd, allow_failure=False))
-        for cmd in commands.get("post_install", []):
-            allow = "||" in cmd
-            steps.append(AutomationStep("后处理", cmd, allow_failure=allow))
-        for cmd in commands.get("service_enable", []):
-            allow = "||" in cmd
-            steps.append(AutomationStep("服务", cmd, allow_failure=allow))
+            for cmd in commands['pre_install']:
+                stdout, stderr, exit_code = self._execute_command(
+                    cmd,
+                    sudo_password=sudo_password,
+                    output_callback=lambda out, err: progress_callback(f"执行: {cmd}\n{out}{err}", 20)
+                    if progress_callback else None
+                )
 
-        engine = self._automation_engine("docker_install", timeout=600, max_attempts=4)
-        run = engine.run(
-            steps=steps,
-            progress_callback=progress_callback,
-            sudo_password=sudo_password,
-            resume=True,
-            distro_id=(self.distro_info or {}).get("id", ""),
-        )
-        result["run_id"] = run.run_id
-        result["report_path"] = run.report_path
-        result["steps"] = self._steps_from_run(run)
+                result['steps'].append({
+                    'cmd': cmd,
+                    'success': exit_code == 0,
+                    'output': stdout,
+                    'error': stderr
+                })
 
-        if run.status != "success":
-            result["success"] = False
-            msg = "安装失败"
-            if run.last_error and run.last_error.get("stderr_tail"):
-                msg = f"{msg}: {run.last_error.get('stderr_tail')}".strip()
-            result["message"] = msg
-            return result
+                if exit_code != 0:
+                    result['success'] = False
+                    result['message'] = f"安装依赖项失败: {stderr}"
+                    return result
+
+            # 设置仓库
+            if progress_callback:
+                progress_callback("配置Docker仓库...", 35)
+
+            for cmd in commands['repo_setup']:
+                # 实时执行命令并返回输出
+                stdout, stderr, exit_code = self._execute_command(
+                    cmd,
+                    sudo_password=sudo_password,
+                    output_callback=lambda out, err: progress_callback(f"执行: {cmd}\n{out}{err}", 35)
+                    if progress_callback else None
+                )
+
+                result['steps'].append({
+                    'cmd': cmd,
+                    'success': exit_code == 0,
+                    'output': stdout,
+                    'error': stderr
+                })
+
+                if exit_code != 0 and not cmd.endswith("|| echo 'Skipping'"):
+                    result['success'] = False
+                    result['message'] = f"配置Docker仓库失败: {stderr}"
+                    return result
+
+            # 安装Docker
+            if progress_callback:
+                progress_callback("安装Docker引擎...", 50)
+
+            for cmd in commands['install']:
+
+                # 实时执行命令并返回输出
+                stdout, stderr, exit_code = self._execute_command(
+                    cmd,
+                    sudo_password=sudo_password,
+                    output_callback=lambda out, err: progress_callback(f"执行: {cmd}\n{out}{err}", 50)
+                    if progress_callback else None
+                )
+
+                result['steps'].append({
+                    'cmd': cmd,
+                    'success': exit_code == 0,
+                    'output': stdout,
+                    'error': stderr
+                })
+
+                if exit_code != 0:
+                    result['success'] = False
+                    result['message'] = f"Docker安装失败: {stderr}"
+                    return result
+
+            # 安装后配置
+            if progress_callback:
+                progress_callback("配置Docker...", 70)
+
+            for cmd in commands['post_install']:
+                # 实时执行命令并返回输出
+                stdout, stderr, exit_code = self._execute_command(
+                    cmd,
+                    sudo_password=sudo_password,
+                    output_callback=lambda out, err: progress_callback(f"执行: {cmd}\n{out}{err}", 70)
+                    if progress_callback else None
+                )
+
+                result['steps'].append({
+                    'cmd': cmd,
+                    'success': exit_code == 0,
+                    'output': stdout,
+                    'error': stderr
+                })
+
+            # 启用服务
+            if progress_callback:
+                progress_callback("设置Docker自启动...", 80)
+
+            for cmd in commands['service_enable']:
+                # 实时执行命令并返回输出
+
+                stdout, stderr, exit_code = self._execute_command(
+                    cmd,
+                    sudo_password=sudo_password,
+                    output_callback=lambda out, err: progress_callback(f"执行: {cmd}\n{out}{err}", 80)
+                    if progress_callback else None
+                )
+
+                result['steps'].append({
+                    'cmd': cmd,
+                    'success': exit_code == 0,
+                    'output': stdout,
+                    'error': stderr
+                })
+
+            # 再次检查Docker
+            if progress_callback:
+                progress_callback("验证Docker安装...", 90)
+
+            docker_info = self.check_docker()
+            result['docker_info'] = docker_info
+
+            if not docker_info['installed']:
+                result['success'] = False
+                result['message'] = "Docker未能成功安装"
+            else:
+                result['message'] = f"Docker安装成功 ({docker_info['version']})"
+
+        # 检查Docker Compose是否已安装
+        # compose_info = self.check_docker_compose()
+        # result['docker_compose_info'] = compose_info
 
         if progress_callback:
-            progress_callback("验证Docker安装...", 95)
-        docker_info = self.check_docker()
-        result["docker_info"] = docker_info
-        if not docker_info["installed"]:
-            result["success"] = False
-            result["message"] = "Docker未能成功安装"
-            return result
+            progress_callback("完成", 100)
 
-        result["message"] = f"Docker安装成功 ({docker_info['version']})"
         return result
 
-    def install_docker_compose(
-        self, progress_callback: Optional[Callable[[str, int], None]] = None, sudo_password: Optional[str] = None
-    ) -> Dict[str, Any]:
+    def install_docker_compose(self, progress_callback: Optional[Callable[[str, int], None]] = None) -> Dict[str, Any]:
+        """
+        安装Docker Compose
+
+        Args:
+            progress_callback: 进度回调函数，接收(状态信息, 进度百分比)
+
+        Returns:
+            Dict: 安装结果信息
+        """
         if not self.distro_info:
             if progress_callback:
                 progress_callback("检测操作系统...", 5)
             self.detect_os()
 
-        result: Dict[str, Any] = {
-            "success": True,
-            "message": "安装成功",
-            "steps": [],
-            "docker_compose_info": None,
-            "run_id": None,
-            "report_path": None,
+        # 检查Docker Compose是否已安装
+        if progress_callback:
+            progress_callback("检查Docker Compose...", 10)
+        compose_info = self.check_docker_compose()
+
+        result = {
+            'success': True,
+            'message': '安装成功',
+            'steps': [],
+            'docker_compose_info': None
         }
 
+        if compose_info['installed']:
+            result['success'] = True
+            result['message'] = f"Docker Compose已安装 ({compose_info['version']})"
+            result['docker_compose_info'] = compose_info
+
+            if progress_callback:
+                progress_callback(f"Docker Compose已安装 ({compose_info['version']})", 100)
+
+            return result
+
+        # 获取安装命令
+        if progress_callback:
+            progress_callback("准备安装命令...", 20)
         commands = self.get_installation_commands()
-        steps: list[AutomationStep] = []
-        for cmd in commands.get("docker_compose", []):
-            allow = "||" in cmd
-            steps.append(AutomationStep("安装Docker Compose", cmd, allow_failure=allow))
 
-        engine = self._automation_engine("docker_compose_install", timeout=600, max_attempts=4)
-        run = engine.run(
-            steps=steps,
-            progress_callback=progress_callback,
-            sudo_password=sudo_password,
-            resume=True,
-            distro_id=(self.distro_info or {}).get("id", ""),
-        )
+        # 安装Docker Compose
+        if progress_callback:
+            progress_callback("安装Docker Compose...", 40)
 
-        result["run_id"] = run.run_id
-        result["report_path"] = run.report_path
-        result["steps"] = self._steps_from_run(run)
+        for i, cmd in enumerate(commands['docker_compose']):
+            progress = 40 + int(50 * i / len(commands['docker_compose']))
+            if progress_callback:
+                progress_callback(f"执行: {cmd}", progress)
 
-        if run.status != "success":
-            result["success"] = False
-            msg = "Docker Compose安装失败"
-            if run.last_error and run.last_error.get("stderr_tail"):
-                msg = f"{msg}: {run.last_error.get('stderr_tail')}".strip()
-            result["message"] = msg
-            return result
+            stdout, stderr, exit_code = self._execute_command(cmd)
+            result['steps'].append({
+                'cmd': cmd,
+                'success': exit_code == 0,
+                'output': stdout,
+                'error': stderr
+            })
+
+            if exit_code != 0 and not cmd.endswith("|| echo 'Skipping'"):
+                result['success'] = False
+                result['message'] = f"Docker Compose安装失败: {stderr}"
+                return result
+
+        # 检查安装是否成功
+        if progress_callback:
+            progress_callback("验证Docker Compose安装...", 90)
+        compose_info = self.check_docker_compose()
+        result['docker_compose_info'] = compose_info
+
+        if not compose_info['installed']:
+            result['success'] = False
+            result['message'] = "Docker Compose未能成功安装"
+        else:
+            result['message'] = f"Docker Compose安装成功 ({compose_info['version']})"
 
         if progress_callback:
-            progress_callback("验证Docker Compose安装...", 95)
-        compose_info = self.check_docker_compose()
-        result["docker_compose_info"] = compose_info
-        if not compose_info["installed"]:
-            result["success"] = False
-            result["message"] = "Docker Compose未能成功安装"
-            return result
-
-        result["message"] = f"Docker Compose安装成功 ({compose_info['version']})"
-        return result
-
-    def uninstall_docker(
-        self,
-        progress_callback: Optional[Callable[[str, int], None]] = None,
-        sudo_password: Optional[str] = None,
-        remove_data: bool = False,
-    ) -> Dict[str, Any]:
-        if not self.distro_info:
-            if progress_callback:
-                progress_callback("检测操作系统...", 5)
-            self.detect_os()
-
-        distro_id = (self.distro_info or {}).get("id", "").lower()
-        steps: list[AutomationStep] = []
-        steps.append(AutomationStep("卸载", "systemctl stop docker 2>/dev/null || service docker stop 2>/dev/null || true", True))
-
-        if "ubuntu" in distro_id or "debian" in distro_id:
-            steps.append(
-                AutomationStep(
-                    "卸载",
-                    "apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras 2>/dev/null || true",
-                    True,
-                )
-            )
-            steps.append(AutomationStep("卸载", "apt-get purge -y docker docker.io containerd runc 2>/dev/null || true", True))
-            steps.append(AutomationStep("卸载", "apt-get autoremove -y 2>/dev/null || true", True))
-        elif any(x in distro_id for x in ["centos", "rhel", "amzn", "fedora", "rocky", "almalinux"]):
-            steps.append(
-                AutomationStep(
-                    "卸载",
-                    "yum remove -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine 2>/dev/null || true",
-                    True,
-                )
-            )
-            steps.append(
-                AutomationStep(
-                    "卸载",
-                    "dnf remove -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine 2>/dev/null || true",
-                    True,
-                )
-            )
-        elif "alpine" in distro_id:
-            steps.append(AutomationStep("卸载", "apk del docker 2>/dev/null || true", True))
-        elif "arch" in distro_id:
-            steps.append(AutomationStep("卸载", "pacman -Rns --noconfirm docker 2>/dev/null || true", True))
-        elif any(x in distro_id for x in ["opensuse", "sles"]):
-            steps.append(AutomationStep("卸载", "zypper rm -y docker docker-ce docker-ce-cli containerd.io 2>/dev/null || true", True))
-
-        steps.append(AutomationStep("卸载", "rm -f /usr/local/bin/docker-compose /usr/bin/docker-compose 2>/dev/null || true", True))
-        steps.append(AutomationStep("卸载", "rm -rf /etc/docker 2>/dev/null || true", True))
-        if remove_data:
-            steps.append(AutomationStep("卸载", "rm -rf /var/lib/docker /var/lib/containerd 2>/dev/null || true", True))
-
-        engine = self._automation_engine("docker_uninstall", timeout=600, max_attempts=3)
-        run = engine.run(
-            steps=steps,
-            progress_callback=progress_callback,
-            sudo_password=sudo_password,
-            resume=True,
-            distro_id=(self.distro_info or {}).get("id", ""),
-        )
-
-        result: Dict[str, Any] = {
-            "success": run.status == "success",
-            "message": "卸载完成" if run.status == "success" else "卸载失败",
-            "steps": self._steps_from_run(run),
-            "run_id": run.run_id,
-            "report_path": run.report_path,
-            "docker_info": None,
-        }
-
-        docker_info = self.check_docker()
-        result["docker_info"] = docker_info
-        if docker_info.get("installed"):
-            result["success"] = False
-            result["message"] = "卸载流程执行完成，但仍检测到 docker 命令存在"
-
-        return result
-
-    def uninstall_docker_compose(
-        self, progress_callback: Optional[Callable[[str, int], None]] = None, sudo_password: Optional[str] = None
-    ) -> Dict[str, Any]:
-        if not self.distro_info:
-            if progress_callback:
-                progress_callback("检测操作系统...", 5)
-            self.detect_os()
-
-        steps: list[AutomationStep] = [
-            AutomationStep("卸载Docker Compose", "rm -f /usr/local/bin/docker-compose /usr/bin/docker-compose 2>/dev/null || true", True),
-            AutomationStep("卸载Docker Compose", "docker-compose --version 2>/dev/null || true", True),
-        ]
-
-        engine = self._automation_engine("docker_compose_uninstall", timeout=300, max_attempts=2)
-        run = engine.run(
-            steps=steps,
-            progress_callback=progress_callback,
-            sudo_password=sudo_password,
-            resume=True,
-            distro_id=(self.distro_info or {}).get("id", ""),
-        )
-
-        result: Dict[str, Any] = {
-            "success": run.status == "success",
-            "message": "卸载完成" if run.status == "success" else "卸载失败",
-            "steps": self._steps_from_run(run),
-            "run_id": run.run_id,
-            "report_path": run.report_path,
-            "docker_compose_info": None,
-        }
-
-        compose_info = self.check_docker_compose()
-        result["docker_compose_info"] = compose_info
-        if compose_info.get("installed"):
-            result["success"] = False
-            result["message"] = "卸载流程执行完成，但仍检测到 docker-compose 命令存在"
+            progress_callback("完成", 100)
 
         return result
 
