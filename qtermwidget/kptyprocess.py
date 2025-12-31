@@ -80,6 +80,8 @@ class KPtyProcess(KProcess):
         self._winpty_process = None
         self._read_thread = None
         self._read_running = False
+        self._win_input_filter_buf = ""
+        self._win_input_filter_seq = "\x1b[2~"
 
         # 关键修复：严格对应C++构造函数中的pty->open()调用
         # 对应C++: d->pty->open() 或 d->pty->open(ptyMasterFd)
@@ -103,7 +105,24 @@ class KPtyProcess(KProcess):
                 try:
                     # winpty通常期望字符串输入
                     if isinstance(data, bytes):
+                        data = data.replace(b"\x1b[2~", b"")
                         data = data.decode('utf-8', errors='ignore')
+                    if self._win_input_filter_seq:
+                        buf = (self._win_input_filter_buf or "") + (data or "")
+                        buf = buf.replace(self._win_input_filter_seq, "")
+                        max_keep = max(0, len(self._win_input_filter_seq) - 1)
+                        keep = ""
+                        if max_keep:
+                            tail = buf[-max_keep:]
+                            for k in range(len(tail), 0, -1):
+                                if self._win_input_filter_seq.startswith(tail[-k:]):
+                                    keep = tail[-k:]
+                                    break
+                        if keep:
+                            data = buf[:-len(keep)]
+                        else:
+                            data = buf
+                        self._win_input_filter_buf = keep
                     return self._winpty_process.write(data)
                 except Exception as e:
                     print(f"Windows PTY写入失败: {e}")
