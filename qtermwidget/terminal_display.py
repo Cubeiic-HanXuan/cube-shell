@@ -1543,24 +1543,36 @@ class TerminalDisplay(QWidget):
         is_reverse = bool(getattr(style, 'rendition', 0) & RE_REVERSE)
         apply_reverse = (invert_colors or is_reverse) and self.hasFocus()
 
+        # 这里要区分“属性里的前景/背景色”和“最终显示出来的前景/背景色”：
+        # - 当开启 RE_REVERSE（反显）或上层要求 invert_colors 时，实际显示需要交换前景/背景
+        # - 后续绘制背景、光标、文字都必须基于 effective_*，否则就会出现：
+        #   - 背景按反显画成绿色
+        #   - 光标仍然用原始 fg_color 填充
+        #   - 两者同色导致光标看起来“被背景盖住/消失”
+        effective_fg, effective_bg = (bg_color, fg_color) if apply_reverse else (fg_color, bg_color)
+
         # 绘制背景：仅在需要时填充，避免整行/整屏闪烁
-        fill_color = fg_color if apply_reverse else bg_color
+        fill_color = effective_bg
         default_bg = self._color_table[DEFAULT_BACK_COLOR].color
         if apply_reverse or fill_color != default_bg:
             self._draw_background(painter, rect, fill_color, False)
 
         # 处理光标（简化版本）
-        invert_character_color = False
-        if hasattr(style, 'rendition') and (style.rendition & RE_CURSOR):
-            # 简单的光标处理，不调用复杂的_draw_cursor方法
-            if not self._cursor_blinking:
-                # 绘制简单的光标
-                cursor_rect = rect
-                painter.fillRect(cursor_rect, fg_color)
-                invert_character_color = True
-
         # 绘制文本（简化版本）
-        text_color = bg_color if (invert_character_color or apply_reverse) else fg_color
+        text_color = effective_fg
+        if hasattr(style, 'rendition') and (style.rendition & RE_CURSOR) and self.hasFocus() and (not self._cursor_blinking):
+            # 终端模拟层会在“光标所在的单元格”打上 RE_CURSOR 标记。
+            # 该单元格的绘制顺序通常是：背景 -> 光标 -> 文本。
+            #
+            # 这里使用 _cursor_paint_colors() 计算“光标填充色”和“光标上的文字颜色”，保证：
+            # - 不会因为反显、同色前景/背景等情况导致光标不可见
+            # - 如果用户配置了固定光标颜色，则优先使用用户配置
+            #
+            # 注意：这里一定要用 effective_fg/effective_bg 来计算，而不是原始 fg_color/bg_color。
+            cursor_fill, cursor_text = self._cursor_paint_colors(effective_fg, effective_bg, self._cursor_color)
+            painter.fillRect(rect, cursor_fill)
+            text_color = cursor_text
+
         painter.setPen(text_color)
 
         # 设置字体样式
@@ -1601,6 +1613,47 @@ class TerminalDisplay(QWidget):
             painter.drawText(rect.x(), rect.y() + self._fontAscent + self._line_spacing, text)
 
         painter.restore()
+
+    @staticmethod
+    def _brightness(color: QColor) -> float:
+        # 亮度估计（0~255），使用人眼感知权重：
+        # 绿色权重最高，其次红色，再到蓝色。
+        # 这不是严格的 sRGB 相对亮度公式，但足够用来做“光标可见性”的快速判断。
+        return 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
+
+    @staticmethod
+    def _best_bw_for_bg(bg: QColor) -> QColor:
+        # 给定背景色，选择“更显眼”的黑/白文本色：
+        # - 背景亮则用黑字
+        # - 背景暗则用白字
+        return QColor(0, 0, 0) if TerminalDisplay._brightness(bg) > 128 else QColor(255, 255, 255)
+
+    @staticmethod
+    def _cursor_paint_colors(effective_fg: QColor, effective_bg: QColor, configured_cursor: QColor) -> tuple[QColor, QColor]:
+        # 计算“块状光标”的两种颜色：
+        # - fill: 光标的填充背景色（画一个矩形）
+        # - text: 光标上的文字颜色（保证文字在光标上可读）
+        #
+        # 为什么需要同时计算两种？
+        # - 传统终端会在块状光标处“反转字符颜色”来实现可读性
+        # - 但在 RE_REVERSE / 特殊配色（例如绿色前景 + 绿色背景）下，简单反转不一定有效
+        # - 所以这里统一做一个对比度兜底
+        if configured_cursor.isValid():
+            # 用户显式配置了固定光标颜色：直接使用配置色作为填充色；
+            # 光标上的文字颜色则选黑/白以确保能看清。
+            return configured_cursor, TerminalDisplay._best_bw_for_bg(configured_cursor)
+
+        # 默认策略：沿用“effective 前景色”作为光标填充色，并用“effective 背景色”画光标内文字，
+        # 等价于“反转字符颜色”。
+        fill = effective_fg
+        text = effective_bg
+        if abs(TerminalDisplay._brightness(fill) - TerminalDisplay._brightness(text)) < 50:
+            # 亮度差过小，反转后仍然可能看不清（例如 fg/bg 同为绿色）。
+            # 此时使用更激进的智能选色（黑/白或彩色）作为光标填充色，
+            # 并重新选择光标内文字颜色（黑/白）以确保可读。
+            fill = TerminalDisplay._get_smart_cursor_color(effective_fg, effective_bg)
+            text = TerminalDisplay._best_bw_for_bg(fill)
+        return fill, text
 
     def _draw_characters_with_colors(self, painter: QPainter, rect: QRect, text: str, style: Character,
                                      fg_color: QColor, bg_color: QColor, invert_character_color: bool):
@@ -1685,11 +1738,16 @@ class TerminalDisplay(QWidget):
 
         return False
 
-    def _get_smart_cursor_color(self, fg_color: QColor, bg_color: QColor) -> QColor:
+    @staticmethod
+    def _get_smart_cursor_color(fg_color: QColor, bg_color: QColor) -> QColor:
         """
         智能光标颜色选择，确保光标在任何背景下都可见
         避免光标与背景色或前景色相同导致不可见
         """
+        # 这个函数用于“兜底”场景：
+        # - 默认的块状光标策略是“用前景色作为光标底色，并反转文字颜色”
+        # - 但如果 fg/bg 亮度太接近（甚至相同），反转也无济于事
+        # - 这里通过亮度阈值挑选黑/白；如果仍与前景太接近，则用醒目的红/黄
         # 计算背景色亮度 (基于人眼感知的加权公式)
         r, g, b = bg_color.red(), bg_color.green(), bg_color.blue()
         bg_brightness = (0.299 * r + 0.587 * g + 0.114 * b)

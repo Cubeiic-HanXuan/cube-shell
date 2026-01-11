@@ -1114,9 +1114,9 @@ class MainDialog(QMainWindow):
                     # 恢复原始位置
                     self.ui.ShellTab.tabBar().moveTab(self.ui.ShellTab.currentIndex(), self.originalIndex)
                 self.homeTabPressed = False
-        # if event.type() == QEvent.KeyPress:
-        #     print("测试以下")
-        #     return True
+        if event.type() == QEvent.KeyPress:
+            print("测试以下")
+            return True
 
         return super().eventFilter(source, event)
 

@@ -103,21 +103,14 @@ class KPtyProcess(KProcess):
         # - lflag: 本地模式标志（行缓冲/回显/信号键等“终端交互行为”）
         # - cc   : 控制字符表（如 Ctrl+C、Ctrl+Z、退格键等具体按键对应的控制码）
         #
-        # 这里的目标不是“让输入法工作”，而是确保 ssh -t / 交互式程序（vim 等）
-        # 在 PTY 上有一套“类似真实终端”的 tty 属性，避免出现中文 UTF-8 输入被破坏。
+        # 这里的目标不是“重写一整套终端行为”，而是只做“UTF-8 安全”的最小修复：
+        # - 关闭 ISTRIP，避免 UTF-8 输入被裁剪成 7-bit（中文会变成 e%= 这类乱码）
+        # - 确保 8-bit 字符模式（CS8）
+        # - 系统支持时启用 IUTF8
+        #
+        # 其他标志（例如 ECHO/ICANON/OPOST/ICRNL/IXON 等）尽量保持系统默认值，
+        # 避免在 macOS 本机 shell 场景引入“回车多空行”等交互副作用。
         attrs = list(attrs)
-        # --------------------------
-        # 1) 输入模式（iflag）
-        # --------------------------
-        # BRKINT: 发生 Break 时产生 SIGINT（更贴近交互终端的行为）
-        # IGNPAR: 忽略奇偶校验错误（避免把“奇怪的输入”当作致命错误）
-        # ICRNL : 把输入的 CR 转成 NL（回车键行为更一致）
-        attrs[0] |= (termios.BRKINT | termios.IGNPAR | termios.ICRNL)
-
-        # IXON/IXOFF: 软件流控（Ctrl+S 暂停 / Ctrl+Q 恢复）
-        # 很多远端环境默认启用；这里保持与常见终端一致，避免交互行为差异。
-        attrs[0] |= (termios.IXON | termios.IXOFF)
-
         # ISTRIP: 把所有输入字节强行裁剪成 7-bit（清掉最高位）
         # 这会直接破坏 UTF-8（中文属于多字节且每个字节经常 >= 0x80）。
         # 典型症状是：
@@ -131,47 +124,11 @@ class KPtyProcess(KProcess):
         if hasattr(termios, "IUTF8"):
             attrs[0] |= termios.IUTF8
 
-        # --------------------------
-        # 2) 输出模式（oflag）
-        # --------------------------
-        # OPOST: 启用输出后处理（例如把 NL 转 CRNL 等行为由系统控制）
-        # 交互程序通常默认依赖 OPOST；这里保持开启以贴近真实终端。
-        attrs[1] |= termios.OPOST
-
-        # --------------------------
-        # 3) 控制模式（cflag）
-        # --------------------------
+        # 控制模式（cflag）
         # CS8   : 8-bit 字符（这是 UTF-8 正常传输的必要条件之一）
         # CREAD : 允许接收字符
         # CLOCAL: 忽略调制解调器控制线（对 PTY 场景通常更合适）
         attrs[2] |= (termios.CS8 | termios.CREAD | termios.CLOCAL)
-
-        # --------------------------
-        # 4) 本地模式（lflag）
-        # --------------------------
-        # ECHO* : 回显相关（让你在 ssh / shell / vim 中能看到输入）
-        # ICANON: 规范模式（行缓冲），配合回显使“像真实终端”
-        # ISIG  : 让 Ctrl+C / Ctrl+Z 等产生信号（vim / shell 常用）
-        attrs[3] |= (termios.ECHO | termios.ECHOE | termios.ECHOK | termios.ECHONL)
-        attrs[3] |= (termios.ICANON | termios.ISIG)
-
-        # --------------------------
-        # 5) 控制字符（cc）
-        # --------------------------
-        # 这些值决定“控制键”在终端里对应哪些动作：
-        # - VINTR: Ctrl+C
-        # - VSUSP: Ctrl+Z
-        # - VERASE: 退格
-        # - VSTART/VSTOP: Ctrl+Q / Ctrl+S（与 IXON/IXOFF 配套）
-        attrs[6][termios.VEOF] = 4
-        attrs[6][termios.VEOL] = 0
-        attrs[6][termios.VERASE] = 127
-        attrs[6][termios.VINTR] = 3
-        attrs[6][termios.VKILL] = 21
-        attrs[6][termios.VQUIT] = 28
-        attrs[6][termios.VSTART] = 17
-        attrs[6][termios.VSTOP] = 19
-        attrs[6][termios.VSUSP] = 26
         return attrs
 
     @Slot(bytes)
