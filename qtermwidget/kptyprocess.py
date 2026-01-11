@@ -93,6 +93,87 @@ class KPtyProcess(KProcess):
         # 初始化PTY通道
         self.setPtyChannels(PtyChannelFlag.AllChannels)
 
+    @staticmethod
+    def _configure_ssh_tty_attrs(attrs):
+        # termios.tcgetattr(fd) 在 Python 中返回一个 7 元素列表：
+        # [iflag, oflag, cflag, lflag, ispeed, ospeed, cc]
+        # - iflag: 输入模式标志（如何解释“输入进来的字节”）
+        # - oflag: 输出模式标志（如何处理“输出出去的字节”）
+        # - cflag: 控制模式标志（字符大小/奇偶校验/波特率等底层参数）
+        # - lflag: 本地模式标志（行缓冲/回显/信号键等“终端交互行为”）
+        # - cc   : 控制字符表（如 Ctrl+C、Ctrl+Z、退格键等具体按键对应的控制码）
+        #
+        # 这里的目标不是“让输入法工作”，而是确保 ssh -t / 交互式程序（vim 等）
+        # 在 PTY 上有一套“类似真实终端”的 tty 属性，避免出现中文 UTF-8 输入被破坏。
+        attrs = list(attrs)
+        # --------------------------
+        # 1) 输入模式（iflag）
+        # --------------------------
+        # BRKINT: 发生 Break 时产生 SIGINT（更贴近交互终端的行为）
+        # IGNPAR: 忽略奇偶校验错误（避免把“奇怪的输入”当作致命错误）
+        # ICRNL : 把输入的 CR 转成 NL（回车键行为更一致）
+        attrs[0] |= (termios.BRKINT | termios.IGNPAR | termios.ICRNL)
+
+        # IXON/IXOFF: 软件流控（Ctrl+S 暂停 / Ctrl+Q 恢复）
+        # 很多远端环境默认启用；这里保持与常见终端一致，避免交互行为差异。
+        attrs[0] |= (termios.IXON | termios.IXOFF)
+
+        # ISTRIP: 把所有输入字节强行裁剪成 7-bit（清掉最高位）
+        # 这会直接破坏 UTF-8（中文属于多字节且每个字节经常 >= 0x80）。
+        # 典型症状是：
+        #   '好' UTF-8 为 E5 A5 BD，被 ISTRIP 后变成 65 25 3D => "e%="
+        # 所以这里必须明确关闭 ISTRIP。
+        if hasattr(termios, "ISTRIP"):
+            attrs[0] &= ~termios.ISTRIP
+
+        # IUTF8: 让内核按 UTF-8 语义处理某些输入特性（如果系统支持）。
+        # 这不是“必须项”，但开启后更贴近现代终端默认行为。
+        if hasattr(termios, "IUTF8"):
+            attrs[0] |= termios.IUTF8
+
+        # --------------------------
+        # 2) 输出模式（oflag）
+        # --------------------------
+        # OPOST: 启用输出后处理（例如把 NL 转 CRNL 等行为由系统控制）
+        # 交互程序通常默认依赖 OPOST；这里保持开启以贴近真实终端。
+        attrs[1] |= termios.OPOST
+
+        # --------------------------
+        # 3) 控制模式（cflag）
+        # --------------------------
+        # CS8   : 8-bit 字符（这是 UTF-8 正常传输的必要条件之一）
+        # CREAD : 允许接收字符
+        # CLOCAL: 忽略调制解调器控制线（对 PTY 场景通常更合适）
+        attrs[2] |= (termios.CS8 | termios.CREAD | termios.CLOCAL)
+
+        # --------------------------
+        # 4) 本地模式（lflag）
+        # --------------------------
+        # ECHO* : 回显相关（让你在 ssh / shell / vim 中能看到输入）
+        # ICANON: 规范模式（行缓冲），配合回显使“像真实终端”
+        # ISIG  : 让 Ctrl+C / Ctrl+Z 等产生信号（vim / shell 常用）
+        attrs[3] |= (termios.ECHO | termios.ECHOE | termios.ECHOK | termios.ECHONL)
+        attrs[3] |= (termios.ICANON | termios.ISIG)
+
+        # --------------------------
+        # 5) 控制字符（cc）
+        # --------------------------
+        # 这些值决定“控制键”在终端里对应哪些动作：
+        # - VINTR: Ctrl+C
+        # - VSUSP: Ctrl+Z
+        # - VERASE: 退格
+        # - VSTART/VSTOP: Ctrl+Q / Ctrl+S（与 IXON/IXOFF 配套）
+        attrs[6][termios.VEOF] = 4
+        attrs[6][termios.VEOL] = 0
+        attrs[6][termios.VERASE] = 127
+        attrs[6][termios.VINTR] = 3
+        attrs[6][termios.VKILL] = 21
+        attrs[6][termios.VQUIT] = 28
+        attrs[6][termios.VSTART] = 17
+        attrs[6][termios.VSTOP] = 19
+        attrs[6][termios.VSUSP] = 26
+        return attrs
+
     @Slot(bytes)
     def sendData(self, data):
         """发送数据到PTY - 这个方法作为slot接收emulation的sendData信号"""
@@ -419,36 +500,18 @@ class KPtyProcess(KProcess):
                     except:
                         pass  # 忽略关闭错误
 
-                # 第五步：SSH特定设置 - 关键修复！
-                # SSH需要类似于xterm的终端模式，不是完全的raw模式
-                attrs = termios.tcgetattr(0)  # 获取stdin(slaveFd)的属性
-
-                # 输入模式标志：启用中断和流控制
-                attrs[0] |= (termios.BRKINT | termios.IGNPAR | termios.ISTRIP | termios.ICRNL)
-                attrs[0] |= (termios.IXON | termios.IXOFF)  # 流控制
-
-                # 输出模式标志：启用后处理
-                attrs[1] |= termios.OPOST
-
-                # 控制模式标志：8位字符
-                attrs[2] |= (termios.CS8 | termios.CREAD | termios.CLOCAL)
-
-                # 本地模式标志：这是SSH工作的关键！
-                # 启用回显和规范模式，这样SSH远程shell才能正确显示
-                attrs[3] |= (termios.ECHO | termios.ECHOE | termios.ECHOK | termios.ECHONL)
-                attrs[3] |= (termios.ICANON | termios.ISIG)
-
-                # 设置控制字符
-                attrs[6][termios.VEOF] = 4  # Ctrl+D
-                attrs[6][termios.VEOL] = 0  # 额外的行结束符
-                attrs[6][termios.VERASE] = 127  # 退格字符
-                attrs[6][termios.VINTR] = 3  # Ctrl+C
-                attrs[6][termios.VKILL] = 21  # Ctrl+U
-                attrs[6][termios.VQUIT] = 28  # Ctrl+\
-                attrs[6][termios.VSTART] = 17  # Ctrl+Q
-                attrs[6][termios.VSTOP] = 19  # Ctrl+S
-                attrs[6][termios.VSUSP] = 26  # Ctrl+Z
-
+                # 这里是在子进程中、且已经把 stdin/stdout/stderr 全部 dup 到 slave PTY 之后，
+                # 再对 fd=0（也就是“这个 slave PTY”）设置 tty 属性。
+                #
+                # 为什么要在这里设置？
+                # - ssh -t / vim 等交互程序对“控制终端”行为有预期：
+                #   需要回显、需要 Ctrl+C/Ctrl+Z 生效、需要 8-bit 透明传输等。
+                # - 如果 tty 输入标志错误（例如 ISTRIP 被打开），UTF-8 每个字节的最高位会被清掉，
+                #   中文就会变成类似 "e%="、"^Z" 这种看起来像“转译字符”的乱码。
+                #
+                # 所以这里统一把 slave PTY 调整为“类似真实终端”的一组 termios 标志。
+                attrs = termios.tcgetattr(0)
+                attrs = KPtyProcess._configure_ssh_tty_attrs(attrs)
                 termios.tcsetattr(0, termios.TCSANOW, attrs)
 
             except Exception as e:

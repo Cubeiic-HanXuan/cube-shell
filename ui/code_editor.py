@@ -273,7 +273,12 @@ class CodeEditor(QPlainTextEdit):
         cursor = self.textCursor()
 
         # 设置查找标志
-        flags = QTextDocument.FindFlags()
+        try:
+            flags = QTextDocument.FindFlags(0)
+        except TypeError:
+            flags = QTextDocument.FindFlags()
+            if flags is None:
+                flags = QTextDocument.FindFlags(0)
         if case_sensitive:
             flags |= QTextDocument.FindCaseSensitively
         if backward:
@@ -340,7 +345,12 @@ class CodeEditor(QPlainTextEdit):
             # find_text 方法包含"循环查找"(wrap around)逻辑，这在 replace_all 中是致命的，会导致死循环
             
             # 设置查找标志
-            flags = QTextDocument.FindFlags()
+            try:
+                flags = QTextDocument.FindFlags(0)
+            except TypeError:
+                flags = QTextDocument.FindFlags()
+                if flags is None:
+                    flags = QTextDocument.FindFlags(0)
             if case_sensitive:
                 flags |= QTextDocument.FindCaseSensitively
             # 注意：replace_all 始终向前查找，不使用 FindBackward

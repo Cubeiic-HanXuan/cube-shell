@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import uuid
+from pathlib import Path
 from bisect import bisect_left
 from collections import defaultdict
 from socket import socket
@@ -84,8 +85,11 @@ logging.basicConfig(
 logger = logging.getLogger("cube-shell")
 
 # 将 stdout/stderr 重定向到文件，便于排查问题
-sys.stdout = open(os.path.join(log_dir, 'stdout.log'), 'a', buffering=1, encoding='utf-8')
-sys.stderr = open(os.path.join(log_dir, 'stderr.log'), 'a', buffering=1, encoding='utf-8')
+try:
+    sys.stdout = open(os.path.join(log_dir, 'stdout.log'), 'a', buffering=1, encoding='utf-8')
+    sys.stderr = open(os.path.join(log_dir, 'stderr.log'), 'a', buffering=1, encoding='utf-8')
+except Exception:
+    pass
 
 print("Cube-Shell Starting...")
 
@@ -227,6 +231,7 @@ class MainDialog(QMainWindow):
         self.setAttribute(Qt.WA_KeyCompression, True)
         self.setFocusPolicy(Qt.WheelFocus)
         self.Shell = None
+        self.update_timer = None
         # 存储 SSH 客户端实例，用于管理后台连接
         self.ssh_clients = {}
         icon = QIcon(":index.png")
@@ -1109,9 +1114,9 @@ class MainDialog(QMainWindow):
                     # 恢复原始位置
                     self.ui.ShellTab.tabBar().moveTab(self.ui.ShellTab.currentIndex(), self.originalIndex)
                 self.homeTabPressed = False
-        if event.type() == QEvent.KeyPress:
-            print("测试以下")
-            return True
+        # if event.type() == QEvent.KeyPress:
+        #     print("测试以下")
+        #     return True
 
         return super().eventFilter(source, event)
 
@@ -1138,6 +1143,20 @@ class MainDialog(QMainWindow):
                 name = self.ui.treeWidget.topLevelItem(focus).text(0)
             else:
                 self.alarm(self.tr('请选择一台设备！'))
+                return 0
+
+        if str(name) == self.tr("本机"):
+            # 本机模式：
+            # - 不走 SSH/Paramiko；只启动一个本地终端 (QTermWidget)
+            # - 同时构造一个 LocalClient 后端对象，复用现有“文件树 + SFTP 操作”代码路径
+            # - LocalClient 只实现项目里会用到的最小接口（open_sftp / stat / file / mkdir...）
+            try:
+                if terminal is None:
+                    current_index = self.ui.ShellTab.currentIndex()
+                    terminal = self.get_text_browser_from_tab(current_index)
+                return self._connect_local_with_qtermwidget(terminal, str(name))
+            except Exception as e:
+                util.logger.error(f"本机终端启动失败: {e}")
                 return 0
 
         with open(get_config_path('config.dat'), 'rb') as c:
@@ -1173,6 +1192,65 @@ class MainDialog(QMainWindow):
             if terminal and hasattr(terminal, "setPlaceholderText"):
                 terminal.setPlaceholderText(str(e))
             return False
+
+    def _connect_local_with_qtermwidget(self, terminal, label: str) -> int:
+        if not terminal:
+            return 0
+
+        # 本机默认工作目录：用户 Home 目录
+        # - macOS/Linux: /Users/<user> 或 /home/<user>
+        # - Windows: C:\\Users\\<user>
+        # Path.home() 是跨平台的，额外做目录存在校验，避免异常环境返回不可用路径
+        home_dir = str(Path.home())
+        try:
+            if not os.path.isdir(home_dir):
+                home_dir = os.path.expanduser("~")
+        except Exception:
+            home_dir = os.path.expanduser("~")
+        if hasattr(terminal, 'setWorkingDirectory'):
+            terminal.setWorkingDirectory(home_dir)
+
+        shell_program = ""
+        shell_args = []
+        sys_name = platform.system()
+        if sys_name == "Windows":
+            # Windows 下优先 pwsh (PowerShell 7)，其次 powershell (Windows PowerShell)，再退回 cmd
+            shell_program = "powershell"
+            try:
+                if shutil.which("pwsh"):
+                    shell_program = "pwsh"
+                elif shutil.which("powershell"):
+                    shell_program = "powershell"
+                else:
+                    shell_program = "cmd"
+            except Exception:
+                shell_program = "cmd"
+        else:
+            # macOS/Linux 下尽量使用用户默认 SHELL
+            # 如果环境变量缺失，再按系统给一个合理默认值
+            shell_program = os.environ.get("SHELL") or ("/bin/zsh" if sys_name == "Darwin" else "/bin/bash")
+
+        terminal.setShellProgram(shell_program)
+        terminal.setArgs(shell_args)
+        terminal.startShellProgram()
+
+        if hasattr(terminal, 'current_theme_name'):
+            terminal.setColorScheme(terminal.current_theme_name)
+        else:
+            terminal.setColorScheme("Ubuntu")
+
+        # 将本地后端对象注册进 ssh_clients：
+        # - 复用 self.ssh() 取“当前 Tab 后端”的机制
+        # - 复用 initSftp() / refreshDirs() 的目录刷新逻辑
+        # - 通过 tabWhatsThis 绑定 tab 与后端连接 id
+        current_index = self.ui.ShellTab.currentIndex()
+        local_conn = LocalClient(pwd=home_dir, name=label)
+        local_conn.Shell = terminal
+        self.ui.ShellTab.setTabWhatsThis(current_index, local_conn.id)
+        self.ssh_clients[local_conn.id] = local_conn
+        self.current_displayed_connection_id = local_conn.id
+        self.initSftpSignal.emit()
+        return terminal.getIsRunning()
 
     def _connect_with_qtermwidget(self, host, port, username, password, key_type, key_file, terminal) -> int:
         """使用 QTermWidget 直接处理 SSH 连接"""
@@ -1303,6 +1381,8 @@ class MainDialog(QMainWindow):
     # 初始化sftp和控制面板
     def initSftp(self):
         ssh_conn = self.ssh()
+        if not ssh_conn:
+            return
 
         self.isConnected = True
         self.ui.discButton.setEnabled(True)
@@ -1310,7 +1390,9 @@ class MainDialog(QMainWindow):
         self.ui.theme.setEnabled(True)
 
         self.refreshDirs()
-        # 进程管理
+        if getattr(ssh_conn, "is_local", False):
+            return
+
         self.processInitUI()
 
         if not hasattr(ssh_conn, 'flush_sys_info_thread') or not ssh_conn.flush_sys_info_thread.is_alive():
@@ -1346,6 +1428,12 @@ class MainDialog(QMainWindow):
 
     def on_tab_changed(self, index):
         """标签切换事件处理"""
+        try:
+            ssh_conn = self.ssh()
+            if ssh_conn and getattr(ssh_conn, "is_local", False):
+                return
+        except Exception:
+            return
         if index == 0:
             # self.handle_tab1()
             self.refreshDokerInfo()
@@ -1370,10 +1458,19 @@ class MainDialog(QMainWindow):
 
             focus = self.ui.treeWidget.currentIndex().row()
             if focus != -1 and self.dir_tree_now[focus][0].startswith('d'):
-                ssh_conn.pwd = self.getData2(
-                    'cd ' + ssh_conn.pwd + '/' + self.ui.treeWidget.topLevelItem(focus).text(0) +
-                    ' && pwd')[:-1]
-                self.refreshDirs()
+                if getattr(ssh_conn, "is_local", False):
+                    target = self.ui.treeWidget.topLevelItem(focus).text(0)
+                    if target == "..":
+                        ssh_conn.pwd = os.path.dirname(
+                            os.path.abspath(os.path.expanduser(ssh_conn.pwd))) or ssh_conn.pwd
+                    else:
+                        ssh_conn.pwd = os.path.abspath(os.path.join(os.path.expanduser(ssh_conn.pwd), target))
+                    self.refreshDirs()
+                else:
+                    ssh_conn.pwd = self.getData2(
+                        'cd ' + ssh_conn.pwd + '/' + self.ui.treeWidget.topLevelItem(focus).text(0) +
+                        ' && pwd')[:-1]
+                    self.refreshDirs()
             else:
                 self.editFile()
         elif not self.isConnected:
@@ -1427,8 +1524,6 @@ class MainDialog(QMainWindow):
             this = self.get_tab_whats_this_by_name(name)
             if this in self.ssh_clients:
                 ssh_conn = self.ssh_clients[this]
-                if hasattr(ssh_conn, 'timer1') and ssh_conn.timer1:
-                    ssh_conn.timer1.stop()
                 ssh_conn.term_data = b''
                 ssh_conn.pwd = ''
                 ssh_conn.close()
@@ -1535,8 +1630,7 @@ class MainDialog(QMainWindow):
                 for ssh_conn in connections:
                     if ssh_conn:
                         try:
-                            if hasattr(ssh_conn, 'timer1') and ssh_conn.timer1:
-                                ssh_conn.timer1.stop()
+                            pass
                             # 等待并清理后台刷新线程
                             if hasattr(ssh_conn, 'refresh_thread') and ssh_conn.refresh_thread.is_alive():
                                 # 注意：不能join()因为这是在主线程，可能会卡死。
@@ -1559,6 +1653,11 @@ class MainDialog(QMainWindow):
 
                 threading.Thread(target=cleanup_ssh_connections, args=(connections,), daemon=True).start()
                 self.ssh_clients.clear()
+            if self.update_timer:
+                try:
+                    self.update_timer.stop()
+                except Exception:
+                    pass
 
             """
             该函数处理窗口关闭事件，主要功能包括：
@@ -1629,9 +1728,17 @@ class MainDialog(QMainWindow):
             self.ui.action.triggered.connect(self.showAddConfig)
 
             selected_items = self.ui.treeWidget.selectedItems()
-            if selected_items:
+            is_local_item = False
+            try:
+                if selected_items and selected_items[0].text(0) == self.tr("本机"):
+                    is_local_item = True
+            except Exception:
+                is_local_item = False
+
+            if selected_items and not is_local_item:
                 self.ui.action.setVisible(False)
                 self.ui.action1.setVisible(True)
+                self.ui.action2.setVisible(True)
             else:
                 self.ui.action.setVisible(True)
                 self.ui.action1.setVisible(False)
@@ -1863,6 +1970,24 @@ class MainDialog(QMainWindow):
 
         self.ui.treeWidget.headerItem().setText(0, QCoreApplication.translate("MainWindow", "设备列表"))
 
+        # 将“本机”作为固定入口插入到设备列表顶部：
+        # - 用户无需新增配置即可打开本地终端与本地文件树
+        # - 本机入口不允许被“编辑配置/删除配置”等操作影响
+        local_label = self.tr("本机")
+        self.ui.treeWidget.addTopLevelItem(QTreeWidgetItem(0))
+        bold_font = QFont()
+        bold_font.setPointSize(14)
+        if platform.system() == 'Darwin':
+            bold_font.setPointSize(15)
+            bold_font.setBold(True)
+        self.ui.treeWidget.topLevelItem(i).setFont(0, bold_font)
+        self.ui.treeWidget.topLevelItem(i).setText(0, local_label)
+        try:
+            self.ui.treeWidget.topLevelItem(i).setIcon(0, QIcon(':Localhost.png'))
+        except Exception:
+            self.ui.treeWidget.topLevelItem(i).setIcon(0, QIcon(':icons8-linux-48.png'))
+        i += 1
+
         for k in dic.keys():
             self.ui.treeWidget.addTopLevelItem(QTreeWidgetItem(0))
             # 设置字体为加粗
@@ -2045,11 +2170,15 @@ class MainDialog(QMainWindow):
             ssh_conn = self.ssh()
             if not ssh_conn:
                 return "", []
-            # 使用 getData2 (带信号发射)
+            if getattr(ssh_conn, "is_local", False):
+                # 本机模式：直接读取本地文件系统，返回一个“类 ls -al”结构，
+                # 使得后续 handle_file_tree_updated 仍能复用既有渲染逻辑（n[0] 权限、n[4] 大小等）
+                return self._get_local_dir_now(ssh_conn)
             pwd = self.getData2('cd ' + ssh_conn.pwd.replace("//", "/") + ' && pwd')
             dir_info = self.getData2(cmd='cd ' + ssh_conn.pwd.replace("//", "/") + ' && ls -al').split('\n')
         else:
-            # 直接使用 exec (后台线程使用，不通过 getData2 避免跨线程 UI 访问)
+            if getattr(ssh_conn, "is_local", False):
+                return self._get_local_dir_now(ssh_conn)
             try:
                 pwd = ssh_conn.exec('cd ' + ssh_conn.pwd.replace("//", "/") + ' && pwd')
                 dir_info = ssh_conn.exec(cmd='cd ' + ssh_conn.pwd.replace("//", "/") + ' && ls -al').split('\n')
@@ -2066,6 +2195,109 @@ class MainDialog(QMainWindow):
                 pass
         return pwd[:-1], dir_n_info
 
+    def _get_local_dir_now(self, ssh_conn):
+        # 将本地目录转换成“远程 ls -al”兼容的列表结构：
+        # [权限, 链接数, 所有者, 组, 大小, 月, 日, 时间/年, 文件名]
+        # 这样整个 UI 渲染与右键逻辑可以与远程保持一致，尽量少改动上层代码。
+        import stat as _stat
+        import time as _time
+        try:
+            import pwd as _pwd
+        except Exception:
+            _pwd = None
+        try:
+            import grp as _grp
+        except Exception:
+            _grp = None
+
+        raw_pwd = (ssh_conn.pwd or os.path.expanduser("~")).strip()
+        if raw_pwd in (".", ""):
+            raw_pwd = os.path.expanduser("~")
+        pwd_abs = os.path.abspath(os.path.expanduser(raw_pwd))
+        if not os.path.isdir(pwd_abs):
+            pwd_abs = os.path.expanduser("~")
+
+        def _owner_name(uid: int) -> str:
+            if _pwd:
+                try:
+                    return _pwd.getpwuid(uid).pw_name
+                except Exception:
+                    pass
+            return str(uid)
+
+        def _group_name(gid: int) -> str:
+            if _grp:
+                try:
+                    return _grp.getgrgid(gid).gr_name
+                except Exception:
+                    pass
+            return str(gid)
+
+        now = _time.time()
+        entries = []
+        entries.append([
+            "drwxr-xr-x",
+            "1",
+            _owner_name(os.getuid()) if hasattr(os, "getuid") else "",
+            _group_name(os.getgid()) if hasattr(os, "getgid") else "",
+            "0",
+            _time.strftime("%b", _time.localtime(now)),
+            str(_time.localtime(now).tm_mday),
+            _time.strftime("%H:%M", _time.localtime(now)),
+            ".",
+        ])
+        parent = os.path.dirname(pwd_abs.rstrip(os.sep)) or pwd_abs
+        entries.append([
+            "drwxr-xr-x",
+            "1",
+            _owner_name(os.getuid()) if hasattr(os, "getuid") else "",
+            _group_name(os.getgid()) if hasattr(os, "getgid") else "",
+            "0",
+            _time.strftime("%b", _time.localtime(now)),
+            str(_time.localtime(now).tm_mday),
+            _time.strftime("%H:%M", _time.localtime(now)),
+            "..",
+        ])
+
+        try:
+            names = os.listdir(pwd_abs)
+        except Exception:
+            names = []
+
+        def _sort_key(n: str):
+            p = os.path.join(pwd_abs, n)
+            try:
+                st = os.lstat(p)
+                is_dir = _stat.S_ISDIR(st.st_mode)
+            except Exception:
+                is_dir = False
+            return (0 if is_dir else 1, n.lower())
+
+        for name in sorted(names, key=_sort_key):
+            p = os.path.join(pwd_abs, name)
+            try:
+                st = os.lstat(p)
+            except Exception:
+                continue
+            perm = _stat.filemode(st.st_mode)
+            links = str(getattr(st, "st_nlink", 1))
+            owner = _owner_name(getattr(st, "st_uid", 0))
+            group = _group_name(getattr(st, "st_gid", 0))
+            size = str(getattr(st, "st_size", 0))
+            mtime = float(getattr(st, "st_mtime", now))
+            tm = _time.localtime(mtime)
+            month = _time.strftime("%b", tm)
+            day = str(tm.tm_mday)
+            if abs(now - mtime) > 15552000:
+                time_or_year = str(tm.tm_year)
+            else:
+                time_or_year = _time.strftime("%H:%M", tm)
+            entries.append([perm, links, owner, group, size, month, day, time_or_year, name])
+
+        # 将规范化后的绝对路径回写到连接对象上，保证后续 cd/上传/下载等拼路径一致
+        ssh_conn.pwd = pwd_abs
+        return pwd_abs, entries
+
     # 打开文件编辑窗口
     def editFile(self):
         items = self.ui.treeWidget.selectedItems()
@@ -2079,7 +2311,17 @@ class MainDialog(QMainWindow):
                 self.alarm(self.tr('不支持编辑此文件！'))
                 return
             ssh_conn = self.ssh()
-            text = self.getData2('cat ' + ssh_conn.pwd + '/' + self.file_name)
+            if getattr(ssh_conn, "is_local", False):
+                try:
+                    # 本机编辑：直接读本地文件内容（TextEditor 复用同一套 UI）
+                    # errors="replace" 保障遇到非 UTF-8 文件也不会直接崩溃
+                    local_path = os.path.join(os.path.expanduser(ssh_conn.pwd), self.file_name)
+                    with open(local_path, "r", encoding="utf-8", errors="replace") as f:
+                        text = f.read()
+                except Exception:
+                    text = "error"
+            else:
+                text = self.getData2('cat ' + ssh_conn.pwd + '/' + self.file_name)
             if text != 'error' and text != '\n':
                 self.ui.addTextEditWin = TextEditor(title=self.file_name, old_text=text)
                 self.ui.addTextEditWin.show()
@@ -2150,9 +2392,24 @@ class MainDialog(QMainWindow):
     # 保存内容到远程文件
     def save_file(self, path, content):
         try:
-            sftp = self.ssh().open_sftp()
+            ssh_conn = self.ssh()
+            if ssh_conn and getattr(ssh_conn, "is_local", False):
+                # 本机保存：
+                # - 使用 Python 文件 IO 写入（文本模式写 str，避免写 bytes 导致 TypeError）
+                # - path 这里沿用上层调用的“ssh_conn.pwd + '/' + filename”拼接方式，
+                #   因此需要 expanduser + normpath 做一次标准化
+                local_path = os.path.normpath(os.path.expanduser(str(path)))
+                with open(local_path, "w", encoding="utf-8") as f:
+                    f.write(content if isinstance(content, str) else content.decode("utf-8", errors="replace"))
+                return True, ""
+
+            # 远程保存：走 SFTP 写入
+            sftp = ssh_conn.open_sftp() if ssh_conn else None
+            if not sftp:
+                return False, "No active connection"
             with sftp.file(path, 'w') as f:
-                f.write(content.encode('utf-8'))
+                data = content if isinstance(content, (bytes, bytearray)) else str(content).encode('utf-8')
+                f.write(data)
             return True, ""
         except Exception as e:
             return False, str(e)
@@ -2205,11 +2462,29 @@ class MainDialog(QMainWindow):
     def flushSysInfo(self):
         try:
             ssh_conn = self.ssh()
-            # 使用单个定时器更新多个信息
-            if not hasattr(self, 'update_timer'):
-                ssh_conn.timer1 = QTimer()
-                ssh_conn.timer1.timeout.connect(self.refreshSysInfo)
-                ssh_conn.timer1.start(1000)
+            if ssh_conn and hasattr(ssh_conn, "timer1") and ssh_conn.timer1:
+                # 兼容历史版本：
+                # 旧实现会把 QTimer 挂在 ssh_conn.timer1 上，并且由于判断条件写错可能重复创建，
+                # 导致多个定时器在主线程同时刷新 UI，最终表现为“越来越卡/卡死”。
+                # 这里主动 stop + deleteLater，避免旧 timer 残留。
+                try:
+                    ssh_conn.timer1.stop()
+                    ssh_conn.timer1.deleteLater()
+                except Exception:
+                    pass
+                ssh_conn.timer1 = None
+
+            if self.update_timer and self.update_timer.isActive():
+                # 全局定时器已在跑，不要重复创建/重复 start
+                return
+
+            if not self.update_timer:
+                # 修复后的设计：MainDialog 级别只维护一个 update_timer
+                # - 以 self 作为 parent，生命周期跟随窗口，避免泄漏
+                # - timeout 只做“从当前 tab 的后端取值 → 更新 UI”，不做耗时 IO
+                self.update_timer = QTimer(self)
+                self.update_timer.timeout.connect(self.refreshSysInfo)
+            self.update_timer.start(1000)
         except Exception as e:
             util.logger.error(f"Error setting up system info update: {e}")
 
@@ -2220,14 +2495,20 @@ class MainDialog(QMainWindow):
             this = self.ui.ShellTab.tabWhatsThis(current_index)
             if this and this in self.ssh_clients:
                 ssh_conn = self.ssh_clients[this]
+                if getattr(ssh_conn, "is_local", False):
+                    # 本机模式不具备远程采集线程（get_datas）产出的系统信息字段，
+                    # 因此直接跳过，避免 KeyError/AttributeError 导致频繁异常。
+                    return
+                if not hasattr(ssh_conn, "system_info_dict"):
+                    return
                 system_info_dict = ssh_conn.system_info_dict
-                cpu_use = ssh_conn.cpu_use
-                mem_use = ssh_conn.mem_use
-                dissk_use = ssh_conn.disk_use
+                cpu_use = getattr(ssh_conn, "cpu_use", 0)
+                mem_use = getattr(ssh_conn, "mem_use", 0)
+                dissk_use = getattr(ssh_conn, "disk_use", 0)
                 # 上行
-                transmit_speed = ssh_conn.transmit_speed
+                transmit_speed = getattr(ssh_conn, "transmit_speed", 0)
                 # 下行
-                receive_speed = ssh_conn.receive_speed
+                receive_speed = getattr(ssh_conn, "receive_speed", 0)
 
                 self.ui.cpuRate.setValue(cpu_use)
                 self.ui.cpuRate.setStyleSheet(updateColor(cpu_use))
@@ -2238,8 +2519,8 @@ class MainDialog(QMainWindow):
                 # 自定义显示格式
                 self.ui.networkUpload.setText(util.format_speed(transmit_speed))
                 self.ui.networkDownload.setText(util.format_speed(receive_speed))
-                self.ui.operatingSystem.setText(system_info_dict['Operating System'])
-                self.ui.kernelVersion.setText(system_info_dict['Kernel'])
+                self.ui.operatingSystem.setText(system_info_dict.get('Operating System', ''))
+                self.ui.kernelVersion.setText(system_info_dict.get('Kernel', ''))
                 if 'Firmware Version' in system_info_dict:
                     self.ui.kernel.setText(system_info_dict['Firmware Version'])
                 else:
@@ -2759,7 +3040,12 @@ class MainDialog(QMainWindow):
                                             QLineEdit.Normal, item_text)
             if new_name[1]:
                 new_name = new_name[0]
-                ssh_conn.exec(f'mv {ssh_conn.pwd}/{item_text} {ssh_conn.pwd}/{new_name}')
+                if getattr(ssh_conn, "is_local", False):
+                    old_path = os.path.join(os.path.expanduser(ssh_conn.pwd), item_text)
+                    new_path = os.path.join(os.path.expanduser(ssh_conn.pwd), new_name)
+                    os.rename(old_path, new_path)
+                else:
+                    ssh_conn.exec(f'mv {ssh_conn.pwd}/{item_text} {ssh_conn.pwd}/{new_name}')
                 self.refreshDirs()
 
     # 解压
@@ -3048,6 +3334,108 @@ class MainDialog(QMainWindow):
         return None
 
 
+class _LocalTransport:
+    def set_keepalive(self, _seconds: int):
+        return
+
+
+class _LocalConn:
+    def get_transport(self):
+        return _LocalTransport()
+
+
+class _LocalFile:
+    def __init__(self, fp):
+        self._fp = fp
+
+    def prefetch(self, _offset: int = 0):
+        return
+
+    def __getattr__(self, item):
+        return getattr(self._fp, item)
+
+    def __enter__(self):
+        self._fp.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return self._fp.__exit__(exc_type, exc_val, exc_tb)
+
+
+class LocalSFTPClient:
+    # LocalSFTPClient 用来“模拟” Paramiko SFTPClient 的最小子集，复用项目中现有的：
+    # - 下载/上传（download_with_resume / SFTPUploaderCore）
+    # - 创建/删除/重命名
+    # - 文件读写（sftp.file/sftp.open）
+    # 这里不追求 100% API 一致，只覆盖当前代码用到的接口即可。
+    def _p(self, path: str) -> str:
+        # 把路径统一成当前 OS 的规范路径：
+        # - expanduser: 展开 ~
+        # - 兼容上层逻辑可能拼出来的 "/" 或 "\\" 分隔符
+        # - normpath: 处理 .. 和多余分隔符
+        p = os.path.expanduser(str(path))
+        p = p.replace("\\", os.sep).replace("/", os.sep)
+        return os.path.normpath(p)
+
+    def stat(self, path: str):
+        return os.stat(self._p(path))
+
+    def listdir(self, path: str):
+        return os.listdir(self._p(path))
+
+    def remove(self, path: str):
+        os.remove(self._p(path))
+
+    def rmdir(self, path: str):
+        os.rmdir(self._p(path))
+
+    def mkdir(self, path: str):
+        os.mkdir(self._p(path))
+
+    def rename(self, oldpath: str, newpath: str):
+        os.rename(self._p(oldpath), self._p(newpath))
+
+    def open(self, path: str, mode: str = "rb"):
+        return _LocalFile(open(self._p(path), mode))
+
+    def file(self, path: str, mode: str = "rb"):
+        return self.open(path, mode)
+
+
+class LocalClient:
+    def __init__(self, pwd: str, name: str = ""):
+        self.id = str(uuid.uuid4())
+        # 本机连接默认目录使用用户 Home，避免落在项目目录导致体验不一致
+        home_dir = str(Path.home())
+        self.pwd = pwd or home_dir
+        try:
+            if not os.path.isdir(self.pwd):
+                self.pwd = home_dir
+        except Exception:
+            self.pwd = home_dir
+        self.active = True
+        self.close_sig = 1
+        self.is_local = True
+        self.conn = _LocalConn()
+        self._sftp = LocalSFTPClient()
+        self._ssh_config_name = name or "local"
+
+    def is_connected(self):
+        return bool(self.active)
+
+    def open_sftp(self):
+        return self._sftp
+
+    def exec(self, cmd: str = "", pty: bool = False):
+        # 注意：LocalClient 不提供“执行任意命令”的能力（不像远程 SSH）。
+        # 目前本机模式的需求是：本地终端交互 + 文件树文件操作（走 LocalSFTPClient）。
+        # 如果未来需要本机 exec，可在这里实现 subprocess 调用并做好安全限制。
+        raise RuntimeError("LocalClient.exec is not supported for generic commands")
+
+    def close(self):
+        self.active = False
+
+
 class SSHConnector(QObject):
     """SSH 连接器 - 内部使用线程实现异步连接"""
     connected = Signal(object)  # 连接成功信号
@@ -3151,9 +3539,21 @@ class Auth(QDialog):
 
         # 有修改才更新
         if trimmed_new != trimmed_old:
-            # 合并命令
-            combined_command = " && ".join(decompress_commands)
-            ssh_conn.exec(combined_command)
+            if getattr(ssh_conn, "is_local", False):
+                try:
+                    mode = int(str(octal), 8)
+                except Exception:
+                    mode = 0
+                for item in selected_items:
+                    item_text = item.text(0)
+                    try:
+                        p = os.path.join(os.path.expanduser(ssh_conn.pwd), item_text)
+                        os.chmod(p, mode)
+                    except Exception:
+                        pass
+            else:
+                combined_command = " && ".join(decompress_commands)
+                ssh_conn.exec(combined_command)
         self.close()
         self.parent().refreshDirs()
 
