@@ -108,8 +108,9 @@ class ColorThemeList(QTableWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, main_window=None):
         super().__init__()
+        self._main_window = main_window
 
         self.setWindowTitle("主题切换")
 
@@ -128,6 +129,14 @@ class MainWindow(QMainWindow):
         title_label.setStyleSheet("font-size: 20px;")
         title_label.setAlignment(Qt.AlignCenter)  # 居中文本
         title_layout.addWidget(title_label)
+
+        title_layout.addStretch(1)
+        self._btn_dark = QPushButton("暗色", self.title_bar)
+        self._btn_light = QPushButton("亮色", self.title_bar)
+        title_layout.addWidget(self._btn_dark)
+        title_layout.addWidget(self._btn_light)
+        self._btn_dark.clicked.connect(lambda: self._set_appearance("dark"))
+        self._btn_light.clicked.connect(lambda: self._set_appearance("light"))
 
         # Sidebar
         self.sidebar = QFrame(self.central_widget)
@@ -183,6 +192,33 @@ class MainWindow(QMainWindow):
         self.main_layout.addWidget(self.title_bar)
         self.main_layout.addWidget(self.sidebar)
         self.main_layout.addWidget(self.stacked_widget)
+
+        try:
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.abspath(os.path.join(current_dir, '../'))
+            file_path = os.path.join(project_root, 'conf', 'theme.json')
+            data = util.read_json(file_path)
+            appearance = str(data.get("appearance") or "dark").lower()
+            self._btn_light.setEnabled(appearance != "light")
+            self._btn_dark.setEnabled(appearance == "light")
+        except Exception:
+            pass
+
+    def _set_appearance(self, appearance: str):
+        try:
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.abspath(os.path.join(current_dir, '../'))
+            file_path = os.path.join(project_root, 'conf', 'theme.json')
+            data = util.read_json(file_path)
+            data["appearance"] = str(appearance).lower()
+            util.write_json(file_path, data)
+            util.THEME = data
+            if self._main_window and hasattr(self._main_window, "applyAppearance"):
+                self._main_window.applyAppearance(data["appearance"])
+            self._btn_light.setEnabled(data["appearance"] != "light")
+            self._btn_dark.setEnabled(data["appearance"] == "light")
+        except Exception:
+            pass
 
     def print_selected_font(self, font):
         # 当前选择的字体改变时，打印字体名称

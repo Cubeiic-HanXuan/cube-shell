@@ -2,6 +2,7 @@
     "font": "Apple Color Emoji",
     "theme": "rrt",
     "theme_color": "#000000",
+    "appearance": "dark",
     "font_size": 16,
-    "version": "2.1.0"
+    "version": "2.2.0"
 }

@@ -57,6 +57,8 @@ from core.docker.docker_installer_ui import DockerInstallerWidget
 from core.forwarder import ForwarderManager
 from core.frequently_used_commands import TreeSearchApp
 from core.uploader.progress_adapter import ProgressAdapter
+from core.widgets.sparkline import SparklineWidget
+from core.widgets.ring_gauge import RingGauge
 from core.uploader.sftp_uploader_core import SFTPUploaderCore
 from core.vars import ICONS, CONF_FILE, CMDS, KEYS
 from function import util, about, theme, traversal
@@ -244,12 +246,9 @@ class MainDialog(QMainWindow):
         self.line_edits = []
 
         init_config()
-
-        self.setDarkTheme()  # 默认设置为暗主题
-        self.index_pwd()
-
-        # 读取 JSON 文件内容
         util.THEME = util.read_json(abspath('theme.json'))
+        self.applyAppearance(util.THEME.get("appearance"))
+        self.index_pwd()
 
         # 隧道管理
         self.data = None
@@ -273,7 +272,7 @@ class MainDialog(QMainWindow):
         self.active_upload_threads = []
 
         self.ui.discButton.clicked.connect(self.disc_off)
-        self.ui.theme.clicked.connect(self.toggleTheme)
+        self.ui.theme.clicked.connect(self.theme)
         # 🔧 连接主题切换信号
         self.themeChanged.connect(self.on_system_theme_changed)
         self.ui.treeWidget.customContextMenuRequested.connect(self.treeRight)
@@ -328,6 +327,292 @@ class MainDialog(QMainWindow):
         self.is_connecting_lock = False
         self._last_connect_attempt_ts = 0
         self.is_closing = False
+
+        self._move_monitor_and_process_to_bottom_tabs()
+
+    def _move_monitor_and_process_to_bottom_tabs(self):
+        try:
+            tab_widget = getattr(self.ui, "tabWidget", None)
+            if not tab_widget:
+                return
+
+            monitor_tab = QWidget()
+            monitor_tab.setObjectName("tab_remote_monitor")
+            monitor_layout = QHBoxLayout(monitor_tab)
+            monitor_layout.setContentsMargins(12, 10, 12, 10)
+            monitor_layout.setSpacing(20)
+
+            try:
+                appearance = str(getattr(util, "THEME", {}) or {}).lower()
+            except Exception:
+                appearance = "dark"
+            is_light = "appearance" in appearance and "light" in appearance
+            if not is_light:
+                try:
+                    is_light = str((getattr(util, "THEME", {}) or {}).get("appearance") or "").lower() == "light"
+                except Exception:
+                    is_light = False
+
+            # High-Tech Styling
+            monitor_tab.setStyleSheet(
+                """
+                QWidget#tab_remote_monitor {
+                    background: transparent;
+                }
+                QFrame#monitorPanel {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(40, 44, 52, 240), stop:1 rgba(33, 37, 43, 255));
+                    border: 1px solid rgba(255, 255, 255, 0.1);
+                    border-radius: 12px;
+                }
+                QLabel {
+                    color: #AAB2C0;
+                    font-family: "Segoe UI", sans-serif;
+                }
+                QLabel#sectionTitle {
+                    color: #E1E4E8;
+                    font-weight: 700;
+                    font-size: 12px;
+                    background: transparent;
+                }
+                QLabel#valueText {
+                    color: #FFFFFF;
+                    font-weight: 600;
+                    font-size: 13px;
+                }
+                """ if not is_light else
+                """
+                QWidget#tab_remote_monitor {
+                    background: transparent;
+                }
+                QFrame#monitorPanel {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(245, 247, 250, 240), stop:1 rgba(255, 255, 255, 255));
+                    border: 1px solid rgba(0, 0, 0, 0.08);
+                    border-radius: 12px;
+                }
+                QLabel {
+                    color: #4A5568;
+                    font-family: "Segoe UI", sans-serif;
+                }
+                QLabel#sectionTitle {
+                    color: #2D3748;
+                    font-weight: 700;
+                    font-size: 12px;
+                    background: transparent;
+                }
+                QLabel#valueText {
+                    color: #1A202C;
+                    font-weight: 600;
+                    font-size: 13px;
+                }
+                """
+            )
+
+            # --- Ring Gauges Section (CPU, RAM, Disk) ---
+            def create_ring_section(layout, label_name, bar_name, color, title):
+                # Hide original widgets but keep them updated
+                orig_label = getattr(self.ui, label_name, None)
+                orig_bar = getattr(self.ui, bar_name, None)
+                if orig_bar:
+                    orig_bar.setVisible(False)
+                    orig_bar.setParent(monitor_tab) # Reparent to keep alive
+                if orig_label:
+                    orig_label.setVisible(False)
+                    orig_label.setParent(monitor_tab)
+
+                container = QFrame()
+                #container.setFixedWidth(80)
+                vbox = QVBoxLayout(container)
+                vbox.setContentsMargins(0, 0, 0, 0)
+                vbox.setSpacing(4)
+
+                # Ring Gauge
+                ring = RingGauge(container, color=color, label=title)
+                #ring.setFixedSize(80, 80)
+
+                # Sparkline (Miniature below ring)
+                spark = SparklineWidget(container)
+                #spark.setFixedHeight(20)
+                spark.setLineColor(QColor(color))
+
+                vbox.addWidget(ring, 0, Qt.AlignCenter)
+                vbox.addWidget(spark)
+
+                layout.addWidget(container)
+
+                # Store references and connect signals
+                setattr(self.ui, bar_name.replace("Rate", "Ring"), ring)
+                setattr(self.ui, bar_name.replace("Rate", "Sparkline"), spark)
+
+                if orig_bar:
+                    try:
+                        orig_bar.valueChanged.connect(ring.setValue)
+                        orig_bar.valueChanged.connect(spark.addPoint)
+                    except:
+                        pass
+
+            # --- Network Section ---
+            def create_network_section(layout):
+                container = QFrame()
+                container.setObjectName("monitorPanel")
+                container.setFrameShape(QFrame.StyledPanel)
+                vbox = QVBoxLayout(container)
+                vbox.setContentsMargins(12, 10, 12, 10)
+                vbox.setSpacing(8)
+
+                title = QLabel(self.tr("NETWORK I/O"), container)
+                title.setObjectName("sectionTitle")
+                vbox.addWidget(title)
+
+                # Up
+                up_layout = QHBoxLayout()
+                up_icon = QLabel("▲", container)
+                up_icon.setStyleSheet("color: #E05B00;" if is_light else "color: #FF9F43;")
+                up_val = getattr(self.ui, "networkUpload", None)
+                if up_val:
+                    up_val.setParent(container)
+                    up_val.setFrame(False)
+                    up_val.setAttribute(Qt.WA_TransparentForMouseEvents)
+                    up_val.setStyleSheet("background: transparent; color: " + ("#2D3748" if is_light else "#E1E4E8") + "; font-weight: bold; border: none; font-family: 'Consolas', 'Courier New', monospace;")
+                    # up_val.setFixedWidth(120)
+                    # up_val.setFixedHeight(24)
+                    up_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+                up_spark = SparklineWidget(container)
+                # up_spark.setFixedHeight(24)
+                up_spark.setLineColor(QColor("#E05B00") if is_light else QColor("#FF9F43"))
+                setattr(self.ui, "networkUploadSparkline", up_spark)
+
+                up_layout.addWidget(up_icon)
+                up_layout.addWidget(up_spark, 1)
+                if up_val: up_layout.addWidget(up_val)
+                vbox.addLayout(up_layout)
+
+                # Down
+                down_layout = QHBoxLayout()
+                down_icon = QLabel("▼", container)
+                down_icon.setStyleSheet("color: #00A1FF;" if is_light else "color: #48DBFB;")
+                down_val = getattr(self.ui, "networkDownload", None)
+                if down_val:
+                    down_val.setParent(container)
+                    down_val.setFrame(False)
+                    down_val.setAttribute(Qt.WA_TransparentForMouseEvents)
+                    down_val.setStyleSheet("background: transparent; color: " + ("#2D3748" if is_light else "#E1E4E8") + "; font-weight: bold; border: none; font-family: 'Consolas', 'Courier New', monospace;")
+                    # down_val.setFixedWidth(120)
+                    # down_val.setFixedHeight(24)
+                    down_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+                down_spark = SparklineWidget(container)
+                down_spark.setFixedHeight(24)
+                down_spark.setLineColor(QColor("#00A1FF") if is_light else QColor("#48DBFB"))
+                setattr(self.ui, "networkDownloadSparkline", down_spark)
+
+                down_layout.addWidget(down_icon)
+                down_layout.addWidget(down_spark, 1)
+                if down_val: down_layout.addWidget(down_val)
+                vbox.addLayout(down_layout)
+
+                layout.addWidget(container, 2) # Stretch factor equal to system section
+
+            # --- System Info Section ---
+            def create_sys_section(layout):
+                container = QFrame()
+                container.setObjectName("monitorPanel")
+                container.setFrameShape(QFrame.StyledPanel)
+                # Ensure minimum width for full info display
+                container.setMinimumWidth(260)
+
+                vbox = QVBoxLayout(container)
+                vbox.setContentsMargins(12, 10, 12, 10)
+                vbox.setSpacing(4)
+
+                title = QLabel(self.tr("SYSTEM INFO"), container)
+                title.setObjectName("sectionTitle")
+                vbox.addWidget(title)
+
+                info_grid = QGridLayout()
+                info_grid.setHorizontalSpacing(10)
+                info_grid.setVerticalSpacing(2)
+
+                def add_info_row(row, label_widget_name, val_widget_name, icon_char):
+                    lbl = getattr(self.ui, label_widget_name, None)
+                    val = getattr(self.ui, val_widget_name, None)
+                    if lbl and val:
+                        lbl.setParent(container)
+                        val.setParent(container)
+                        lbl.setVisible(False) # Hide original label text, use icon
+
+                        icon = QLabel(icon_char, container)
+                        icon.setStyleSheet("color: #A0AEC0; font-size: 14px;")
+
+                        val.setFrame(False)
+                        val.setAttribute(Qt.WA_TransparentForMouseEvents)
+                        # Monospace font for values for better alignment and tech feel
+                        val.setStyleSheet("background: transparent; color: " + ("#4A5568" if is_light else "#CBD5E0") + "; border: none; font-family: 'Consolas', 'Courier New', monospace;")
+                        val.setFixedHeight(20)
+
+                        info_grid.addWidget(icon, row, 0)
+                        info_grid.addWidget(val, row, 1)
+
+                add_info_row(0, "label_4", "operatingSystem", "🖥")
+                add_info_row(1, "label_8", "kernel", "⚙")
+                add_info_row(2, "label_10", "kernelVersion", "#")
+
+                vbox.addLayout(info_grid)
+                layout.addWidget(container, 2) # Higher stretch factor
+
+            # Build Layout
+            # Left: Rings
+            rings_layout = QHBoxLayout()
+            rings_layout.setSpacing(15)
+            create_ring_section(rings_layout, "label", "cpuRate", "#FF6B6B" if not is_light else "#E05B00", "CPU")
+            create_ring_section(rings_layout, "label_2", "memRate", "#54A0FF" if not is_light else "#00A1FF", "MEM")
+            create_ring_section(rings_layout, "label_3", "diskRate", "#2ECC71", "DISK")
+
+            # Combine
+            monitor_layout.addLayout(rings_layout)
+            create_network_section(monitor_layout)
+            create_sys_section(monitor_layout)
+
+            # Process Tab (unchanged logic, just reparenting)
+            process_tab = QWidget()
+            process_tab.setObjectName("tab_process_manager")
+            process_layout = QVBoxLayout(process_tab)
+            process_layout.setContentsMargins(6, 6, 6, 6)
+            process_layout.setSpacing(6)
+            for w in (getattr(self.ui, "search_box", None), getattr(self.ui, "result", None)):
+                if w:
+                    w.setParent(process_tab)
+                    process_layout.addWidget(w)
+
+            tab_widget.addTab(monitor_tab, self.tr("远程监控"))
+            tab_widget.addTab(process_tab, self.tr("进程管理"))
+            
+            # Default select Remote Monitor tab
+            tab_widget.setCurrentWidget(monitor_tab)
+
+            # Hide original middle area
+            middle = getattr(self.ui, "gridLayoutWidget_2", None)
+            if middle: middle.setVisible(False)
+
+            # Adjust splitters
+            splitter = getattr(self.ui, "splitter_255", None)
+            if splitter and splitter.count() >= 2:
+                sizes = splitter.sizes()
+                if sizes:
+                    sizes[0] = 0
+                    sizes[1] = max(1, sizes[1])
+                    splitter.setSizes(sizes)
+
+            main_splitter = getattr(self.ui, "splitter", None)
+            if main_splitter and main_splitter.count() >= 2:
+                sizes = main_splitter.sizes()
+                if sizes and sizes[1] > 180: # Compact height
+                    sizes[0] = sizes[0] + (sizes[1] - 180)
+                    sizes[1] = 180
+                    main_splitter.setSizes(sizes)
+
+        except Exception as e:
+            print(f"Error in UI setup: {e}")
 
     def on_NAT_traversal(self):
         device = self.ui.comboBox.currentText()
@@ -1043,7 +1328,7 @@ class MainDialog(QMainWindow):
         self.about_dialog.show()
 
     def theme(self):
-        self.theme_dialog = theme.MainWindow()
+        self.theme_dialog = theme.MainWindow(self)
         self.theme_dialog.show()
 
     def show_ai_settings(self):
@@ -2537,6 +2822,16 @@ class MainDialog(QMainWindow):
             self.ui.cpuRate.setValue(0)
             self.ui.memRate.setValue(0)
             self.ui.diskRate.setValue(0)
+            if hasattr(self.ui, "networkUploadSparkline"):
+                try:
+                    self.ui.networkUploadSparkline.addPoint(0)
+                except Exception:
+                    pass
+            if hasattr(self.ui, "networkDownloadSparkline"):
+                try:
+                    self.ui.networkDownloadSparkline.addPoint(0)
+                except Exception:
+                    pass
 
     # 获取容器列表
     def compose_container_list(self):
@@ -3293,14 +3588,21 @@ class MainDialog(QMainWindow):
             )
         )
 
-    def toggleTheme(self):
-        dark_stylesheet = qdarktheme.load_stylesheet(custom_colors={"[dark]": {"primary": "#00A1FF"}})
-        if self.app.styleSheet() == dark_stylesheet:
+    def applyAppearance(self, appearance: str):
+        if str(appearance).lower() == "light":
             self.setLightTheme()
             self.themeChanged.emit(False)
-        else:
-            self.setDarkTheme()
-            self.themeChanged.emit(True)
+            return
+        self.setDarkTheme()
+        self.themeChanged.emit(True)
+
+    def toggleTheme(self):
+        data = util.read_json(abspath("theme.json"))
+        appearance = str(data.get("appearance") or "dark").lower()
+        data["appearance"] = "light" if appearance != "light" else "dark"
+        util.write_json(abspath("theme.json"), data)
+        util.THEME = data
+        self.applyAppearance(data["appearance"])
 
     def _reapply_all_terminal_themes(self):
         for index in range(self.ui.ShellTab.count()):
