@@ -1145,7 +1145,7 @@ class MainDialog(QMainWindow):
                 self.alarm(self.tr('请选择一台设备！'))
                 return 0
 
-        if str(name) == self.tr("本机"):
+        if str(name) == self.tr("本机终端"):
             # 本机模式：
             # - 不走 SSH/Paramiko；只启动一个本地终端 (QTermWidget)
             # - 同时构造一个 LocalClient 后端对象，复用现有“文件树 + SFTP 操作”代码路径
@@ -1229,6 +1229,10 @@ class MainDialog(QMainWindow):
             # macOS/Linux 下尽量使用用户默认 SHELL
             # 如果环境变量缺失，再按系统给一个合理默认值
             shell_program = os.environ.get("SHELL") or ("/bin/zsh" if sys_name == "Darwin" else "/bin/bash")
+            if sys_name == "Darwin":
+                base = os.path.basename(shell_program or "")
+                if base in ("zsh", "bash"):
+                    shell_args = ["-l"]
 
         terminal.setShellProgram(shell_program)
         terminal.setArgs(shell_args)
@@ -1325,6 +1329,9 @@ class MainDialog(QMainWindow):
                 terminal.setColorScheme(terminal.current_theme_name)
             else:
                 terminal.setColorScheme("Ubuntu")
+
+            if hasattr(terminal, "setSuppressProgramBackgroundColors"):
+                terminal.setSuppressProgramBackgroundColors(True)
 
             if not key_type and not key_file:
                 def auto_input_password():
@@ -1730,7 +1737,7 @@ class MainDialog(QMainWindow):
             selected_items = self.ui.treeWidget.selectedItems()
             is_local_item = False
             try:
-                if selected_items and selected_items[0].text(0) == self.tr("本机"):
+                if selected_items and selected_items[0].text(0) == self.tr("本机终端"):
                     is_local_item = True
             except Exception:
                 is_local_item = False
@@ -1973,7 +1980,7 @@ class MainDialog(QMainWindow):
         # 将“本机”作为固定入口插入到设备列表顶部：
         # - 用户无需新增配置即可打开本地终端与本地文件树
         # - 本机入口不允许被“编辑配置/删除配置”等操作影响
-        local_label = self.tr("本机")
+        local_label = self.tr("本机终端")
         self.ui.treeWidget.addTopLevelItem(QTreeWidgetItem(0))
         bold_font = QFont()
         bold_font.setPointSize(14)

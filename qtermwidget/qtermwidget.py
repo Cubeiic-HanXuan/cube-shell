@@ -620,6 +620,9 @@ class QTermWidget(QWidget, QTermWidgetInterface):
         """设置终端背景模式"""
         from .terminal_display import BackgroundMode
         self.m_impl.m_terminalDisplay.setBackgroundMode(BackgroundMode(mode))
+
+    def setSuppressProgramBackgroundColors(self, suppress: bool):
+        self.m_impl.m_terminalDisplay.setSuppressProgramBackgroundColors(suppress)
     
     def setShellProgram(self, program: str):
         """设置shell程序"""

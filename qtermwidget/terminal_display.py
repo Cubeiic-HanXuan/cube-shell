@@ -461,6 +461,7 @@ class TerminalDisplay(QWidget):
         self._line_selection_mode = False
         self._preserve_line_breaks = False
         self._column_selection_mode = False
+        self._selection_cache = None
 
         # Scrollbar
         self._scrollbar_location = ScrollBarPosition.NoScrollBar
@@ -499,6 +500,7 @@ class TerminalDisplay(QWidget):
         self._opacity = 1.0
         self._background_image = QPixmap()
         self._background_mode = BackgroundMode.NONE
+        self._suppress_program_background_colors = False
 
         # Filter chain
         self._filter_chain = TerminalImageFilterChain()
@@ -673,6 +675,10 @@ class TerminalDisplay(QWidget):
     def setForegroundColor(self, color: QColor):
         """Sets the foreground color of the terminal display"""
         self._color_table[DEFAULT_FORE_COLOR].color = color
+        self.update()
+
+    def setSuppressProgramBackgroundColors(self, suppress: bool):
+        self._suppress_program_background_colors = bool(suppress)
         self.update()
 
     def setRandomSeed(self, seed: int):
@@ -1457,8 +1463,69 @@ class TerminalDisplay(QWidget):
 
         fm = QFontMetrics(self.font())
 
+        self._selection_cache = self._compute_selection_cache()
         for y in range(luy, rly + 1):
             self._draw_line(painter, y, lux, rlx, tlx, tly, fm)
+        self._selection_cache = None
+
+    def _compute_selection_cache(self):
+        sw = getattr(self, "_screenWindow", None)
+        if not sw:
+            return None
+
+        screen = getattr(sw, "_screen", None)
+        if not screen or not hasattr(screen, "isSelectionValid"):
+            return None
+
+        try:
+            if not screen.isSelectionValid():
+                return None
+        except Exception:
+            return None
+
+        try:
+            start_col, start_line = sw.getSelectionStart()
+            end_col, end_line = sw.getSelectionEnd()
+        except Exception:
+            return None
+
+        block = bool(getattr(screen, "blockSelectionMode", False))
+        if (start_line, start_col) <= (end_line, end_col):
+            top_col, top_line, bot_col, bot_line = start_col, start_line, end_col, end_line
+        else:
+            top_col, top_line, bot_col, bot_line = end_col, end_line, start_col, start_line
+
+        return {
+            "block": block,
+            "top_col": int(top_col),
+            "top_line": int(top_line),
+            "bot_col": int(bot_col),
+            "bot_line": int(bot_line),
+        }
+
+    def _selection_range_for_line(self, y: int):
+        cache = getattr(self, "_selection_cache", None)
+        if not cache:
+            return None
+
+        top_line = cache["top_line"]
+        bot_line = cache["bot_line"]
+        if y < top_line or y > bot_line:
+            return None
+
+        if cache["block"]:
+            left = min(cache["top_col"], cache["bot_col"])
+            right = max(cache["top_col"], cache["bot_col"])
+            return left, right
+
+        if top_line == bot_line:
+            return cache["top_col"], cache["bot_col"]
+
+        if y == top_line:
+            return cache["top_col"], self._usedColumns - 1
+        if y == bot_line:
+            return 0, cache["bot_col"]
+        return 0, self._usedColumns - 1
 
     def _draw_line(self, painter: QPainter, y: int, lux: int, rlx: int, tlx: int, tly: int, fm: QFontMetrics):
         """Draw a single line of text - FIXED VERSION"""
@@ -1482,8 +1549,14 @@ class TerminalDisplay(QWidget):
             text_width = 0
             current_attrs = char
             start_x = x
+            sel_range = self._selection_range_for_line(y)
+            current_selected = bool(sel_range and sel_range[0] <= start_x <= sel_range[1])
 
             while x <= rlx and line_start + x < len(self._image):
+                selected = bool(sel_range and sel_range[0] <= x <= sel_range[1])
+                if selected != current_selected:
+                    break
+
                 char = self._image[line_start + x]
 
                 # 修复：更严格的属性比较
@@ -1528,7 +1601,7 @@ class TerminalDisplay(QWidget):
                     self._fontHeight
                 )
 
-                self._draw_text_fragment(painter, text_area, text, current_attrs, False)
+                self._draw_text_fragment(painter, text_area, text, current_attrs, current_selected)
 
     def _draw_text_fragment(self, painter: QPainter, rect: QRect, text: str, style: Character,
                             invert_colors: bool = False):
@@ -1538,28 +1611,44 @@ class TerminalDisplay(QWidget):
         # 基础前景/背景色
         fg_color = style.foregroundColor.color(self._color_table)
         bg_color = style.backgroundColor.color(self._color_table)
-
-        # 选择反色：当字符带有RE_REVERSE并且控件拥有焦点时，交换前景/背景
-        is_reverse = bool(getattr(style, 'rendition', 0) & RE_REVERSE)
-        apply_reverse = (invert_colors or is_reverse) and self.hasFocus()
-
-        # 这里要区分“属性里的前景/背景色”和“最终显示出来的前景/背景色”：
-        # - 当开启 RE_REVERSE（反显）或上层要求 invert_colors 时，实际显示需要交换前景/背景
-        # - 后续绘制背景、光标、文字都必须基于 effective_*，否则就会出现：
-        #   - 背景按反显画成绿色
-        #   - 光标仍然用原始 fg_color 填充
-        #   - 两者同色导致光标看起来“被背景盖住/消失”
-        effective_fg, effective_bg = (bg_color, fg_color) if apply_reverse else (fg_color, bg_color)
-
-        # 绘制背景：仅在需要时填充，避免整行/整屏闪烁
-        fill_color = effective_bg
         default_bg = self._color_table[DEFAULT_BACK_COLOR].color
-        if apply_reverse or fill_color != default_bg:
-            self._draw_background(painter, rect, fill_color, False)
+
+        if invert_colors:
+            selection_bg = self.palette().highlight().color()
+            selection_fg = self.palette().highlightedText().color()
+            self._draw_background(painter, rect, selection_bg, False)
+            effective_fg, effective_bg = selection_fg, selection_bg
+        else:
+            # 选择反色：当字符带有RE_REVERSE并且控件拥有焦点时，交换前景/背景
+            apply_reverse = self._should_apply_reverse(
+                invert_colors,
+                getattr(style, "rendition", 0),
+                self.hasFocus(),
+                getattr(self, "_suppress_program_background_colors", False),
+            )
+
+            effective_fg, effective_bg = (bg_color, fg_color) if apply_reverse else (fg_color, bg_color)
+
+            # 绘制背景：当启用“抑制程序背景色”时，仅保留选择（invert_colors）等显示层背景。
+            fill_color = effective_bg
+            if getattr(self, "_suppress_program_background_colors", False):
+                fill_color = default_bg
+
+            if fill_color != default_bg:
+                self._draw_background(painter, rect, fill_color, False)
 
         # 处理光标（简化版本）
         # 绘制文本（简化版本）
         text_color = effective_fg
+        if getattr(self, "_suppress_program_background_colors", False) and (not invert_colors):
+            # 一些配色/语法组只通过“背景色”表达高亮（前景仍是默认色）。
+            # 在抑制背景后，这类高亮会完全消失，甚至可能因为前景与默认背景对比不足而“看不见”。
+            # 这里将“原本的背景色”降级为“前景色”，用来保留高亮信息但不绘制背景块。
+            if effective_bg.isValid() and effective_bg != default_bg:
+                if abs(self._brightness(text_color) - self._brightness(default_bg)) < 50:
+                    text_color = effective_bg
+            if abs(self._brightness(text_color) - self._brightness(default_bg)) < 20:
+                text_color = self._best_bw_for_bg(default_bg)
         if hasattr(style, 'rendition') and (style.rendition & RE_CURSOR) and self.hasFocus() and (not self._cursor_blinking):
             # 终端模拟层会在“光标所在的单元格”打上 RE_CURSOR 标记。
             # 该单元格的绘制顺序通常是：背景 -> 光标 -> 文本。
@@ -1620,6 +1709,12 @@ class TerminalDisplay(QWidget):
         # 绿色权重最高，其次红色，再到蓝色。
         # 这不是严格的 sRGB 相对亮度公式，但足够用来做“光标可见性”的快速判断。
         return 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
+
+    @staticmethod
+    def _should_apply_reverse(invert_colors: bool, rendition: int, has_focus: bool, suppress_bg: bool) -> bool:
+        if not has_focus:
+            return False
+        return bool(invert_colors or (rendition & RE_REVERSE))
 
     @staticmethod
     def _best_bw_for_bg(bg: QColor) -> QColor:
