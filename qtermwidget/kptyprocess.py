@@ -471,6 +471,12 @@ class KPtyProcess(KProcess):
                 attrs = KPtyProcess._configure_ssh_tty_attrs(attrs)
                 termios.tcsetattr(0, termios.TCSANOW, attrs)
 
+                try:
+                    if os.path.isdir(self.workingDirectory()):
+                        os.chdir(self.workingDirectory())
+                except Exception:
+                    pass
+
             except Exception as e:
                 # SSH会话设置失败是严重问题，但我们仍然尝试继续
                 import sys
