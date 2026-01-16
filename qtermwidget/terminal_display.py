@@ -1640,6 +1640,9 @@ class TerminalDisplay(QWidget):
         # 处理光标（简化版本）
         # 绘制文本（简化版本）
         text_color = effective_fg
+        if (not invert_colors) and effective_bg.isValid():
+            if abs(self._brightness(text_color) - self._brightness(effective_bg)) < 20:
+                text_color = self._best_bw_for_bg(effective_bg)
         if getattr(self, "_suppress_program_background_colors", False) and (not invert_colors):
             # 一些配色/语法组只通过“背景色”表达高亮（前景仍是默认色）。
             # 在抑制背景后，这类高亮会完全消失，甚至可能因为前景与默认背景对比不足而“看不见”。
@@ -1712,8 +1715,6 @@ class TerminalDisplay(QWidget):
 
     @staticmethod
     def _should_apply_reverse(invert_colors: bool, rendition: int, has_focus: bool, suppress_bg: bool) -> bool:
-        if not has_focus:
-            return False
         return bool(invert_colors or (rendition & RE_REVERSE))
 
     @staticmethod

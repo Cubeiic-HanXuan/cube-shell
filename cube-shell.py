@@ -41,7 +41,7 @@ if platform.system() == "Darwin":
 from PySide6.QtCore import QTimer, Signal, Qt, QPoint, QRect, QEvent, QObject, Slot, QUrl, QCoreApplication, \
     QSize, QThread, QMetaObject, Q_ARG, QProcessEnvironment
 from PySide6.QtGui import QColor
-from PySide6.QtGui import QIcon, QAction, QCursor, QCloseEvent, QInputMethodEvent, QPixmap, \
+from PySide6.QtGui import QIcon, QAction, QCursor, QCloseEvent, QInputMethodEvent, QPixmap, QKeySequence, QShortcut, \
     QDragEnterEvent, QDropEvent, QFont, QFontDatabase, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QDialog, QMessageBox, QTreeWidgetItem, \
     QInputDialog, QFileDialog, QTreeWidget, QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QTableWidgetItem, \
@@ -273,8 +273,7 @@ class MainDialog(QMainWindow):
 
         self.ui.discButton.clicked.connect(self.disc_off)
         self.ui.theme.clicked.connect(self.theme)
-        # 🔧 连接主题切换信号
-        self.themeChanged.connect(self.on_system_theme_changed)
+
         self.ui.treeWidget.customContextMenuRequested.connect(self.treeRight)
         self.ui.treeWidget.doubleClicked.connect(self.cd)
         self.ui.ShellTab.currentChanged.connect(self.shell_tab_current_changed)
@@ -414,24 +413,24 @@ class MainDialog(QMainWindow):
                 orig_bar = getattr(self.ui, bar_name, None)
                 if orig_bar:
                     orig_bar.setVisible(False)
-                    orig_bar.setParent(monitor_tab) # Reparent to keep alive
+                    orig_bar.setParent(monitor_tab)  # Reparent to keep alive
                 if orig_label:
                     orig_label.setVisible(False)
                     orig_label.setParent(monitor_tab)
 
                 container = QFrame()
-                #container.setFixedWidth(80)
+                # container.setFixedWidth(80)
                 vbox = QVBoxLayout(container)
                 vbox.setContentsMargins(0, 0, 0, 0)
                 vbox.setSpacing(4)
 
                 # Ring Gauge
                 ring = RingGauge(container, color=color, label=title)
-                #ring.setFixedSize(80, 80)
+                # ring.setFixedSize(80, 80)
 
                 # Sparkline (Miniature below ring)
                 spark = SparklineWidget(container)
-                #spark.setFixedHeight(20)
+                # spark.setFixedHeight(20)
                 spark.setLineColor(QColor(color))
 
                 vbox.addWidget(ring, 0, Qt.AlignCenter)
@@ -472,7 +471,8 @@ class MainDialog(QMainWindow):
                     up_val.setParent(container)
                     up_val.setFrame(False)
                     up_val.setAttribute(Qt.WA_TransparentForMouseEvents)
-                    up_val.setStyleSheet("background: transparent; color: " + ("#2D3748" if is_light else "#E1E4E8") + "; font-weight: bold; border: none; font-family: 'Consolas', 'Courier New', monospace;")
+                    up_val.setStyleSheet("background: transparent; color: " + (
+                        "#2D3748" if is_light else "#E1E4E8") + "; font-weight: bold; border: none; font-family: 'Consolas', 'Courier New', monospace;")
                     # up_val.setFixedWidth(120)
                     # up_val.setFixedHeight(24)
                     up_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -496,7 +496,8 @@ class MainDialog(QMainWindow):
                     down_val.setParent(container)
                     down_val.setFrame(False)
                     down_val.setAttribute(Qt.WA_TransparentForMouseEvents)
-                    down_val.setStyleSheet("background: transparent; color: " + ("#2D3748" if is_light else "#E1E4E8") + "; font-weight: bold; border: none; font-family: 'Consolas', 'Courier New', monospace;")
+                    down_val.setStyleSheet("background: transparent; color: " + (
+                        "#2D3748" if is_light else "#E1E4E8") + "; font-weight: bold; border: none; font-family: 'Consolas', 'Courier New', monospace;")
                     # down_val.setFixedWidth(120)
                     # down_val.setFixedHeight(24)
                     down_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -511,7 +512,7 @@ class MainDialog(QMainWindow):
                 if down_val: down_layout.addWidget(down_val)
                 vbox.addLayout(down_layout)
 
-                layout.addWidget(container, 2) # Stretch factor equal to system section
+                layout.addWidget(container, 2)  # Stretch factor equal to system section
 
             # --- System Info Section ---
             def create_sys_section(layout):
@@ -539,7 +540,7 @@ class MainDialog(QMainWindow):
                     if lbl and val:
                         lbl.setParent(container)
                         val.setParent(container)
-                        lbl.setVisible(False) # Hide original label text, use icon
+                        lbl.setVisible(False)  # Hide original label text, use icon
 
                         icon = QLabel(icon_char, container)
                         icon.setStyleSheet("color: #A0AEC0; font-size: 14px;")
@@ -547,7 +548,8 @@ class MainDialog(QMainWindow):
                         val.setFrame(False)
                         val.setAttribute(Qt.WA_TransparentForMouseEvents)
                         # Monospace font for values for better alignment and tech feel
-                        val.setStyleSheet("background: transparent; color: " + ("#4A5568" if is_light else "#CBD5E0") + "; border: none; font-family: 'Consolas', 'Courier New', monospace;")
+                        val.setStyleSheet("background: transparent; color: " + (
+                            "#4A5568" if is_light else "#CBD5E0") + "; border: none; font-family: 'Consolas', 'Courier New', monospace;")
                         val.setFixedHeight(20)
 
                         info_grid.addWidget(icon, row, 0)
@@ -558,7 +560,7 @@ class MainDialog(QMainWindow):
                 add_info_row(2, "label_10", "kernelVersion", "#")
 
                 vbox.addLayout(info_grid)
-                layout.addWidget(container, 2) # Higher stretch factor
+                layout.addWidget(container, 2)  # Higher stretch factor
 
             # Build Layout
             # Left: Rings
@@ -586,7 +588,7 @@ class MainDialog(QMainWindow):
 
             tab_widget.addTab(monitor_tab, self.tr("远程监控"))
             tab_widget.addTab(process_tab, self.tr("进程管理"))
-            
+
             # Default select Remote Monitor tab
             tab_widget.setCurrentWidget(monitor_tab)
 
@@ -606,7 +608,7 @@ class MainDialog(QMainWindow):
             main_splitter = getattr(self.ui, "splitter", None)
             if main_splitter and main_splitter.count() >= 2:
                 sizes = main_splitter.sizes()
-                if sizes and sizes[1] > 180: # Compact height
+                if sizes and sizes[1] > 180:  # Compact height
                     sizes[0] = sizes[0] + (sizes[1] - 180)
                     sizes[1] = 180
                     main_splitter.setSizes(sizes)
@@ -1541,6 +1543,45 @@ class MainDialog(QMainWindow):
         self.initSftpSignal.emit()
         return terminal.getIsRunning()
 
+    def _attach_ssh_auto_responder(self, terminal, password: str, timeout_ms: int = 5000) -> None:
+        if not terminal or not password:
+            return
+        if not hasattr(terminal, "receivedData") or not hasattr(terminal, "sendText"):
+            return
+
+        state = {"done": False, "pw": False, "yes": False}
+        buf = {"text": ""}
+
+        def cleanup():
+            try:
+                terminal.receivedData.disconnect(on_chunk)
+            except Exception:
+                pass
+
+        def on_chunk(chunk: str):
+            if state["done"]:
+                return
+            try:
+                buf["text"] = (buf["text"] + (chunk or ""))[-4096:]
+                text = buf["text"].lower()
+                if (not state["yes"]) and ("are you sure you want to continue connecting" in text):
+                    state["yes"] = True
+                    terminal.sendText("yes\n")
+                    return
+                if (not state["pw"]) and re.search(r"password[^\n]{0,80}:", text):
+                    state["pw"] = True
+                    state["done"] = True
+                    cleanup()
+                    terminal.sendText(password + "\n")
+            except Exception:
+                pass
+
+        try:
+            terminal.receivedData.connect(on_chunk)
+            QTimer.singleShot(int(timeout_ms), cleanup)
+        except Exception:
+            pass
+
     def _connect_with_qtermwidget(self, host, port, username, password, key_type, key_file, terminal) -> int:
         """使用 QTermWidget 直接处理 SSH 连接"""
         try:
@@ -1599,6 +1640,8 @@ class MainDialog(QMainWindow):
 
             if username:
                 ssh_args.extend(["-o", "StrictHostKeyChecking=no",  # 跳过主机密钥检查
+                                 "-o", "PreferredAuthentications=password",
+                                 "-o", "PubkeyAuthentication=no",
                                  "-o", "UserKnownHostsFile=/dev/null"  # 不保存主机密钥文件
                                  ])
                 ssh_args.append(f"{username}@{host}")
@@ -1607,23 +1650,19 @@ class MainDialog(QMainWindow):
 
             terminal.setShellProgram(ssh_command)
             terminal.setArgs(ssh_args)
+            if not key_type and not key_file and password:
+                self._attach_ssh_auto_responder(terminal, password, timeout_ms=5000)
+
             terminal.startShellProgram()
 
-            # 🔧 修复：在启动 Shell 后重新应用主题，防止被重置
-            if hasattr(terminal, 'current_theme_name'):
-                terminal.setColorScheme(terminal.current_theme_name)
-            else:
-                terminal.setColorScheme("Ubuntu")
+            # # 🔧 修复：在启动 Shell 后重新应用主题，防止被重置
+            # if hasattr(terminal, 'current_theme_name'):
+            #     terminal.setColorScheme(terminal.current_theme_name)
+            # else:
+            #     terminal.setColorScheme("Ubuntu")
 
             if hasattr(terminal, "setSuppressProgramBackgroundColors"):
                 terminal.setSuppressProgramBackgroundColors(True)
-
-            if not key_type and not key_file:
-                def auto_input_password():
-                    terminal.sendText(password + "\n")
-
-                # 等待1.5秒让SSH显示密码提示，然后自动输入
-                QTimer.singleShot(1200, auto_input_password)
 
             # 为了支持 SFTP 等功能，建立后台 SSH 连接
             util.logger.info("建立后台 SSH 连接用于 SFTP...")
@@ -3559,9 +3598,6 @@ class MainDialog(QMainWindow):
         # 显示消息框
         msg_box.exec()
 
-    # def inputMethodQuery(self, a0):
-    #     pass
-
     # 设置主题
     def setDarkTheme(self):
         # self.app.setStyleSheet(qdarkstyle.load_stylesheet(palette=DarkPalette))
@@ -3603,26 +3639,6 @@ class MainDialog(QMainWindow):
         util.write_json(abspath("theme.json"), data)
         util.THEME = data
         self.applyAppearance(data["appearance"])
-
-    def _reapply_all_terminal_themes(self):
-        for index in range(self.ui.ShellTab.count()):
-            terminal = self.get_text_browser_from_tab(index)
-            if not terminal or not hasattr(terminal, 'setColorScheme'):
-                continue
-            if hasattr(terminal, '_schedule_reapply_color_scheme'):
-                terminal._schedule_reapply_color_scheme()
-            elif hasattr(terminal, 'current_theme_name'):
-                terminal.setColorScheme(terminal.current_theme_name)
-            else:
-                terminal.setColorScheme("Ubuntu")
-
-    def on_system_theme_changed(self, is_dark_theme):
-        """系统主题切换时，重新应用终端主题"""
-        try:
-            QTimer.singleShot(0, self._reapply_all_terminal_themes)
-            QTimer.singleShot(50, self._reapply_all_terminal_themes)
-        except Exception as e:
-            util.logger.error(f"Failed to changed system theme: {e}")
 
     def on_ssh_failed(self, error_msg):
         """SSH连接失败回调"""
@@ -3769,37 +3785,6 @@ class SSHConnector(QObject):
             self.connected.emit(ssh_conn)
         except Exception as e:
             self.failed.emit(str(e))
-
-
-# 移除不再需要的类
-# class ConnectSignals(QObject):
-#     """用于 Runnable 的信号发射器"""
-#     connected = Signal(object)
-#     failed = Signal(str)
-
-
-# class ConnectRunnable(PySide6.QtCore.QRunnable):
-#     """SSH 连接任务 - 独立于 UI 线程运行"""
-#
-#     def __init__(self, host, port, username, password, key_type, key_file):
-#         super().__init__()
-#         self.host = host
-#         self.port = port
-#         self.username = username
-#         self.password = password
-#         self.key_type = key_type
-#         self.key_file = key_file
-#         self.signals = ConnectSignals()
-#         self.setAutoDelete(True)  # 任务完成后自动删除
-#
-#     def run(self):
-#         try:
-#             # 执行耗时的连接操作
-#             ssh_conn = SshClient(self.host, self.port, self.username, self.password, self.key_type, self.key_file)
-#             ssh_conn.connect()
-#             self.signals.connected.emit(ssh_conn)
-#         except Exception as e:
-#             self.signals.failed.emit(str(e))
 
 
 # 权限确认
@@ -4976,33 +4961,33 @@ class SSHQTermWidget(QTermWidget):
 
         # 初始化主题
         self.setColorScheme(self.current_theme_name)
+        # 开启抑制程序背景色 （让应用的背景色不要覆盖终端背景，只保留前景色/少量高亮信息）。
+        if hasattr(self, "setSuppressProgramBackgroundColors"):
+            self.setSuppressProgramBackgroundColors(True)
 
-    def _schedule_reapply_color_scheme(self):
-        if self._theme_reapply_pending:
-            return
-        self._theme_reapply_pending = True
+        sys_name = platform.system()
+        if sys_name == "Darwin":
+            self._shortcut_copy = QShortcut(QKeySequence.Copy, self)
+            self._shortcut_copy.setContext(Qt.WidgetWithChildrenShortcut)
+            self._shortcut_copy.activated.connect(self._on_copy_shortcut)
 
-        def _do():
-            try:
-                QTermWidget.setColorScheme(self, self.current_theme_name)
-            finally:
-                self._theme_reapply_pending = False
+            self._shortcut_paste = QShortcut(QKeySequence.Paste, self)
+            self._shortcut_paste.setContext(Qt.WidgetWithChildrenShortcut)
+            self._shortcut_paste.activated.connect(self._on_paste_shortcut)
+        else:
+            self._shortcut_copy = QShortcut(QKeySequence("Ctrl+Shift+C"), self)
+            self._shortcut_copy.setContext(Qt.WidgetWithChildrenShortcut)
+            self._shortcut_copy.activated.connect(self._on_copy_shortcut)
 
-        QTimer.singleShot(0, _do)
-
-    def changeEvent(self, event):
-        super().changeEvent(event)
-        if event.type() in (QEvent.StyleChange, QEvent.PaletteChange):
-            self._schedule_reapply_color_scheme()
+            self._shortcut_paste = QShortcut(QKeySequence("Ctrl+Shift+V"), self)
+            self._shortcut_paste.setContext(Qt.WidgetWithChildrenShortcut)
+            self._shortcut_paste.activated.connect(self._on_paste_shortcut)
 
     def eventFilter(self, obj, event):
         """事件过滤：处理 Ctrl+滚轮 缩放等终端显示层事件"""
         # Check if the event is from the internal terminal display
         if hasattr(self, 'm_impl') and hasattr(self.m_impl,
                                                'm_terminalDisplay') and obj == self.m_impl.m_terminalDisplay:
-            if event.type() in (QEvent.StyleChange, QEvent.PaletteChange):
-                self._schedule_reapply_color_scheme()
-                return False
             if event.type() == QEvent.Wheel:
                 if event.modifiers() & Qt.ControlModifier:
                     # Forward to main window for zoom
@@ -5046,6 +5031,19 @@ class SSHQTermWidget(QTermWidget):
                 except Exception:
                     pass
         return super().eventFilter(obj, event)
+
+    def _on_copy_shortcut(self):
+        try:
+            if self.selectedText(True):
+                self.copyClipboard()
+        except Exception:
+            pass
+
+    def _on_paste_shortcut(self):
+        try:
+            self.pasteClipboard()
+        except Exception:
+            pass
 
     def _on_term_key_pressed(self, event):
         """
@@ -5337,12 +5335,6 @@ class SSHQTermWidget(QTermWidget):
         self.current_theme_name = name
         super().setColorScheme(name)
 
-    def resizeEvent(self, event):
-        """重写 resizeEvent，在调整大小后恢复主题"""
-        # 延迟恢复主题，确保底层重绘完成后应用
-        if hasattr(self, 'current_theme_name'):
-            super().setColorScheme(self.current_theme_name)
-
     def setup_syntax_highlighting(self):
         """设置语法高亮支持"""
 
@@ -5577,24 +5569,6 @@ class SSHQTermWidget(QTermWidget):
         except Exception:
             pass
 
-    def _validate_command(self, cmdline: str) -> str:
-        s = (cmdline or "").strip()
-        if not s:
-            return ""
-        cmd = s.split()[0]
-        if cmd in set(self._prompt_commands):
-            return ""
-        return "unknown_command"
-
-    def _get_completion(self) -> str:
-        s = (self._input_buffer or "").lstrip()
-        if not s:
-            return ""
-        sugg = self._compute_suggestions(s)
-        if not sugg:
-            return ""
-        return sugg[0]
-
     def _show_suggestions_menu(self):
         """计算候选并在光标附近弹出提示窗口。"""
         text = (self._input_buffer or "").lstrip()
@@ -5624,46 +5598,15 @@ class SSHQTermWidget(QTermWidget):
         try:
             # 创建右键菜单，不依赖filterActions
             menu = QMenu(self)
-            self._apply_dark_menu_style(menu)
 
             # 添加自定义功能
             self._add_custom_actions(menu)
 
             # 显示菜单
             menu.exec(event.globalPos())
-            print("显示了自定义右键菜单")
 
         except Exception as e:
             util.logger.error(f"右键菜单创建失败: {e}")
-
-    def _apply_dark_menu_style(self, menu):
-        """应用暗色主题菜单样式"""
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: #2d2d30;
-                color: #d4d4d4;
-                border: 1px solid #3c3c3c;
-                border-radius: 3px;
-                padding: 2px;
-            }
-            QMenu::item {
-                padding: 8px 16px;
-                border-radius: 2px;
-                margin: 1px;
-            }
-            QMenu::item:selected {
-                background-color: #094771;
-                color: white;
-            }
-            QMenu::separator {
-                height: 1px;
-                background-color: #3c3c3c;
-                margin: 4px 0px;
-            }
-            QMenu::icon {
-                margin-right: 8px;
-            }
-        """)
 
     def _add_custom_actions(self, menu):
         """添加自定义动作到菜单"""
@@ -5671,14 +5614,14 @@ class SSHQTermWidget(QTermWidget):
         # 复制操作 - 使用QTermWidget内置方法
         copy_action = QAction(self._action_icons['copy'], "复制", self)
         copy_action.setIconVisibleInMenu(True)
-        copy_action.setShortcut("Ctrl+Shift+C")
+        # copy_action.setShortcut("Ctrl+C")
         copy_action.triggered.connect(self.copyClipboard)
         menu.addAction(copy_action)
 
         # 粘贴操作 - 使用QTermWidget内置方法
         paste_action = QAction(self._action_icons['paste'], "粘贴", self)
         paste_action.setIconVisibleInMenu(True)
-        paste_action.setShortcut("Ctrl+Shift+V")
+        # paste_action.setShortcut("Ctrl+V")
         paste_action.triggered.connect(self.pasteClipboard)
         paste_action.setEnabled(bool(self._clipboard.text()))
         menu.addAction(paste_action)

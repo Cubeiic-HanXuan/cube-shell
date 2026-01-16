@@ -14,6 +14,10 @@ import sys
 import errno
 import threading
 
+MAX_READ_PER_ACTIVATION = 256 * 1024
+READ_CHUNK_SIZE = 64 * 1024
+MAX_OUTPUT_BUFFER_BYTES = 1024 * 1024
+
 # Platform detection
 IS_WINDOWS = sys.platform == 'win32'
 
@@ -300,8 +304,7 @@ class KPtyProcess(KProcess):
             # 关键：设置TERM环境变量，这对于SSH会话正确初始化至关重要
             env_dict['TERM'] = 'xterm-256color'  # 强制设置，不检查是否已存在
 
-            # SSH兼容性环境变量 - 这些是SSH会话正常工作的关键
-            env_dict['COLORTERM'] = 'truecolor'
+            env_dict['COLORTERM'] = ''
             env_dict['LANG'] = env_dict.get('LANG', 'en_US.UTF-8')  # 确保语言环境设置
             env_dict['LC_ALL'] = env_dict.get('LC_ALL', 'en_US.UTF-8')  # 完整的语言环境
 
@@ -330,7 +333,8 @@ class KPtyProcess(KProcess):
 
             # 确保输出不被缓冲 - SSH会话的重要设置
             env_dict['PYTHONUNBUFFERED'] = '1'
-            env_dict['FORCE_COLOR'] = '1'  # 强制颜色输出
+            if 'FORCE_COLOR' in os.environ and 'FORCE_COLOR' not in env_dict:
+                env_dict['FORCE_COLOR'] = os.environ.get('FORCE_COLOR', '')
 
             # 清理可能干扰SSH的环境变量
             for problematic_var in ['TMUX', 'TMUX_PANE', 'TERM_SESSION_ID']:
@@ -551,45 +555,54 @@ class KPtyProcess(KProcess):
     def _read_from_pty(self):
         """从PTY读取数据"""
         try:
-            # 尝试非阻塞读取
-            try:
-                # 读取最多4096字节
-                data = os.read(self._masterFd, 4096)
-            except OSError as e:
-                # EAGAIN/EWOULDBLOCK: 暂时没有数据，直接返回
-                if e.errno in [errno.EAGAIN, errno.EWOULDBLOCK]:
-                    return
-                # EBADF: 文件描述符已关闭，直接返回
-                elif e.errno == errno.EBADF:
+            if self._notifier:
+                try:
+                    self._notifier.setEnabled(False)
+                except Exception:
+                    pass
+
+            total = 0
+            while total < MAX_READ_PER_ACTIVATION:
+                try:
+                    data = os.read(self._masterFd, READ_CHUNK_SIZE)
+                except OSError as e:
+                    if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                        break
+                    if e.errno == errno.EBADF:
+                        self._handle_process_exit()
+                        return
                     self._handle_process_exit()
                     return
-                # 其他错误（如EIO）：通常表示子进程已退出
-                else:
+
+                if not data:
                     self._handle_process_exit()
                     return
 
-            # 读取到0字节（EOF），表示子进程已关闭写端
-            if not data:
-                self._handle_process_exit()
-                return
+                if isinstance(data, str):
+                    data = data.encode('utf-8')
 
-            # 确保数据是bytes类型
-            if isinstance(data, str):
-                data = data.encode('utf-8')
+                total += len(data)
 
-            # 发出信号通知有新数据
-            self.readyReadStandardOutput.emit()
-            self.receivedData.emit(data, len(data))
+                self.readyReadStandardOutput.emit()
+                self.receivedData.emit(data, len(data))
 
-            # 缓冲数据（供同步读取使用）
-            if not hasattr(self, '_output_buffer'):
-                self._output_buffer = b''
-            self._output_buffer += data
+                if not hasattr(self, '_output_buffer'):
+                    self._output_buffer = bytearray()
+                self._output_buffer.extend(data)
+                if len(self._output_buffer) > MAX_OUTPUT_BUFFER_BYTES:
+                    overflow = len(self._output_buffer) - MAX_OUTPUT_BUFFER_BYTES
+                    del self._output_buffer[:overflow]
 
         except Exception as e:
             print(f"❌ PTY读取异常: {e}")
             # 捕获所有未预期的异常，防止崩溃
             pass
+        finally:
+            if self._notifier:
+                try:
+                    self._notifier.setEnabled(True)
+                except Exception:
+                    pass
 
     def _handle_process_exit(self):
         """处理进程退出"""
@@ -665,9 +678,9 @@ class KPtyProcess(KProcess):
 
     def readAllStandardOutput(self):
         """读取所有标准输出"""
-        if hasattr(self, '_output_buffer'):
-            data = self._output_buffer
-            self._output_buffer = b''
+        if hasattr(self, '_output_buffer') and self._output_buffer:
+            data = bytes(self._output_buffer)
+            self._output_buffer = bytearray()
             return data
         return b''
 

@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import signal
+import codecs
 from enum import IntEnum
 from pathlib import Path
 from typing import List, Optional, Dict
@@ -124,6 +125,7 @@ class Session(QObject):
         SHELL环境变量中指定的程序。
         """
         super().__init__(parent)
+        self._received_text_decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
 
         # 基本成员变量 - 严格对应C++版本
         self._uniqueIdentifier = 0  # 对应C++: int _uniqueIdentifier
@@ -1024,7 +1026,7 @@ class Session(QObject):
                             # 10ms是一个折中值 -> 增加到 100ms 以确保进程退出
                             if hasattr(self._shellProcess, 'waitForFinished'):
                                 self._shellProcess.waitForFinished(100)
-                            
+
                         # 确保状态更新
                         if hasattr(self._shellProcess, 'state') and self._shellProcess.state() != QProcess.ProcessState.NotRunning:
                              try:
@@ -1147,8 +1149,7 @@ class Session(QObject):
 
         # 发出receivedData信号 - 修复：使用UTF-8编码支持SSH
         try:
-            # 优先使用UTF-8，SSH连接通常使用UTF-8编码
-            text = buffer[:length].decode('utf-8', errors='replace')
+            text = self._received_text_decoder.decode(buffer[:length], final=False)
             self.receivedData.emit(text)
         except Exception:
             try:

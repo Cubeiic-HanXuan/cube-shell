@@ -121,10 +121,12 @@ class SshClient(object):
         try:
             if self.private_key:
                 self.conn.connect(hostname=self.host, port=self.port, username=self.username, pkey=self.private_key,
-                                  timeout=5, banner_timeout=15)
+                                  timeout=5, banner_timeout=15, auth_timeout=10, allow_agent=False,
+                                  look_for_keys=False)
             else:
                 self.conn.connect(hostname=self.host, port=self.port, username=self.username,
-                                  password=self.password, timeout=5, banner_timeout=15)
+                                  password=self.password, timeout=5, banner_timeout=15, auth_timeout=10,
+                                  allow_agent=False, look_for_keys=False)
 
             # 连接成功后初始化
             self.transport = self.conn.get_transport()

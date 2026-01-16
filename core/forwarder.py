@@ -20,9 +20,6 @@ class ForwarderManager:
         if tunnel_id in self.tunnels:
             tunnel = self.tunnels[tunnel_id]
             tunnel.stop()
-
-            # 给隧道一些时间来完全关闭
-            time.sleep(1)
             # 如果 SSH 客户端没有其他隧道关联，则关闭 SSH 客户端
             self.close_ssh_client(tunnel.ssh_client)
             del self.tunnels[tunnel_id]
@@ -53,10 +50,20 @@ class ForwarderManager:
         ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
         try:
+            connect_kwargs = dict(
+                hostname=ssh_host,
+                port=ssh_port,
+                username=ssh_user,
+                timeout=5,
+                banner_timeout=15,
+                auth_timeout=10,
+                allow_agent=False,
+                look_for_keys=False,
+            )
             if private_key:
-                ssh_client.connect(hostname=ssh_host, port=ssh_port, username=ssh_user, pkey=private_key)
+                ssh_client.connect(pkey=private_key, **connect_kwargs)
             else:
-                ssh_client.connect(hostname=ssh_host, port=ssh_port, username=ssh_user, password=ssh_password)
+                ssh_client.connect(password=ssh_password, **connect_kwargs)
 
             transport = ssh_client.get_transport()
 

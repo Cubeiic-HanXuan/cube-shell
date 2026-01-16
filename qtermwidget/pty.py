@@ -444,8 +444,7 @@ class Pty(KPtyProcess):
 
         # 对应C++: setEnv(QLatin1String("WINDOWID"), QString::number(winid))
         self.setEnv("WINDOWID", str(winid))
-        # 对应C++: setEnv(QLatin1String("COLORTERM"), QLatin1String("truecolor"))
-        self.setEnv("COLORTERM", "truecolor")
+        self.setEnv("COLORTERM", "", True)
 
         # 对应C++语言环境修复
         # 对应C++: setEnv(QLatin1String("LANGUAGE"),QString(),false)
@@ -602,7 +601,10 @@ class Pty(KPtyProcess):
         #     suspend()
         # else:
         #     resume()
-        pass
+        try:
+            super().lockPty(lock)
+        except Exception:
+            pass
 
     @Slot(bytes, int)
     def sendData(self, data: bytes, length: int = None):
