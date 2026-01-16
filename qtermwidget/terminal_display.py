@@ -439,7 +439,6 @@ class TerminalDisplay(QWidget):
         self._margin = 1
         self._topMargin = 1
         self._leftMargin = 1
-        self._drawTextTestFlag = False
         self._drawTextAdditionHeight = 0
 
         # Layout
@@ -505,6 +504,18 @@ class TerminalDisplay(QWidget):
         # Filter chain
         self._filter_chain = TerminalImageFilterChain()
         self._mouse_over_hotspot_area = QRegion()
+        self._pending_update_image = False
+        self._pending_update_line_properties = False
+        self._pending_update_filters = False
+        self._output_update_interval_ms = 16
+        self._filter_update_interval_ms = 200
+        self._output_update_timer = QTimer(self)
+        self._output_update_timer.setSingleShot(True)
+        self._output_update_timer.timeout.connect(self._flush_pending_output_updates)
+        self._filter_update_timer = QTimer(self)
+        self._filter_update_timer.setSingleShot(True)
+        self._filter_update_timer.timeout.connect(self._flush_pending_filter_updates)
+        self._cjk_font_family = None
 
         # Cursor - 修复：与C++一致的光标设置
         self._cursor_shape = KeyboardCursorShape.BlockCursor
@@ -538,6 +549,104 @@ class TerminalDisplay(QWidget):
 
         # Initialize the widget
         self._init_widget()
+
+    @Slot()
+    def _on_output_changed(self):
+        """
+        终端内容发生变化（有新输出/屏幕缓冲变化）时的入口。
+
+        这里不直接调用 updateImage/processFilters，而是仅设置“待处理标记”并调度定时器：
+        - 输出往往是突发的（例如一次性打印很多行），如果每次信号都立刻重绘，会导致 UI 线程频繁做重复工作；
+        - 通过定时器把短时间内的多次变化合并成一次批处理更新（debounce/coalesce），显著降低卡顿概率。
+        """
+        self._pending_update_line_properties = True
+        self._pending_update_image = True
+        self._schedule_output_update()
+        self._schedule_filter_update()
+
+    @Slot()
+    def _on_selection_changed(self):
+        """
+        选择区域变化时的入口。
+
+        选择变化需要刷新画面（高亮/反色），但不需要更新行属性与滤镜链，
+        因此只标记 image 更新并走输出更新定时器做合并刷新。
+        """
+        self._pending_update_image = True
+        self._schedule_output_update()
+
+    @Slot(int)
+    def _on_scrolled(self, _line: int):
+        """
+        滚动（视口变化）时的入口。
+
+        滚动会改变可见区域，热点/链接高亮等滤镜的命中结果可能随之变化，
+        因此只调度滤镜更新（不强制立即重绘）。
+        """
+        self._schedule_filter_update()
+
+    def _schedule_output_update(self):
+        """
+        调度一次“输出相关更新”批处理。
+
+        该定时器用于合并短时间内频繁发生的输出/选择变化，最终在
+        _flush_pending_output_updates() 中统一执行 updateLineProperties/updateImage。
+        """
+        if not self._output_update_timer.isActive():
+            self._output_update_timer.start(self._output_update_interval_ms)
+
+    def _schedule_filter_update(self):
+        """
+        调度一次“滤镜相关更新”批处理。
+
+        滤镜更新通常比 updateImage 更重（需要扫描可见内容计算热点区域等），因此采用更长的间隔。
+        另外：如果输出更新仍在进行中，滤镜会在 _flush_pending_filter_updates() 中延后执行，
+        避免“输出高峰 + 滤镜扫描”叠加造成 UI 卡顿。
+        """
+        self._pending_update_filters = True
+        if not self._filter_update_timer.isActive():
+            self._filter_update_timer.start(self._filter_update_interval_ms)
+
+    def _flush_pending_output_updates(self):
+        """
+        输出更新定时器触发：执行一次合并后的输出/选择刷新。
+
+        处理顺序：
+        1) updateLineProperties：更新每行的属性（例如是否有输出、样式信息等）
+        2) updateImage：把 screen buffer 刷新到本地 image 并触发重绘
+        """
+        if not self._screenWindow:
+            self._pending_update_image = False
+            self._pending_update_line_properties = False
+            return
+
+        if self._pending_update_line_properties:
+            self._pending_update_line_properties = False
+            self.updateLineProperties()
+
+        if self._pending_update_image:
+            self._pending_update_image = False
+            self.updateImage()
+
+    def _flush_pending_filter_updates(self):
+        """
+        滤镜更新定时器触发：在合适的时机执行一次滤镜链处理。
+
+        如果输出更新定时器还在跑，说明屏幕内容仍在快速变化：
+        - 此时执行 processFilters 可能立刻过期，还会与 updateImage 争用 UI 线程时间；
+        - 因此选择重新延后滤镜定时器，等输出“相对稳定”后再处理。
+        """
+        if not self._screenWindow:
+            self._pending_update_filters = False
+            return
+
+        if self._output_update_timer.isActive():
+            self._filter_update_timer.start(self._filter_update_interval_ms)
+            return
+
+        if self._pending_update_filters:
+            self._pending_update_filters = False
+            self.processFilters()
 
     def _init_widget(self):
         """正确的初始化顺序 - 修复版本"""
@@ -629,18 +738,18 @@ class TerminalDisplay(QWidget):
         """Sets the terminal screen section displayed in this widget"""
         # Disconnect existing screen window
         if self._screenWindow:
-            self._screenWindow.outputChanged.disconnect()
-            self._screenWindow.scrolled.disconnect()
-            self._screenWindow.scrollToEnd.disconnect()
+            for sig in ("outputChanged", "scrolled", "scrollToEnd", "selectionChanged"):
+                try:
+                    getattr(self._screenWindow, sig).disconnect()
+                except Exception:
+                    pass
 
         self._screenWindow = window
 
         if window:
-            window.outputChanged.connect(self.updateLineProperties)
-            window.outputChanged.connect(self.updateImage)
-            window.outputChanged.connect(self.updateFilters)
-            window.selectionChanged.connect(self.updateImage)
-            window.scrolled.connect(self.updateFilters)
+            window.outputChanged.connect(self._on_output_changed)
+            window.selectionChanged.connect(self._on_selection_changed)
+            window.scrolled.connect(self._on_scrolled)
             window.scrollToEnd.connect(self.scrollToEnd)
 
             # 设置窗口行数
@@ -984,17 +1093,25 @@ class TerminalDisplay(QWidget):
         if not QFontInfo(font).fixedPitch():
             print("Warning: Using variable-width font may cause display issues")
 
-        if not TerminalDisplay._antialiasText:
-            font.setStyleStrategy(QFont.StyleStrategy.NoAntialias)
-            # else:
-            # 修复：强制使用整数度量，确保网格对齐
-            # 注意：PySide6中 ForceIntegerMetrics 可能不可用或名称不同，
-            # 如果报错 AttributeError: ForceIntegerMetrics，请尝试使用其他策略或注释掉
-            # font.setStyleStrategy(QFont.StyleStrategy.ForceIntegerMetrics)
-            pass
+        # 字体渲染策略说明：
+        # - 终端属于高频重绘场景，字体的抗锯齿策略会直接影响“清晰度/锯齿感/模糊感”。
+        # - 这里必须避免“无条件 NoAntialias”之类的设置覆盖掉用户/系统默认的平滑策略，
+        #   否则会出现明显锯齿与发糊。
+        # - _antialiasText 是本控件内部开关：True 时尽可能使用高质量抗锯齿；
+        #   False 时才显式关闭抗锯齿（兼容极低性能环境或特殊偏好）。
+        if TerminalDisplay._antialiasText:
+            try:
+                font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias | QFont.StyleStrategy.PreferQuality)
+            except Exception:
+                pass
+        else:
+            try:
+                font.setStyleStrategy(QFont.StyleStrategy.NoAntialias)
+            except Exception:
+                pass
 
         font.setKerning(False)
-        font.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
+        font.setHintingPreference(QFont.HintingPreference.PreferDefaultHinting)
         font.setStyleName("")
 
         super().setFont(font)
@@ -1047,8 +1164,6 @@ class TerminalDisplay(QWidget):
         self.changedFontMetricSignal.emit(self._fontHeight, self._fontWidth)
         self._propagate_size()
 
-        # Test draw text
-        self._drawTextTestFlag = True
         self.update()
 
     def getVTFont(self) -> QFont:
@@ -1298,8 +1413,12 @@ class TerminalDisplay(QWidget):
     # Event handling methods
     def paintEvent(self, event: QPaintEvent):
         """绘制事件处理"""
-        # 关键修复：使用 begin/end 模式代替直接构造 QPainter(self)
-        # 这能更好地处理复杂的绘制状态和多重调用
+        # 关键说明（与“卡顿/卡死”直接相关）：
+        # - 终端绘制属于高频重入路径：update() 频繁触发，且可能在复杂事件序列中进入 paintEvent。
+        # - 使用 QPainter(self) 的隐式 begin() 在某些边界场景下更难判断 painter 是否真正处于可绘制状态；
+        #   一旦 painter 状态异常，后续绘制调用可能在 Qt 内部阻塞，表现为 UI 线程“卡住不再响应”。
+        # - 这里改成显式 begin/end，并在 begin 失败时直接返回，属于“保守且安全”的防护：
+        #   宁可丢弃这一帧绘制，也不要在不安全状态下继续执行大量绘制逻辑把 UI 拖死。
         painter = QPainter()
         if not painter.begin(self):
             # 如果无法开始绘制（例如已经在绘制中），则直接返回
@@ -1341,15 +1460,28 @@ class TerminalDisplay(QWidget):
 
                 painter.restore()
 
-            # Test draw text if needed - 修复：增加安全检查
-            if hasattr(self, '_drawTextTestFlag') and self._drawTextTestFlag:
-                self._calc_draw_text_addition_height(painter)
-
             # Draw contents
             region_to_draw = event.region() & cr
-            for rect in region_to_draw:
+            rect_count = None
+            if hasattr(region_to_draw, "rectCount"):
+                try:
+                    rect_count = int(region_to_draw.rectCount())
+                except Exception:
+                    rect_count = None
+
+            # 区域绘制策略说明（与卡顿直接相关）：
+            # - Qt 的 event.region() 可能非常“碎”（大量小 rect），这在滚动/频繁局部更新时很常见。
+            # - 对每个小 rect 分别执行 _draw_background + _draw_contents 会导致重复扫描同一行/同一片字符，
+            #   在输出高峰（例如 Claude 连续打印）时，容易让单次 paintEvent 的工作量指数级放大。
+            # - 因此当 rectCount 特别大时，退化为绘制一次 boundingRect（减少重复工作，换取少量过绘）。
+            if rect_count is not None and rect_count > 256:
+                rect = region_to_draw.boundingRect()
                 self._draw_background(painter, rect, self.palette().window().color(), True)
                 self._draw_contents(painter, rect)
+            else:
+                for rect in region_to_draw:
+                    self._draw_background(painter, rect, self.palette().window().color(), True)
+                    self._draw_contents(painter, rect)
 
             # Draw filters (在内容之后绘制，确保覆盖)
             self._paint_filters(painter)
@@ -1534,15 +1666,33 @@ class TerminalDisplay(QWidget):
 
         line_start = y * self._columns
         x = lux
+        guard = 0
+        guard_max = max(16, (rlx - lux + 1) * 8)
 
         while x <= rlx:
+            guard += 1
+            # 防退化保护（与“Claude 输出卡顿/卡死”相关）：
+            # - 正常情况下，x 会单调递增直到 rlx，外层 while 的迭代次数大约就是可见列数（O(N)）。
+            # - 但如果屏幕缓冲出现异常数据（例如 continuation cell 标记错位，或字符宽度/推进逻辑异常），
+            #   x 可能推进非常慢，甚至出现“回退 + 再扫描”的退化路径，导致循环次数远超预期。
+            # - guard_max 给外层循环一个上限：即使遇到极端坏数据，也能保证单次绘制不会无限耗时，
+            #   从而避免 UI 线程长时间占用导致看门狗判定“卡死”。
+            if guard > guard_max:
+                break
             if line_start + x >= len(self._image):
                 break
 
             char = self._image[line_start + x]
             if char.character == 0 and x > 0:
-                x -= 1  # Search for start of multi-column character
-                char = self._image[line_start + x]
+                # continuation cell 回退说明：
+                # - 多列字符（如全角/emoji）在网格里会占用多个 cell，后续 cell 通常用 character==0 表示“续位”。
+                # - 这里通过向左回退找到该多列字符的起始 cell，确保取到正确的属性与字符值。
+                # - back_guard 限制最大回退步数：防止异常情况下连续 0 导致回退过深，出现退化甚至来回抖动。
+                back_guard = 0
+                while x > 0 and char.character == 0 and back_guard < 4:
+                    x -= 1
+                    back_guard += 1
+                    char = self._image[line_start + x]
 
             # Group consecutive characters with same attributes
             text = ""
@@ -1652,7 +1802,8 @@ class TerminalDisplay(QWidget):
                     text_color = effective_bg
             if abs(self._brightness(text_color) - self._brightness(default_bg)) < 20:
                 text_color = self._best_bw_for_bg(default_bg)
-        if hasattr(style, 'rendition') and (style.rendition & RE_CURSOR) and self.hasFocus() and (not self._cursor_blinking):
+        if hasattr(style, 'rendition') and (style.rendition & RE_CURSOR) and self.hasFocus() and (
+        not self._cursor_blinking):
             # 终端模拟层会在“光标所在的单元格”打上 RE_CURSOR 标记。
             # 该单元格的绘制顺序通常是：背景 -> 光标 -> 文本。
             #
@@ -1677,30 +1828,17 @@ class TerminalDisplay(QWidget):
 
         # 绘制文本
         if self._fixed_font:
-            # 对于等宽字体，强制逐字符绘制，确保对齐
-            # 使用 QFontMetricsF 获取精确的字符宽度（虽然我们这里用的是整数网格）
-            # 但为了视觉上的一致性，我们让字符在其网格内左对齐或居中
-
-            fm = QFontMetrics(painter.font())
             current_x = rect.x()
+            baseline_y = rect.y() + self._fontAscent + self._line_spacing
+
             for char in text:
-                # 计算字符实际宽度
-                char_width = fm.horizontalAdvance(char)
-
-                # 使用 konsole_wcwidth 计算字符应占用的网格宽度
                 w = konsole_wcwidth(ord(char))
-                if w <= 0: w = 1  # 默认至少1个宽度
+                if w <= 0:
+                    w = 1
+                painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+                painter.drawText(current_x, baseline_y, char)
 
-                target_width = w * self._fontWidth
-
-                # 居中绘制（无论是单宽还是双宽）
-                # 如果字符实际宽度小于目标宽度，则居中
-                # 如果字符实际宽度大于目标宽度，也居中（允许两边溢出）
-                offset = (target_width - char_width) / 2
-
-                painter.drawText(current_x + offset, rect.y() + self._fontAscent + self._line_spacing, char)
-
-                current_x += target_width
+                current_x += w * self._fontWidth
         else:
             painter.drawText(rect.x(), rect.y() + self._fontAscent + self._line_spacing, text)
 
@@ -1725,7 +1863,8 @@ class TerminalDisplay(QWidget):
         return QColor(0, 0, 0) if TerminalDisplay._brightness(bg) > 128 else QColor(255, 255, 255)
 
     @staticmethod
-    def _cursor_paint_colors(effective_fg: QColor, effective_bg: QColor, configured_cursor: QColor) -> tuple[QColor, QColor]:
+    def _cursor_paint_colors(effective_fg: QColor, effective_bg: QColor, configured_cursor: QColor) -> tuple[
+        QColor, QColor]:
         # 计算“块状光标”的两种颜色：
         # - fill: 光标的填充背景色（画一个矩形）
         # - text: 光标上的文字颜色（保证文字在光标上可读）
@@ -2569,7 +2708,7 @@ class TerminalDisplay(QWidget):
     def updateFilters(self):
         """Update filters"""
         if self._screenWindow:
-            self.processFilters()
+            self._schedule_filter_update()
 
     @Slot()
     def updateLineProperties(self):
@@ -2687,7 +2826,7 @@ class TerminalDisplay(QWidget):
 
         if self._resizing:
             # TODO 实时显示终端大小信息小tips，测试的时候可以打开
-            #self._show_resize_notification()
+            # self._show_resize_notification()
             self.changedContentSizeSignal.emit(self._content_height, self._content_width)
 
         self._resizing = False

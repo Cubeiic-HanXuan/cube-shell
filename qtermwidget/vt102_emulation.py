@@ -1015,46 +1015,59 @@ class Vt102Emulation(Emulation):
 
     def _process_sgr(self, param: int, p: int, q: int):
         """处理 SGR (Select Graphic Rendition) 序列"""
+        from qtermwidget.character import (
+            RE_BOLD,
+            RE_FAINT,
+            RE_ITALIC,
+            RE_UNDERLINE,
+            RE_BLINK,
+            RE_REVERSE,
+            RE_CONCEAL,
+            RE_STRIKEOUT,
+            RE_OVERLINE,
+        )
         if param == 0:
             self._currentScreen.setDefaultRendition()
         elif param == 1:
-            self._currentScreen.setRendition(1)  # Bold
+            self._currentScreen.setRendition(RE_BOLD)
         elif param == 2:
-            self._currentScreen.setRendition(256)  # Faint
+            self._currentScreen.setRendition(RE_FAINT)
         elif param == 3:
-            self._currentScreen.setRendition(4)  # Italic
+            self._currentScreen.setRendition(RE_ITALIC)
         elif param == 4:
-            self._currentScreen.setRendition(2)  # Underline
+            self._currentScreen.setRendition(RE_UNDERLINE)
         elif param == 5:
-            self._currentScreen.setRendition(8)  # Blink
+            self._currentScreen.setRendition(RE_BLINK)
+        elif param == 6:
+            self._currentScreen.setRendition(RE_BLINK)
         elif param == 7:
-            self._currentScreen.setRendition(16)  # Reverse
+            self._currentScreen.setRendition(RE_REVERSE)
         elif param == 8:
-            self._currentScreen.setRendition(32)  # Conceal
+            self._currentScreen.setRendition(RE_CONCEAL)
         elif param == 9:
-            self._currentScreen.setRendition(64)  # Strikeout
+            self._currentScreen.setRendition(RE_STRIKEOUT)
         elif param == 53:
-            self._currentScreen.setRendition(128)  # Overline
+            self._currentScreen.setRendition(RE_OVERLINE)
         # Reset
         elif param == 21:
-            self._currentScreen.resetRendition(1)
+            self._currentScreen.resetRendition(RE_BOLD)
         elif param == 22:
-            self._currentScreen.resetRendition(1)
-            self._currentScreen.resetRendition(256)
+            self._currentScreen.resetRendition(RE_BOLD)
+            self._currentScreen.resetRendition(RE_FAINT)
         elif param == 23:
-            self._currentScreen.resetRendition(4)
+            self._currentScreen.resetRendition(RE_ITALIC)
         elif param == 24:
-            self._currentScreen.resetRendition(2)
+            self._currentScreen.resetRendition(RE_UNDERLINE)
         elif param == 25:
-            self._currentScreen.resetRendition(8)
+            self._currentScreen.resetRendition(RE_BLINK)
         elif param == 27:
-            self._currentScreen.resetRendition(16)
+            self._currentScreen.resetRendition(RE_REVERSE)
         elif param == 28:
-            self._currentScreen.resetRendition(32)
+            self._currentScreen.resetRendition(RE_CONCEAL)
         elif param == 29:
-            self._currentScreen.resetRendition(64)
+            self._currentScreen.resetRendition(RE_STRIKEOUT)
         elif param == 55:
-            self._currentScreen.resetRendition(128)
+            self._currentScreen.resetRendition(RE_OVERLINE)
         # Colors
         elif 30 <= param <= 37:
             self._currentScreen.setForeColor(COLOR_SPACE_SYSTEM, param - 30)
