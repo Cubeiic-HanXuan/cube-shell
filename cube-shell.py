@@ -2335,13 +2335,17 @@ class MainDialog(QMainWindow):
             i += 1
 
     def add_line_edit(self, q_str):
-        # 创建一个新的 QLineEdit
+        if self.line_edits:
+            line_edit = self.line_edits[-1]
+            old_block = line_edit.blockSignals(True)
+            line_edit.setText(q_str)
+            line_edit.blockSignals(old_block)
+            return
+
         line_edit = QLineEdit()
         line_edit.setFocusPolicy(Qt.ClickFocus)
         line_edit.setText(q_str)
-        # 保存新创建的 QLineEdit
         self.line_edits.append(line_edit)
-        # 将 QLineEdit 添加到布局中
         self.ui.gridLayout.addWidget(line_edit, 0, 0, 1, 1)
         line_edit.returnPressed.connect(self.on_return_pressed)
 

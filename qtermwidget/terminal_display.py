@@ -515,7 +515,6 @@ class TerminalDisplay(QWidget):
         self._filter_update_timer = QTimer(self)
         self._filter_update_timer.setSingleShot(True)
         self._filter_update_timer.timeout.connect(self._flush_pending_filter_updates)
-        self._cjk_font_family = None
 
         # Cursor - 修复：与C++一致的光标设置
         self._cursor_shape = KeyboardCursorShape.BlockCursor
