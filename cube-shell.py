@@ -1786,7 +1786,7 @@ class MainDialog(QMainWindow):
             pass
         try:
             if connecting:
-                QApplication.setOverrideCursor(Qt.WaitCursor)
+                QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
             else:
                 QApplication.restoreOverrideCursor()
         except Exception:

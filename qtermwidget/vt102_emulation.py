@@ -1116,9 +1116,9 @@ class Vt102Emulation(Emulation):
         elif ch == ord('P'):
             self._currentScreen.deleteChars(p)
         elif ch == ord('S'):
-            self._currentScreen.scrollUp(p)
+            self._currentScreen.scrollUpRegion(p)
         elif ch == ord('T'):
-            self._currentScreen.scrollDown(p)
+            self._currentScreen.scrollDownRegion(p)
         elif ch == ord('X'):
             self._currentScreen.eraseChars(p)
         elif ch == ord('Z'):
