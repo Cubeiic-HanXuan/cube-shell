@@ -273,7 +273,8 @@ class MainDialog(QMainWindow):
 
         self.ui.discButton.clicked.connect(self.disc_off)
         self.ui.theme.clicked.connect(self.theme)
-
+        # 🔧 连接主题切换信号
+        self.themeChanged.connect(self.on_system_theme_changed)
         self.ui.treeWidget.customContextMenuRequested.connect(self.treeRight)
         self.ui.treeWidget.doubleClicked.connect(self.cd)
         self.ui.ShellTab.currentChanged.connect(self.shell_tab_current_changed)
@@ -312,8 +313,8 @@ class MainDialog(QMainWindow):
 
         # 连接信号和槽
         self.initSftpSignal.connect(self.on_initSftpSignal)
-        #  操作docker 成功,发射信号
-        self.finished.connect(self.on_ssh_docker_finished)
+        # #  操作docker 成功,发射信号
+        # self.finished.connect(self.on_ssh_docker_finished)
 
         self.NAT = False
         self.NAT_lod()
@@ -1017,9 +1018,13 @@ class MainDialog(QMainWindow):
             processes = self.get_filtered_process_list(ssh_conn)
             if self.is_closing:
                 return
-            self.update_process_list_signal.emit(ssh_conn.id, processes)
+            try:
+                self.update_process_list_signal.emit(ssh_conn.id, processes)
+            except RuntimeError:
+                return
         except Exception as e:
-            util.logger.error(f"Failed to update process list: {e}")
+            if "Signal source has been deleted" not in str(e):
+                util.logger.error(f"Failed to update process list: {e}")
             pass
 
     @Slot(str, list)
@@ -1525,11 +1530,6 @@ class MainDialog(QMainWindow):
         terminal.setArgs(shell_args)
         terminal.startShellProgram()
 
-        if hasattr(terminal, 'current_theme_name'):
-            terminal.setColorScheme(terminal.current_theme_name)
-        else:
-            terminal.setColorScheme("Ubuntu")
-
         # 将本地后端对象注册进 ssh_clients：
         # - 复用 self.ssh() 取“当前 Tab 后端”的机制
         # - 复用 initSftp() / refreshDirs() 的目录刷新逻辑
@@ -1541,6 +1541,10 @@ class MainDialog(QMainWindow):
         self.ssh_clients[local_conn.id] = local_conn
         self.current_displayed_connection_id = local_conn.id
         self.initSftpSignal.emit()
+        try:
+            self._release_connecting_state()
+        except Exception:
+            pass
         return terminal.getIsRunning()
 
     def _attach_ssh_auto_responder(self, terminal, password: str, timeout_ms: int = 5000) -> None:
@@ -1699,7 +1703,7 @@ class MainDialog(QMainWindow):
         # 初始化 SFTP
         self.initSftpSignal.emit()
         # 释放连接锁
-        self.is_connecting_lock = False
+        self._release_connecting_state()
 
     @Slot(str, str)  # 将其标记为槽
     def warning(self, title, message):
@@ -1730,8 +1734,6 @@ class MainDialog(QMainWindow):
             ssh_conn.flush_sys_info_thread = threading.Thread(target=ssh_conn.get_datas, args=(ssh_conn,), daemon=True)
             ssh_conn.flush_sys_info_thread.start()
             self.flushSysInfo()
-
-        # threading.Thread(target=ssh_conn.get_datas, daemon=True).start()
 
     def on_initSftpSignal(self):
         self.initSftp()
@@ -1777,6 +1779,23 @@ class MainDialog(QMainWindow):
         thread = threading.Thread(target=self.getData2, args=(cmd,))
         thread.start()
 
+    def _set_connecting_ui(self, connecting: bool):
+        try:
+            self.ui.treeWidget.setEnabled(not connecting)
+        except Exception:
+            pass
+        try:
+            if connecting:
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+            else:
+                QApplication.restoreOverrideCursor()
+        except Exception:
+            pass
+
+    def _release_connecting_state(self):
+        self.is_connecting_lock = False
+        self._set_connecting_ui(False)
+
     # 选择文件夹
     def cd(self):
         if self.isConnected:
@@ -1788,6 +1807,12 @@ class MainDialog(QMainWindow):
                 return
 
             focus = self.ui.treeWidget.currentIndex().row()
+            if not getattr(ssh_conn, "_dir_tree_ready", False):
+                return
+            if not isinstance(getattr(self, "dir_tree_now", None), list):
+                return
+            if focus < 0 or focus >= len(self.dir_tree_now):
+                return
             if focus != -1 and self.dir_tree_now[focus][0].startswith('d'):
                 if getattr(ssh_conn, "is_local", False):
                     target = self.ui.treeWidget.topLevelItem(focus).text(0)
@@ -1808,6 +1833,10 @@ class MainDialog(QMainWindow):
             # 防抖：如果正在连接中，忽略本次点击；快速点击节流500ms
             now_ms = int(time.time() * 1000)
             if self.is_connecting_lock:
+                try:
+                    self._connect_click_blocked_count = int(getattr(self, "_connect_click_blocked_count", 0) or 0) + 1
+                except Exception:
+                    self._connect_click_blocked_count = 1
                 return
             if now_ms - getattr(self, "_last_connect_attempt_ts", 0) < 800:
                 return
@@ -1820,20 +1849,27 @@ class MainDialog(QMainWindow):
                 # 标记开始连接
                 self.is_connecting_lock = True
                 self._last_connect_attempt_ts = now_ms
+                self._connect_click_blocked_count = 0
+                self._set_connecting_ui(True)
 
                 # 创建新 Tab 并立即启动连接
                 try:
-                    # 传递 name 参数，避免依赖 UI 焦点
                     tab_index, terminal = self.add_new_tab(name)
-                    if tab_index != -1:
-                        self.run(name, terminal)
-                finally:
-                    # 释放锁
-                    self.is_connecting_lock = False
+                    if tab_index == -1:
+                        self._release_connecting_state()
+                        return
+                    self.run(name, terminal)
+                    try:
+                        QTimer.singleShot(10000,
+                                          lambda: self._release_connecting_state() if self.is_connecting_lock else None)
+                    except Exception:
+                        pass
+                except Exception:
+                    self._release_connecting_state()
+                    raise
 
             else:
-                self.add_new_tab()
-                self.run()
+                return
 
     # 回车获取目录
     def on_return_pressed(self):
@@ -2364,6 +2400,10 @@ class MainDialog(QMainWindow):
         ssh_conn = self.ssh()
         if not ssh_conn:
             return
+        try:
+            ssh_conn._dir_tree_ready = False
+        except Exception:
+            pass
 
         # 1. 如果有缓存数据，且与当前目录一致，立即显示
         # 关键修正：只有当缓存的路径与当前连接的路径一致时才使用缓存，否则说明切换了目录，不应显示旧数据
@@ -2493,6 +2533,10 @@ class MainDialog(QMainWindow):
 
             # 恢复UI更新
             self.ui.treeWidget.setUpdatesEnabled(True)
+            try:
+                ssh_conn._dir_tree_ready = True
+            except Exception:
+                pass
 
         except Exception as e:
             util.logger.error(f"Error refreshing directories UI: {e}")
@@ -2834,9 +2878,7 @@ class MainDialog(QMainWindow):
                     # 本机模式不具备远程采集线程（get_datas）产出的系统信息字段，
                     # 因此直接跳过，避免 KeyError/AttributeError 导致频繁异常。
                     return
-                if not hasattr(ssh_conn, "system_info_dict"):
-                    return
-                system_info_dict = ssh_conn.system_info_dict
+                system_info_dict = getattr(ssh_conn, "system_info_dict", None) or {}
                 cpu_use = getattr(ssh_conn, "cpu_use", 0)
                 mem_use = getattr(ssh_conn, "mem_use", 0)
                 dissk_use = getattr(ssh_conn, "disk_use", 0)
@@ -3644,6 +3686,27 @@ class MainDialog(QMainWindow):
         util.THEME = data
         self.applyAppearance(data["appearance"])
 
+    def _reapply_all_terminal_themes(self):
+        for index in range(self.ui.ShellTab.count()):
+            terminal = self.get_text_browser_from_tab(index)
+            if not terminal or not hasattr(terminal, 'setColorScheme'):
+                continue
+            # if hasattr(terminal, '_schedule_reapply_color_scheme'):
+            #     terminal._schedule_reapply_color_scheme()
+            elif hasattr(terminal, 'current_theme_name'):
+                terminal.setColorScheme(terminal.current_theme_name)
+            else:
+                terminal.setColorScheme("Ubuntu")
+
+    def on_system_theme_changed(self, is_dark_theme):
+        """系统主题切换时，重新应用终端主题"""
+        try:
+            # 这里写两次是为了避免设置全局主题导致背景不一致而出现闪烁现象
+            QTimer.singleShot(0, self._reapply_all_terminal_themes)
+            QTimer.singleShot(50, self._reapply_all_terminal_themes)
+        except Exception as e:
+            util.logger.error(f"Failed to changed system theme: {e}")
+
     def on_ssh_failed(self, error_msg):
         """SSH连接失败回调"""
         # 确保 UI 操作在主线程
@@ -3651,8 +3714,12 @@ class MainDialog(QMainWindow):
             QMetaObject.invokeMethod(self, "on_ssh_failed", Qt.QueuedConnection, Q_ARG(str, error_msg))
             return
 
-        self._delete_tab()
-        QMessageBox.warning(self, self.tr("拒绝连接"), self.tr("请检查服务器用户名、密码或密钥是否正确"))
+        self._release_connecting_state()
+        try:
+            QMessageBox.warning(self, self.tr("后台连接失败"),
+                                self.tr("后台SSH连接失败，文件管理/监控功能不可用，但终端仍可用。"))
+        except Exception:
+            pass
 
     # 获取当前标签页的backend
     def ssh(self):

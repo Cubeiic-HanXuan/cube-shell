@@ -23,7 +23,7 @@ class SshClient(object):
         self.on_connect_success = on_connect_success
         self.callback_param = callback_param
 
-        self.system_info_dict = None
+        self.system_info_dict = {}
         self.cpu_use, self.mem_use, self.disk_use, self.receive_speed, self.transmit_speed = 0, 0, 0, 0, 0
 
         # 数据历史和平滑处理
@@ -71,7 +71,7 @@ class SshClient(object):
         self.max_reconnect_attempts = 3
         self.reconnect_delay = 1  # 初始重连延迟（秒）
         self.heartbeat_interval = 30  # 心跳间隔
-        self.lock = threading.Lock()  # 线程锁
+        self.lock = threading.RLock()  # 线程锁
         self.active = True  # 连接状态标志
         self._reconnecting = False  # 防抑制并发重连
 
@@ -131,7 +131,7 @@ class SshClient(object):
             # 连接成功后初始化
             self.transport = self.conn.get_transport()
             self.transport.set_keepalive(self.heartbeat_interval)
-            self._setup_channel()
+            # self._setup_channel()
             self._start_heartbeat()
             self.reconnect_attempts = 0  # 重置重试计数器
 
@@ -202,41 +202,40 @@ class SshClient(object):
         with self.lock:
             if self._reconnecting:
                 return
-            self._reconnecting = True
-            # 检查是否已经超过最大重试次数
             if self.reconnect_attempts >= self.max_reconnect_attempts:
                 util.logger.error("达到最大重连次数，停止重连")
-                self._reconnecting = False
                 return
+            self._reconnecting = True
+            self.reconnect_attempts += 1
+            attempt = int(self.reconnect_attempts)
 
-            util.logger.info("尝试重新连接...")
+        util.logger.info("尝试重新连接...")
+        try:
             try:
-                # 增加重试计数
-                self.reconnect_attempts += 1
-                
-                # 关闭旧连接
-                try:
-                    if self.channel:
+                if self.channel:
+                    try:
                         self.channel.close()
-                    if self.conn:
+                    except Exception:
+                        pass
+                if self.transport:
+                    try:
+                        self.transport.close()
+                    except Exception:
+                        pass
+                if self.conn:
+                    try:
                         self.conn.close()
-                except:
-                    pass
-                    
-                # 轻微延迟，避免复用刚关闭的连接导致通道打开失败
-                time.sleep(min(1.0, 0.2 * self.reconnect_attempts))
-                # 重新初始化客户端对象，避免旧state残留
-                self._init_ssh_client()
-                # 重新连接 - 注意：这可能会阻塞，最好在非UI线程调用
-                # 由于 connect() 移除了循环，这里可以捕获异常
-                try:
-                    self.connect()
-                finally:
-                    self._reconnecting = False
-                
-            except Exception as e:
-                util.logger.error(f"重连失败: {str(e)}")
-                # 不要在这里递归调用或等待，让下一次操作触发重连或由用户手动重试
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            time.sleep(min(1.0, 0.2 * attempt))
+            self._init_ssh_client()
+            self.connect()
+        except Exception as e:
+            util.logger.error(f"重连失败: {str(e)}")
+        finally:
+            with self.lock:
                 self._reconnecting = False
 
     def safe_execute(self, func, *args, **kwargs):
@@ -259,7 +258,14 @@ class SshClient(object):
                 socket.timeout,
                 TimeoutError,
                 BrokenPipeError) as e:
-            util.logger.error(f"连接异常: {str(e)}")
+            msg = str(e)
+            util.logger.error(f"连接异常: {msg}")
+            if isinstance(e, paramiko.ssh_exception.ChannelException) and "Unable to open channel" in msg:
+                try:
+                    time.sleep(0.2)
+                except Exception:
+                    pass
+                return None
             self._trigger_reconnect()
             # 尝试一次重连后，如果成功则重试操作，否则返回None
             if self.is_connected():
