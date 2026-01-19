@@ -27,7 +27,6 @@ nuitka \
   --include-module=pygments.lexers.shell \
   --include-package=qtermwidget,core,function,style,ui,icons \
   --include-data-dir=conf=conf \
-  --include-data-dir=frp=frp \
   cube-shell.py
 
 # Step 4: Create tunnel.json file

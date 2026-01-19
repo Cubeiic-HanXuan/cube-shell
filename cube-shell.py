@@ -11,9 +11,9 @@ import sys
 import threading
 import time
 import uuid
-from pathlib import Path
 from bisect import bisect_left
 from collections import defaultdict
+from pathlib import Path
 from socket import socket
 
 import PySide6
@@ -72,6 +72,7 @@ from ui.add_tunnel_config import Ui_AddTunnelConfig
 from ui.tunnel import Ui_Tunnel
 from ui.compress_dialog import CompressDialog
 from core.compressor import CompressThread, DecompressThread
+from core.frp_manager import get_frp_manager
 from ui.tunnel_config import Ui_TunnelConfig
 from ui.code_editor import CodeEditor, Highlighter
 from function.ssh_prompt_client import load_linux_commands
@@ -202,6 +203,359 @@ class CommonContainersThread(QThread):
         except Exception as e:
             util.logger.error(f"Common containers fetch error: {e}")
             self.data_ready.emit({}, False)
+
+
+class FRPInstallThread(QThread):
+    """后台下载和安装 FRP 的线程"""
+    progress_updated = Signal(int)  # 进度百分比
+    status_updated = Signal(str)   # 状态消息
+    finished_signal = Signal(bool, str)  # (成功与否, 错误消息)
+
+    def __init__(self, frp_manager, ssh_conn=None, sftp=None, install_client=True, install_server=False):
+        super().__init__()
+        self.frp_manager = frp_manager
+        self.ssh_conn = ssh_conn
+        self.sftp = sftp
+        self.install_client = install_client
+        self.install_server = install_server
+
+    def run(self):
+        try:
+            # 安装客户端
+            if self.install_client and not self.frp_manager.is_frpc_ready():
+                self.status_updated.emit("正在下载 FRP 客户端...")
+                
+                def update_progress(downloaded, total):
+                    if total > 0:
+                        percent = int(downloaded * 100 / total)
+                        self.progress_updated.emit(percent)
+                
+                def update_status(msg):
+                    self.status_updated.emit(msg)
+                
+                success = self.frp_manager.ensure_frpc(
+                    progress_callback=update_progress,
+                    status_callback=update_status
+                )
+                
+                if not success:
+                    self.finished_signal.emit(False, "FRP 客户端下载失败，请检查网络连接后重试。")
+                    return
+            
+            # 安装服务端
+            if self.install_server and self.ssh_conn and self.sftp:
+                self.status_updated.emit("正在部署 FRP 服务端...")
+                self.progress_updated.emit(0)
+                
+                def update_progress(downloaded, total):
+                    if total > 0:
+                        percent = int(downloaded * 100 / total)
+                        self.progress_updated.emit(percent)
+                
+                def update_status(msg):
+                    self.status_updated.emit(msg)
+                
+                success = self.frp_manager.ensure_frps_on_server(
+                    self.ssh_conn, self.sftp,
+                    progress_callback=update_progress,
+                    status_callback=update_status
+                )
+                
+                if not success:
+                    self.finished_signal.emit(False, "FRP 服务端部署失败，请检查网络连接后重试。")
+                    return
+            
+            self.finished_signal.emit(True, "")
+            
+        except Exception as e:
+            self.finished_signal.emit(False, str(e))
+
+
+class FRPServiceThread(QThread):
+    """后台启动/停止 FRP 服务的线程"""
+    status_updated = Signal(str)   # 状态消息
+    finished_signal = Signal(bool, str)  # (成功与否, 错误消息)
+
+    def __init__(self, ssh_conn, host, token, ant_type, local_port, server_prot, frp_manager, action='start'):
+        super().__init__()
+        self.ssh_conn = ssh_conn
+        self.host = host
+        self.token = token
+        self.ant_type = ant_type
+        self.local_port = local_port
+        self.server_prot = server_prot
+        self.frp_manager = frp_manager
+        self.action = action  # 'start' or 'stop'
+
+    def run(self):
+        try:
+            if self.action == 'start':
+                self._start_services()
+            else:
+                self._stop_services()
+        except Exception as e:
+            self.finished_signal.emit(False, str(e))
+
+    def _start_services(self):
+        # 检查服务端代理端口权限
+        server_port = int(self.server_prot)
+        if server_port <= 1024:
+            try:
+                whoami_result = self.ssh_conn.exec(cmd="whoami", pty=False)
+                remote_user = whoami_result.strip() if whoami_result else ""
+                if remote_user != "root":
+                    self.finished_signal.emit(
+                        False, 
+                        f"服务端代理端口 {server_port} 需要 root 权限。\n"
+                        f"当前用户为: {remote_user}\n"
+                        f"请使用大于 1024 的端口（如 1080、8888 等）"
+                    )
+                    return
+            except:
+                pass
+        
+        self.status_updated.emit("正在启动服务端...")
+        
+        # 先彻底杀死所有 frps 进程
+        self.ssh_conn.conn.exec_command(timeout=2, command="killall -9 frps 2>/dev/null; pkill -9 frps 2>/dev/null", get_pty=False)
+        time.sleep(2)  # 等待端口释放
+        
+        # 写入配置并启动 frps（使用 $HOME/frp）
+        frps_config = traversal.frps(self.token, self.ant_type, self.server_prot)
+        self.ssh_conn.exec(cmd=f"cat > $HOME/frp/frps.toml << 'EOF'\n{frps_config}\nEOF", pty=False)
+        
+        cmd1 = f"cd $HOME/frp && nohup ./frps -c frps.toml &> frps.log &"
+        self.ssh_conn.conn.exec_command(timeout=1, command=cmd1, get_pty=False)
+        time.sleep(2)
+        
+        # 检查 frps 是否启动成功
+        check_result = self.ssh_conn.exec(cmd="pgrep -x frps", pty=False)
+        if not check_result or not check_result.strip():
+            self.finished_signal.emit(False, "服务端 frps 启动失败，请检查服务器日志")
+            return
+        
+        self.status_updated.emit("正在启动客户端...")
+        
+        # 停止旧的 frpc
+        if platform.system() == 'Darwin' or platform.system() == 'Linux':
+            os.system("pkill -9 frpc 2>/dev/null")
+        elif platform.system() == 'Windows':
+            subprocess.run(['taskkill', '/f', '/im', 'frpc.exe'], capture_output=True, text=True)
+        time.sleep(0.5)
+        
+        # 写入 frpc 配置
+        frpc = traversal.frpc(self.host.split(':')[0], self.token, self.ant_type, self.local_port, self.server_prot)
+        with open(abspath('frpc.toml'), 'w') as file:
+            file.write(frpc)
+        
+        util.logger.info(f"FRP 配置: 服务器={self.host.split(':')[0]}, 服务端端口={self.server_prot}, 本地端口={self.local_port}")
+        
+        # 启动 frpc
+        frpc_path = str(self.frp_manager.frpc_path)
+        frp_log_dir = str(self.frp_manager.frpc_path.parent)
+        frpc_config_path = abspath('frpc.toml')
+        
+        if platform.system() == 'Darwin' or platform.system() == 'Linux':
+            cmd_u = f'cd "{frp_log_dir}" && nohup "{frpc_path}" -c "{frpc_config_path}" > frpc.log 2>&1 &'
+            os.system(cmd_u)
+        elif platform.system() == 'Windows':
+            subprocess.Popen(
+                [frpc_path, "-c", frpc_config_path],
+                stdout=open(os.path.join(frp_log_dir, "frpc.log"), "a"),
+                stderr=subprocess.STDOUT,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+        
+        time.sleep(2)
+        
+        self.ssh_conn.close()
+        self.finished_signal.emit(True, "")
+
+    def _stop_services(self):
+        self.status_updated.emit("正在停止服务...")
+        
+        self.ssh_conn.conn.exec_command(timeout=1, command="pkill -9 frps", get_pty=False)
+        
+        if platform.system() == 'Darwin' or platform.system() == 'Linux':
+            os.system("pkill -9 frpc")
+        elif platform.system() == 'Windows':
+            subprocess.run(['taskkill', '/f', '/im', 'frpc.exe'], capture_output=True, text=True)
+        
+        self.ssh_conn.close()
+        self.finished_signal.emit(True, "")
+
+
+class FRPConnectThread(QThread):
+    """后台处理整个 FRP 连接流程的线程"""
+    status_updated = Signal(str)
+    progress_updated = Signal(int)
+    finished_signal = Signal(bool, str, bool)  # (成功与否, 错误消息, is_start_action)
+
+    def __init__(self, params, is_stop, frp_manager):
+        super().__init__()
+        self.params = params
+        self.is_stop = is_stop
+        self.frp_manager = frp_manager
+
+    def run(self):
+        try:
+            host = self.params['host']
+            
+            # 检查服务器可达性
+            self.status_updated.emit("正在检查服务器连接...")
+            if not util.check_server_accessibility(host.split(':')[0], int(host.split(':')[1])):
+                self.finished_signal.emit(False, "服务器无法连接，请检查网络或服务器状态。", not self.is_stop)
+                return
+            
+            # 建立 SSH 连接
+            self.status_updated.emit("正在建立 SSH 连接...")
+            ssh_conn = SshClient(
+                host.split(':')[0], int(host.split(':')[1]),
+                self.params['username'], self.params['password'],
+                self.params['key_type'], self.params['key_file']
+            )
+            ssh_conn.connect()
+            
+            if self.is_stop:
+                # 停止服务
+                self._stop_services(ssh_conn)
+            else:
+                # 启动服务
+                sftp = ssh_conn.open_sftp()
+                self._start_services(ssh_conn, sftp)
+                
+        except Exception as e:
+            util.logger.error(str(e))
+            self.finished_signal.emit(False, str(e), not self.is_stop)
+
+    def _start_services(self, ssh_conn, sftp):
+        # 检查服务端代理端口权限
+        server_port = int(self.params['server_prot'])
+        if server_port <= 1024:
+            # 检查远程用户是否为 root
+            try:
+                whoami_result = ssh_conn.exec(cmd="whoami", pty=False)
+                remote_user = whoami_result.strip() if whoami_result else ""
+                if remote_user != "root":
+                    self.finished_signal.emit(
+                        False, 
+                        f"服务端代理端口 {server_port} 需要 root 权限。\n"
+                        f"当前用户为: {remote_user}\n"
+                        f"请使用大于 1024 的端口（如 8088、8888 等）", 
+                        True
+                    )
+                    return
+            except:
+                pass
+        
+        # 检查是否需要安装
+        need_client = not self.frp_manager.is_frpc_ready()
+        need_server = not util.check_remote_frp_exists(ssh_conn)
+        
+        # 安装客户端
+        if need_client:
+            self.status_updated.emit("正在下载 FRP 客户端...")
+            
+            def update_progress(downloaded, total):
+                if total > 0:
+                    self.progress_updated.emit(int(downloaded * 100 / total))
+            
+            success = self.frp_manager.ensure_frpc(
+                progress_callback=update_progress,
+                status_callback=lambda msg: self.status_updated.emit(msg)
+            )
+            if not success:
+                self.finished_signal.emit(False, "FRP 客户端下载失败", True)
+                return
+        
+        # 安装服务端
+        if need_server:
+            self.status_updated.emit("正在部署 FRP 服务端...")
+            self.progress_updated.emit(0)
+            
+            def update_progress(downloaded, total):
+                if total > 0:
+                    self.progress_updated.emit(int(downloaded * 100 / total))
+            
+            success = self.frp_manager.ensure_frps_on_server(
+                ssh_conn, sftp,
+                progress_callback=update_progress,
+                status_callback=lambda msg: self.status_updated.emit(msg)
+            )
+            if not success:
+                self.finished_signal.emit(False, "FRP 服务端部署失败", True)
+                return
+        
+        # 启动服务端
+        self.status_updated.emit("正在启动服务端...")
+        # 先彻底杀死所有 frps 进程（包括可能在 /opt/frp 下的旧进程）
+        ssh_conn.conn.exec_command(timeout=2, command="killall -9 frps 2>/dev/null; pkill -9 frps 2>/dev/null", get_pty=False)
+        time.sleep(2)  # 等待端口释放
+        
+        frps_config = traversal.frps(self.params['token'], self.params['ant_type'], self.params['server_prot'])
+        ssh_conn.exec(cmd=f"cat > $HOME/frp/frps.toml << 'EOF'\n{frps_config}\nEOF", pty=False)
+        
+        cmd1 = f"cd $HOME/frp && nohup ./frps -c frps.toml &> frps.log &"
+        ssh_conn.conn.exec_command(timeout=1, command=cmd1, get_pty=False)
+        time.sleep(2)
+        
+        check_result = ssh_conn.exec(cmd="pgrep -x frps", pty=False)
+        if not check_result or not check_result.strip():
+            self.finished_signal.emit(False, "服务端 frps 启动失败，请检查服务器日志", True)
+            return
+        
+        # 启动客户端
+        self.status_updated.emit("正在启动客户端...")
+        
+        if platform.system() == 'Darwin' or platform.system() == 'Linux':
+            os.system("pkill -9 frpc 2>/dev/null")
+        elif platform.system() == 'Windows':
+            subprocess.run(['taskkill', '/f', '/im', 'frpc.exe'], capture_output=True, text=True)
+        time.sleep(0.5)
+        
+        frpc = traversal.frpc(
+            self.params['host'].split(':')[0],
+            self.params['token'],
+            self.params['ant_type'],
+            self.params['local_port'],
+            self.params['server_prot']
+        )
+        with open(abspath('frpc.toml'), 'w') as file:
+            file.write(frpc)
+        
+        util.logger.info(f"FRP 配置: 服务器={self.params['host'].split(':')[0]}, 服务端端口={self.params['server_prot']}, 本地端口={self.params['local_port']}")
+        
+        frpc_path = str(self.frp_manager.frpc_path)
+        frp_log_dir = str(self.frp_manager.frpc_path.parent)
+        frpc_config_path = abspath('frpc.toml')
+        
+        if platform.system() == 'Darwin' or platform.system() == 'Linux':
+            cmd_u = f'cd "{frp_log_dir}" && nohup "{frpc_path}" -c "{frpc_config_path}" > frpc.log 2>&1 &'
+            os.system(cmd_u)
+        elif platform.system() == 'Windows':
+            subprocess.Popen(
+                [frpc_path, "-c", frpc_config_path],
+                stdout=open(os.path.join(frp_log_dir, "frpc.log"), "a"),
+                stderr=subprocess.STDOUT,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+        
+        time.sleep(2)
+        ssh_conn.close()
+        self.finished_signal.emit(True, "", True)
+
+    def _stop_services(self, ssh_conn):
+        self.status_updated.emit("正在停止服务...")
+        
+        ssh_conn.conn.exec_command(timeout=1, command="pkill -9 frps", get_pty=False)
+        
+        if platform.system() == 'Darwin' or platform.system() == 'Linux':
+            os.system("pkill -9 frpc")
+        elif platform.system() == 'Windows':
+            subprocess.run(['taskkill', '/f', '/im', 'frpc.exe'], capture_output=True, text=True)
+        
+        ssh_conn.close()
+        self.finished_signal.emit(True, "", False)
 
 
 # 主界面逻辑
@@ -635,76 +989,76 @@ class MainDialog(QMainWindow):
         else:
             username, password, host, key_type, key_file = conf[0], conf[1], conf[2], conf[3], conf[4]
 
-        # 检查服务器是否可以连接
-        if not util.check_server_accessibility(host.split(':')[0], int(host.split(':')[1])):
-            # 删除当前的 tab 并显示警告消息
-            self._delete_tab()
-            QMessageBox.warning(self, self.tr("连接超时"), self.tr("服务器无法连接，请检查网络或服务器状态。"))
+        # 显示进度对话框
+        self._frp_progress = QProgressDialog(
+            self.tr("正在连接服务器...") if not self.NAT else self.tr("正在停止服务..."),
+            None, 0, 0, self
+        )
+        self._frp_progress.setWindowTitle(self.tr("内网穿透"))
+        self._frp_progress.setWindowModality(Qt.WindowModal)
+        self._frp_progress.setMinimumDuration(0)
+        self._frp_progress.setCancelButton(None)
+        self._frp_progress.setMinimumWidth(300)
+        self._frp_progress.show()
+        QApplication.processEvents()
+        
+        # 保存参数供后续使用
+        self._frp_params = {
+            'host': host,
+            'username': username,
+            'password': password,
+            'key_type': key_type,
+            'key_file': key_file,
+            'token': token,
+            'ant_type': ant_type,
+            'local_port': local_port,
+            'server_prot': server_prot,
+        }
+        
+        # 启动后台线程处理连接和服务
+        self._frp_connect_thread = FRPConnectThread(
+            self._frp_params,
+            self.NAT,  # is_stop
+            get_frp_manager()
+        )
+        self._frp_connect_thread.status_updated.connect(self._on_frp_status_updated)
+        self._frp_connect_thread.progress_updated.connect(self._on_frp_progress_updated)
+        self._frp_connect_thread.finished_signal.connect(self._on_frp_connect_finished)
+        self._frp_connect_thread.start()
+    
+    def _on_frp_progress_updated(self, percent):
+        if hasattr(self, '_frp_progress') and self._frp_progress:
+            self._frp_progress.setValue(percent)
+    
+    def _on_frp_status_updated(self, msg):
+        if hasattr(self, '_frp_progress') and self._frp_progress:
+            self._frp_progress.setLabelText(msg)
+    
+    def _on_frp_connect_finished(self, success, error_msg, is_start):
+        """FRP 连接线程完成回调"""
+        if hasattr(self, '_frp_progress') and self._frp_progress:
+            self._frp_progress.close()
+            self._frp_progress = None
+        
+        if not success:
+            QMessageBox.warning(self, self.tr("错误"), error_msg)
             return
-
-        try:
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            ssh_conn = SshClient(host.split(':')[0], int(host.split(':')[1]), username, password, key_type, key_file,
-                                 )
-            ssh_conn.connect()
-            # 上传文件
-            sftp = ssh_conn.open_sftp()
-            if not self.NAT:
-                # 如果路径不存在，则创建目录
-                if not util.check_remote_directory_exists(sftp, '/opt/frp'):
-                    # 目前大部分服务器是x86_64 (amd64) 架构
-                    # 以后可能需要按需选择，使用以下检测命令来检测架构类型
-                    # conn_exec = ssh_conn.exec(cmd='arch', pty=False)
-                    # if conn_exec == 'x86_64':
-                    join = os.path.join(current_dir, 'frp', 'frps.tar.gz')
-                    sftp.put(join, '/opt/' + os.path.basename(join))
-                    frps = traversal.frps(token)
-                    # 解压，并替换配置文件
-                    cmd = f"tar -xzvf /opt/frps.tar.gz -C /opt/ && cat <<EOF > /opt/frp/frps.toml {frps}"
-                    ssh_conn.exec(cmd=cmd, pty=False)
-                # 启动服务
-                cmd1 = f"cd /opt/frp && nohup ./frps -c frps.toml &> frps.log &"
-                ssh_conn.conn.exec_command(timeout=1, command=cmd1, get_pty=False)
-
-                # 覆盖本地配置文件
-                frpc = traversal.frpc(host.split(':')[0], token, ant_type, local_port, server_prot)
-                with open(abspath('frpc.toml'), 'w') as file:
-                    file.write(frpc)
-
-                # 获取配置文件绝对路径
-                local_dir = os.path.join(current_dir, 'frp')
-                # 启动客户端
-                cmd_u = f"cd {local_dir} && nohup ./frpc -c {abspath('frpc.toml')} &> frpc.log &"
-                if platform.system() == 'Darwin' or platform.system() == 'Linux':
-                    os.system(cmd_u)
-                elif platform.system() == 'Windows':
-                    subprocess.Popen(
-                        [f"{local_dir}\\frpc.exe", "-c", abspath('frpc.toml')],
-                        stdout=open("frpc.log", "a"),
-                        stderr=subprocess.STDOUT,
-                        creationflags=subprocess.CREATE_NO_WINDOW
-                    )
-
-                icon1 = QIcon()
-                icon1.addFile(u":off.png", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
-                self.ui.pushButton.setIcon(icon1)
-                self.NAT = True
-            else:
-                # 关闭服务和客户端
-                ssh_conn.conn.exec_command(timeout=1, command="pkill -9 frps", get_pty=False)
-                if platform.system() == 'Darwin' or platform.system() == 'Linux':
-                    os.system("pkill -9 frpc")
-                elif platform.system() == 'Windows':
-                    subprocess.run(['taskkill', '/f', '/im', 'frpc.exe'], capture_output=True, text=True)
-
-                icon1 = QIcon()
-                icon1.addFile(u":open.png", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
-                self.ui.pushButton.setIcon(icon1)
-                self.NAT = False
+        
+        if is_start:
+            # 启动成功
+            icon1 = QIcon()
+            icon1.addFile(u":off.png", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
+            self.ui.pushButton.setIcon(icon1)
+            self.NAT = True
             self.NAT_lod()
-            ssh_conn.close()
-        except Exception as e:
-            util.logger.error(str(e))
+            QMessageBox.information(self, self.tr("完成"), self.tr("FRP 内网穿透已成功启动！"))
+        else:
+            # 停止成功
+            icon1 = QIcon()
+            icon1.addFile(u":open.png", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
+            self.ui.pushButton.setIcon(icon1)
+            self.NAT = False
+            self.NAT_lod()
 
     # 刷新内网穿透页面
     def NAT_lod(self):
@@ -1641,29 +1995,20 @@ class MainDialog(QMainWindow):
                         util.logger.error(f"设置密钥权限失败: {e}")
 
                     ssh_args.extend(["-i", key_file_path])
-
-            if username:
+            else:
                 ssh_args.extend(["-o", "StrictHostKeyChecking=no",  # 跳过主机密钥检查
                                  "-o", "PreferredAuthentications=password",
                                  "-o", "PubkeyAuthentication=no",
                                  "-o", "UserKnownHostsFile=/dev/null"  # 不保存主机密钥文件
                                  ])
-                ssh_args.append(f"{username}@{host}")
-            else:
-                ssh_args.append(host)
 
+            ssh_args.append(f"{username}@{host}")
             terminal.setShellProgram(ssh_command)
             terminal.setArgs(ssh_args)
             if not key_type and not key_file and password:
                 self._attach_ssh_auto_responder(terminal, password, timeout_ms=5000)
 
             terminal.startShellProgram()
-
-            # # 🔧 修复：在启动 Shell 后重新应用主题，防止被重置
-            # if hasattr(terminal, 'current_theme_name'):
-            #     terminal.setColorScheme(terminal.current_theme_name)
-            # else:
-            #     terminal.setColorScheme("Ubuntu")
 
             if hasattr(terminal, "setSuppressProgramBackgroundColors"):
                 terminal.setSuppressProgramBackgroundColors(True)
@@ -4420,11 +4765,14 @@ class TunnelConfig(QDialog):
 
     初始化配置对话框并设置UI元素值；
     监听UI变化以更新SSH命令；
-    提供复制SSH命令和
+    提供复制SSH命令和保存配置功能
     """
 
     def __init__(self, parent, data):
         super(TunnelConfig, self).__init__(parent)
+        
+        # 保存隧道名称，用于保存时更新 JSON 文件
+        self._tunnel_name = None
 
         self.ui = Ui_TunnelConfig()
         self.ui.setupUi(self)
@@ -4451,6 +4799,59 @@ class TunnelConfig(QDialog):
         self.ui.browser_open.setText(data.get(KEYS.BROWSER_OPEN))
         self.ui.copy.clicked.connect(self.do_copy_ssh_command)
         self.ui.comboBox_tunnel_type.currentIndexChanged.connect(self.readonly_remote_bind_address_edit)
+        
+        # 连接保存按钮到保存方法
+        self.ui.buttonBox.accepted.disconnect()  # 断开原有的连接
+        self.ui.buttonBox.accepted.connect(self.save_config)
+
+    def set_tunnel_name(self, name):
+        """设置隧道名称，用于保存时更新配置"""
+        self._tunnel_name = name
+
+    def save_config(self):
+        """保存隧道配置到 JSON 文件"""
+        if not self._tunnel_name:
+            QMessageBox.warning(self, self.tr("保存失败"), self.tr("隧道名称未设置"))
+            return
+        
+        # 验证本地绑定地址
+        local = self.ui.local_bind_address_edit.text().strip()
+        if not local or ':' not in local:
+            QMessageBox.warning(self, self.tr("警告"), self.tr("本地绑定地址格式不正确，请使用 host:port 格式"))
+            return
+        
+        # 验证远程绑定地址（非动态模式）
+        tunnel_type = self.ui.comboBox_tunnel_type.currentText()
+        remote = self.ui.remote_bind_address_edit.text().strip()
+        if tunnel_type != "动态":
+            if not remote or ':' not in remote:
+                QMessageBox.warning(self, self.tr("警告"), self.tr("远程绑定地址格式不正确，请使用 host:port 格式"))
+                return
+        
+        try:
+            file_path = get_config_path('tunnel.json')
+            # 读取 JSON 文件内容
+            data = util.read_json(file_path)
+            # 更新配置
+            data[self._tunnel_name] = self.as_dict()
+            # 将修改后的数据写回 JSON 文件
+            util.write_json(file_path, data)
+            
+            # 关闭对话框
+            self.accept()
+            
+            # 刷新父窗口的隧道列表
+            parent = self.parent()
+            if parent and hasattr(parent, 'parent') and parent.parent():
+                main_window = parent.parent()
+                if hasattr(main_window, 'tunnel_refresh'):
+                    util.clear_grid_layout(main_window.ui.gridLayout_tunnel_tabs)
+                    util.clear_grid_layout(main_window.ui.gridLayout_kill_all)
+                    main_window.tunnel_refresh()
+                    
+        except Exception as e:
+            util.logger.error(f"Error saving tunnel config: {e}")
+            QMessageBox.warning(self, self.tr("保存失败"), str(e))
 
     def readonly_remote_bind_address_edit(self):
         tunnel_type = self.ui.comboBox_tunnel_type.currentText()
@@ -4581,6 +4982,7 @@ class Tunnel(QWidget):
         self.manager = ForwarderManager()
 
         self.tunnelconfig = TunnelConfig(self, data)
+        self.tunnelconfig.set_tunnel_name(name)  # 设置隧道名称，用于保存配置
         self.tunnelconfig.setWindowTitle(name)
         self.tunnelconfig.setModal(True)
         self.ui.name.setText(name)
@@ -4614,11 +5016,13 @@ class Tunnel(QWidget):
                 self.stop_tunnel()
             except Exception as e:
                 util.logger.error(f"Error stopping tunnel: {e}")
+                QMessageBox.warning(self, self.tr("停止隧道失败"), str(e))
         else:
             try:
                 self.start_tunnel()
             except Exception as e:
                 util.logger.error(f"Error starting tunnel: {e}")
+                QMessageBox.warning(self, self.tr("启动隧道失败"), str(e))
         # 隧道操作完成后刷新 UI 状态
         self.update_ui()
 
@@ -4631,14 +5035,30 @@ class Tunnel(QWidget):
     def start_tunnel(self):
         type_ = self.tunnelconfig.ui.comboBox_tunnel_type.currentText()
         ssh = self.tunnelconfig.ui.comboBox_ssh.currentText()
+        
+        if not ssh:
+            raise ValueError("请先选择 SSH 服务器")
 
         # 本地服务器地址
-        local_bind_address = self.tunnelconfig.ui.local_bind_address_edit.text()
-        local_host, local_port = local_bind_address.split(':')[0], int(local_bind_address.split(':')[1])
+        local_bind_address = self.tunnelconfig.ui.local_bind_address_edit.text().strip()
+        if not local_bind_address or ':' not in local_bind_address:
+            raise ValueError("本地绑定地址格式错误，请使用 host:port 格式，例如 localhost:1080")
+        
+        try:
+            local_host, local_port = local_bind_address.split(':')[0], int(local_bind_address.split(':')[1])
+        except (ValueError, IndexError):
+            raise ValueError("本地绑定地址端口必须是数字")
 
         # 获取SSH信息
         ssh_user, ssh_password, host, key_type, key_file = open_data(ssh)
+        
+        if not host or ':' not in host:
+            raise ValueError(f"SSH 服务器配置错误，请检查 '{ssh}' 的配置")
+        
         ssh_host, ssh_port = host.split(':')[0], int(host.split(':')[1])
+        
+        if not ssh_user:
+            raise ValueError("用户名不能为空")
 
         tunnel, ssh_client, transport = None, None, None
         tunnel_id = self.ui.name.text()
@@ -4717,10 +5137,11 @@ class Tunnel(QWidget):
 def open_data(ssh):
     with open(get_config_path('config.dat'), 'rb') as c:
         conf = pickle.loads(c.read())[ssh]
-    username, password, host, key_type, key_file = '', '', '', '', ''
     if len(conf) == 3:
-        return username, password, host, '', ''
+        # 3 元素配置：username, password, host
+        return conf[0], conf[1], conf[2], '', ''
     else:
+        # 5 元素配置：username, password, host, key_type, key_file
         return conf[0], conf[1], conf[2], conf[3], conf[4]
 
 

@@ -159,6 +159,19 @@ def check_remote_directory_exists(sftp, directory):
         return False
 
 
+def check_remote_frp_exists(ssh_conn):
+    """
+    检查远程服务器上的 frps 是否存在（使用 $HOME/frp）
+    :param ssh_conn: SSH 连接对象
+    :return: 是否存在
+    """
+    try:
+        result = ssh_conn.exec(cmd="test -f $HOME/frp/frps && echo 'exists'", pty=False)
+        return result and "exists" in result
+    except:
+        return False
+
+
 def read_json_file(file_path):
     """
     读取json文件

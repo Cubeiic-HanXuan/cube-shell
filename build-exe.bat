@@ -33,7 +33,6 @@ nuitka --windows-console-mode=disable --windows-icon-from-ico=icons/logo.ico ^
   --include-module=pygments.lexers.shell ^
   --include-package=qtermwidget,core,function,style,ui,icons ^
   --include-data-dir=conf=conf ^
-  --include-data-dir=frp=frp ^
   --company-name=HanXuan ^
   --product-name="cubeShell" ^
   --file-version=2.2.0.0 ^
