@@ -111,9 +111,70 @@ class DockerInfoThread(QThread):
     """后台获取 Docker 信息的线程"""
     data_ready = Signal(dict, list)  # 分组信息, 容器列表
 
+    # 使用表格格式，用特殊分隔符分隔，比 JSON 更快更轻量
+    # 使用 ||| 作为分隔符，不太可能出现在容器信息中
+    FIELD_SEPARATOR = '|||'
+    # 字段：ID, Names, Image, State, CreatedAt, Ports
+    DOCKER_PS_FORMAT = '{{.ID}}|||{{.Names}}|||{{.Image}}|||{{.State}}|||{{.CreatedAt}}|||{{.Ports}}'
+    # compose 格式需要额外的 Project 和 Name 字段
+    COMPOSE_PS_FORMAT = '{{.ID}}|||{{.Name}}|||{{.Image}}|||{{.State}}|||{{.CreatedAt}}|||{{.Ports}}|||{{.Project}}'
+
     def __init__(self, ssh_conn):
         super().__init__()
         self.ssh_conn = ssh_conn
+
+    def _parse_container_line(self, line):
+        """解析表格格式的容器信息"""
+        parts = line.split(self.FIELD_SEPARATOR)
+        if len(parts) >= 6:
+            return {
+                'ID': parts[0],
+                'Names': parts[1],
+                'Image': parts[2],
+                'State': parts[3],
+                'CreatedAt': parts[4],
+                'Ports': parts[5] if len(parts) > 5 else ''
+            }
+        return None
+
+    def _parse_compose_table_format(self, ls_output, groups, compose_container_ids):
+        """回退方案：解析 docker compose ls 的表格输出"""
+        lines = ls_output.strip().splitlines()
+        for compose_ls in lines[1:]:  # 跳过表头
+            # 解析格式: NAME  STATUS  CONFIG FILES
+            # 使用正则分割多个空格
+            parts = compose_ls.split()
+            if len(parts) >= 3:
+                # 最后一个部分是配置文件路径
+                config = parts[-1]
+                project_name = parts[0]
+                
+                if not config.endswith('.yml') and not config.endswith('.yaml'):
+                    continue
+                
+                # 获取该项目的容器列表
+                ps_cmd = f"docker compose --file {config} ps -a --format json 2>/dev/null"
+                conn_exec = self.ssh_conn.sudo_exec(ps_cmd)
+                
+                if conn_exec and conn_exec.strip():
+                    for line in conn_exec.strip().splitlines():
+                        if line.strip():
+                            try:
+                                container = json.loads(line)
+                                data = {
+                                    'ID': container.get('ID', ''),
+                                    'Name': container.get('Name', ''),
+                                    'Image': container.get('Image', ''),
+                                    'State': container.get('State', ''),
+                                    'CreatedAt': container.get('CreatedAt', ''),
+                                    'Ports': container.get('Ports', ''),
+                                    'Project': container.get('Project', project_name)
+                                }
+                                if data['ID']:
+                                    compose_container_ids.add(data['ID'])
+                                    groups[data['Project']].append(data)
+                            except json.JSONDecodeError:
+                                pass
 
     def run(self):
         if not self.ssh_conn or not self.ssh_conn.active:
@@ -122,41 +183,77 @@ class DockerInfoThread(QThread):
 
         groups = defaultdict(list)
         container_list = []
+        compose_container_ids = set()  # 记录所有 compose 管理的容器 ID
+
         try:
-            # 获取 compose 项目和配置文件列表
-            ls = self.ssh_conn.sudo_exec("docker compose ls -a")
-            if ls:
-                lines = ls.strip().splitlines()
-                for compose_ls in lines[1:]:
-                    parts = compose_ls.rsplit(None, 1)
-                    if len(parts) >= 2:
-                        config = parts[-1]
-                        ps_cmd = f"docker compose --file {config} ps -a --format '{{{{json .}}}}'"
+            # 获取 compose 项目列表（使用 JSON 格式，更可靠）
+            ls = self.ssh_conn.sudo_exec("docker compose ls -a --format json 2>/dev/null")
+            if ls and ls.strip():
+                try:
+                    # docker compose ls --format json 输出是 JSON 数组
+                    compose_projects = json.loads(ls.strip())
+                    for project in compose_projects:
+                        project_name = project.get('Name', '')
+                        config = project.get('ConfigFiles', '')
+                        if not config or not project_name:
+                            continue
+                        
+                        # 获取该项目的容器列表（使用 JSON 格式）
+                        ps_cmd = f"docker compose --file {config} ps -a --format json 2>/dev/null"
                         conn_exec = self.ssh_conn.sudo_exec(ps_cmd)
+                        
+                        if conn_exec and conn_exec.strip():
+                            # docker compose ps --format json 输出可能是每行一个 JSON 或 JSON 数组
+                            for line in conn_exec.strip().splitlines():
+                                if line.strip():
+                                    try:
+                                        container = json.loads(line)
+                                        data = {
+                                            'ID': container.get('ID', ''),
+                                            'Name': container.get('Name', ''),
+                                            'Image': container.get('Image', ''),
+                                            'State': container.get('State', ''),
+                                            'CreatedAt': container.get('CreatedAt', ''),
+                                            'Ports': container.get('Ports', ''),
+                                            'Project': container.get('Project', project_name)
+                                        }
+                                        if data['ID']:
+                                            compose_container_ids.add(data['ID'])
+                                            groups[data['Project']].append(data)
+                                    except json.JSONDecodeError:
+                                        pass
+                except json.JSONDecodeError:
+                    # JSON 解析失败，可能是旧版 docker compose，回退到表格解析
+                    util.logger.warning("docker compose ls JSON parse failed, falling back to table parsing")
+                    self._parse_compose_table_format(ls, groups, compose_container_ids)
 
-                        current_containers = []
-                        for ps in conn_exec.strip().splitlines():
-                            if ps.strip():
-                                try:
-                                    data = json.loads(ps)
-                                    current_containers.append(data)
-                                except:
-                                    pass
-
-                        for item in current_containers:
-                            project_name = item.get('Project', '未知')
-                            groups[project_name].append(item)
-
-            # 如果没有 compose 组，或者作为 fallback，获取普通 docker 容器
-            if not groups:
-                conn_exec = self.ssh_conn.exec("docker ps -a --format '{{json .}}'")
+            # 获取所有独立容器（使用表格格式提升性能）
+            # 分两次获取：运行中 + 已停止，比直接 -a 更快
+            standalone_containers = []
+            
+            # 1. 获取运行中的容器
+            running_cmd = f"docker ps --format '{self.DOCKER_PS_FORMAT}' 2>/dev/null"
+            conn_exec = self.ssh_conn.sudo_exec(running_cmd)
+            if conn_exec:
                 for ps in conn_exec.strip().splitlines():
                     if ps.strip():
-                        try:
-                            data = json.loads(ps)
-                            container_list.append(data)
-                        except:
-                            pass
+                        data = self._parse_container_line(ps)
+                        if data and data['ID'] and data['ID'] not in compose_container_ids:
+                            standalone_containers.append(data)
+
+            # 2. 获取已停止的容器
+            exited_cmd = f"docker ps -f 'status=exited' -f 'status=created' -f 'status=dead' --format '{self.DOCKER_PS_FORMAT}' 2>/dev/null"
+            conn_exec = self.ssh_conn.sudo_exec(exited_cmd)
+            if conn_exec:
+                for ps in conn_exec.strip().splitlines():
+                    if ps.strip():
+                        data = self._parse_container_line(ps)
+                        if data and data['ID'] and data['ID'] not in compose_container_ids:
+                            standalone_containers.append(data)
+
+            # 独立容器统一放在一个分组（保持原有展示逻辑）
+            if standalone_containers:
+                groups['default'] = standalone_containers
 
             self.data_ready.emit(groups, container_list)
 
@@ -185,24 +282,80 @@ class CommonContainersThread(QThread):
                 self.data_ready.emit({}, False)
                 return
 
-            conn_exec = self.ssh_conn.sudo_exec("docker ps -a --format '{{json .}}'")
-            container_list = []
-            for ps in conn_exec.strip().splitlines():
-                if ps.strip():
-                    try:
-                        data = json.loads(ps)
-                        container_list.append(data)
-                    except:
-                        pass
+            # 优化：只获取容器名称，不需要全部 JSON 信息
+            # 这样在容器数量多时也能快速返回
+            conn_exec = self.ssh_conn.sudo_exec("docker ps -a --format '{{.Names}}' 2>/dev/null")
+            container_names = []
+            if conn_exec and conn_exec.strip():
+                container_names = [name.strip() for name in conn_exec.strip().splitlines() if name.strip()]
 
             services = util.get_compose_service(self.config_path)
-            services_config = util.update_has_attribute(services, container_list)
+            # 使用优化后的匹配逻辑
+            services_config = self._update_has_attribute(services, container_names)
 
             self.data_ready.emit(services_config, True)
 
         except Exception as e:
             util.logger.error(f"Common containers fetch error: {e}")
             self.data_ready.emit({}, False)
+
+    def _update_has_attribute(self, services_dict, container_names):
+        """根据容器名称列表检查服务是否已安装"""
+        for service_key, config in services_dict.items():
+            config['has'] = any(service_key in name for name in container_names)
+        return services_dict
+
+
+class DockerOperationThread(QThread):
+    """后台执行 Docker 容器操作的线程（停止、重启、删除等）"""
+    # (成功与否, 操作类型, 容器信息字典 {id: {state, ports}})
+    operation_finished = Signal(bool, str, dict)
+    
+    def __init__(self, ssh_conn, operation, container_ids):
+        super().__init__()
+        self.ssh_conn = ssh_conn
+        self.operation = operation  # 'stop', 'restart', 'rm', 'start'
+        self.container_ids = container_ids
+    
+    def run(self):
+        if not self.ssh_conn or not self.ssh_conn.active:
+            self.operation_finished.emit(False, self.operation, {})
+            return
+        
+        try:
+            for container_id in self.container_ids:
+                cmd = f"docker {self.operation} {container_id}"
+                # 使用 sudo_exec 并等待命令完成
+                self.ssh_conn.sudo_exec(cmd)
+            
+            # 操作完成后，获取被操作容器的最新状态和端口信息
+            container_info = {}
+            if self.operation != 'rm':
+                for container_id in self.container_ids:
+                    # 查询容器最新状态和端口（使用 docker ps 格式，与列表一致）
+                    result = self.ssh_conn.sudo_exec(
+                        f"docker ps -a --filter 'id={container_id}' --format '{{{{.State}}}}|||{{{{.Ports}}}}' 2>/dev/null"
+                    )
+                    state = ''
+                    ports_str = ''
+                    if result and result.strip():
+                        parts = result.strip().split('|||')
+                        state = parts[0] if len(parts) > 0 else ''
+                        ports_str = parts[1] if len(parts) > 1 else ''
+                    
+                    container_info[container_id] = {
+                        'state': state,
+                        'ports': ports_str
+                    }
+            else:
+                # 删除操作，标记为 removed
+                for container_id in self.container_ids:
+                    container_info[container_id] = {'state': 'removed', 'ports': ''}
+            
+            self.operation_finished.emit(True, self.operation, container_info)
+        except Exception as e:
+            util.logger.error(f"Docker {self.operation} error: {e}")
+            self.operation_finished.emit(False, self.operation, {})
 
 
 class FRPInstallThread(QThread):
@@ -2559,12 +2712,17 @@ class MainDialog(QMainWindow):
             self.ui.action2.setIconVisibleInMenu(True)
             self.ui.action3 = QAction(QIcon(':remove.png'), self.tr('删除'), self)
             self.ui.action3.setIconVisibleInMenu(True)
-            # self.ui.action4 = QAction('日志', self)
+            self.ui.action_terminal = QAction(QIcon(':icons8-linux-48.png'), self.tr('终端'), self)
+            self.ui.action_terminal.setIconVisibleInMenu(True)
+            self.ui.action_logs = QAction(QIcon(':icons-log-48.png'), self.tr('日志'), self)
+            self.ui.action_logs.setIconVisibleInMenu(True)
 
             self.ui.tree_menu.addAction(self.ui.action1)
             self.ui.tree_menu.addAction(self.ui.action2)
             self.ui.tree_menu.addAction(self.ui.action3)
-            # self.ui.tree_menu.addAction(self.ui.action4)
+            self.ui.tree_menu.addSeparator()
+            self.ui.tree_menu.addAction(self.ui.action_terminal)
+            self.ui.tree_menu.addAction(self.ui.action_logs)
 
             # 鼠标右键获取 treeWidgetDocker 上的容器Id
             # 判断是父级还是子级
@@ -2580,15 +2738,40 @@ class MainDialog(QMainWindow):
                 self.ui.action1.triggered.connect(lambda: self.stopDockerContainer(container_ids))
                 self.ui.action2.triggered.connect(lambda: self.restartDockerContainer(container_ids))
                 self.ui.action3.triggered.connect(lambda: self.rmDockerContainer(container_ids))
+                # 父级菜单禁用终端和日志功能（不能同时查看多个容器）
+                self.ui.action_terminal.setEnabled(False)
+                self.ui.action_logs.setEnabled(False)
             # self.ui.action4.triggered.connect(self.rmDockerContainer)
             else:  # 子级
                 container_id = item.text(1)  # 容器ID在第二列
                 self.ui.action1.triggered.connect(lambda: self.stopDockerContainer([container_id]))
                 self.ui.action2.triggered.connect(lambda: self.restartDockerContainer([container_id]))
                 self.ui.action3.triggered.connect(lambda: self.rmDockerContainer([container_id]))
+                self.ui.action_terminal.triggered.connect(lambda: self.execDockerTerminal(container_id))
+                self.ui.action_logs.triggered.connect(lambda: self.viewDockerLogs(container_id))
 
             # 声明当鼠标在groupBox控件上右击时，在鼠标位置显示右键菜单,exec_,popup两个都可以，
             self.ui.tree_menu.popup(QCursor.pos())
+
+    def execDockerTerminal(self, container_id):
+        """向当前 SSH 终端发送 docker exec 命令进入容器"""
+        current_index = self.ui.ShellTab.currentIndex()
+        terminal = self.get_text_browser_from_tab(current_index)
+        
+        if terminal:
+            # 发送 docker exec 命令
+            cmd = f"docker exec -ti {container_id} /bin/bash\n"
+            terminal.sendText(cmd)
+
+    def viewDockerLogs(self, container_id):
+        """向当前 SSH 终端发送 docker logs 命令查看容器日志"""
+        current_index = self.ui.ShellTab.currentIndex()
+        terminal = self.get_text_browser_from_tab(current_index)
+        
+        if terminal:
+            # 发送 docker logs 命令（-f 跟踪日志，-t 显示时间戳，--tail=1000 显示最后1000行）
+            cmd = f"docker logs -n 100 -f {container_id}\n"
+            terminal.sendText(cmd)
 
     # 打开增加配置界面
     def showAddConfig(self):
@@ -3315,7 +3498,7 @@ class MainDialog(QMainWindow):
                 self.ui.treeWidgetDocker.headerItem().setText(0, self.tr("docker容器管理") + '：')
                 self.ui.treeWidgetDocker.setHeaderLabels(
                     [self.tr("#"), self.tr("容器ID"), self.tr("容器"), self.tr("镜像"), self.tr("状态"),
-                     self.tr("启动命令"), self.tr("创建时间"), self.tr("端口")
+                     self.tr("创建时间"), self.tr("端口")
                      ])
 
                 # 设置表头居中
@@ -3394,9 +3577,8 @@ class MainDialog(QMainWindow):
         container_item.setText(2, c.get('Name', "") or c.get('Names', ""))  # 兼容不同格式
         container_item.setText(3, c.get('Image', ""))
         container_item.setText(4, c.get('State', ""))
-        container_item.setText(5, c.get('Command', ""))
-        container_item.setText(6, c.get('CreatedAt', ""))
-        container_item.setText(7, c.get('Ports', ""))
+        container_item.setText(5, c.get('CreatedAt', ""))
+        container_item.setText(6, c.get('Ports', ""))
         container_item.setIcon(0, QIcon(":icons8-docker-48.png"))
 
         # 设置居中
@@ -3823,23 +4005,145 @@ class MainDialog(QMainWindow):
     # 停止docker容器
     def stopDockerContainer(self, container_ids):
         if container_ids:
-            for container_id in container_ids:
-                self.start_async_task('docker stop ' + container_id)
-            self.refreshDokerInfo()
+            self._start_docker_operation('stop', container_ids)
 
     # 重启docker容器
     def restartDockerContainer(self, container_ids):
         if container_ids:
-            for container_id in container_ids:
-                self.start_async_task('docker restart ' + container_id)
-            self.refreshDokerInfo()
+            self._start_docker_operation('restart', container_ids)
 
     # 删除docker容器
     def rmDockerContainer(self, container_ids):
         if container_ids:
-            for container_id in container_ids:
-                self.start_async_task('docker rm ' + container_id)
-            self.refreshDokerInfo()
+            self._start_docker_operation('rm', container_ids)
+
+    # 启动docker容器
+    def startDockerContainer(self, container_ids):
+        if container_ids:
+            self._start_docker_operation('start', container_ids)
+
+    def _start_docker_operation(self, operation, container_ids):
+        """启动 Docker 操作线程，操作完成后局部刷新"""
+        operation_names = {
+            'stop': '停止',
+            'restart': '重启',
+            'rm': '删除',
+            'start': '启动'
+        }
+        op_name = operation_names.get(operation, operation)
+        
+        # 先标记被操作的容器为“操作中”状态
+        self._mark_containers_operating(container_ids, f"{op_name}中...")
+        
+        # 启动操作线程
+        self.docker_op_thread = DockerOperationThread(self.ssh(), operation, container_ids)
+        self.docker_op_thread.operation_finished.connect(self._on_docker_operation_finished)
+        self.docker_op_thread.start()
+
+    def _mark_containers_operating(self, container_ids, status_text):
+        """标记容器为操作中状态（黄色高亮）"""
+        tree = self.ui.treeWidgetDocker
+        
+        for i in range(tree.topLevelItemCount()):
+            project_item = tree.topLevelItem(i)
+            
+            # 检查子容器
+            for j in range(project_item.childCount()):
+                container_item = project_item.child(j)
+                if container_item.text(1) in container_ids:
+                    container_item.setText(4, status_text)
+                    container_item.setBackground(4, QColor(255, 193, 7, 80))
+            
+            # 检查顶层容器
+            if project_item.text(1) in container_ids:
+                project_item.setText(4, status_text)
+                project_item.setBackground(4, QColor(255, 193, 7, 80))
+
+    def _update_container_info_in_tree(self, container_info):
+        """局部更新容器状态和端口信息"""
+        tree = self.ui.treeWidgetDocker
+        
+        for i in range(tree.topLevelItemCount()):
+            project_item = tree.topLevelItem(i)
+            
+            # 检查子容器
+            for j in range(project_item.childCount()):
+                container_item = project_item.child(j)
+                item_id = container_item.text(1)
+                
+                if item_id in container_info:
+                    info = container_info[item_id]
+                    # 更新状态列（第 5 列，索引 4）
+                    container_item.setText(4, info['state'])
+                    # 更新端口列（第 7 列，索引 6）
+                    container_item.setText(6, info['ports'])
+                    # 清除高亮背景
+                    container_item.setBackground(4, QColor(0, 0, 0, 0))
+            
+            # 检查顶层容器
+            item_id = project_item.text(1)
+            if item_id in container_info:
+                info = container_info[item_id]
+                project_item.setText(4, info['state'])
+                project_item.setText(6, info['ports'])
+                project_item.setBackground(4, QColor(0, 0, 0, 0))
+
+    def _remove_containers_from_tree(self, container_ids):
+        """从树中移除已删除的容器"""
+        tree = self.ui.treeWidgetDocker
+        items_to_remove = []
+        
+        # 收集要删除的项
+        for i in range(tree.topLevelItemCount()):
+            project_item = tree.topLevelItem(i)
+            
+            # 检查子容器
+            for j in range(project_item.childCount() - 1, -1, -1):
+                container_item = project_item.child(j)
+                if container_item.text(1) in container_ids:
+                    items_to_remove.append((project_item, j))
+            
+            # 检查顶层容器
+            if project_item.text(1) in container_ids:
+                items_to_remove.append((None, i))
+        
+        # 从后往前删除，避免索引变化
+        for parent, index in reversed(items_to_remove):
+            if parent:
+                parent.removeChild(parent.child(index))
+            else:
+                tree.takeTopLevelItem(index)
+        
+        # 清理空的项目组
+        for i in range(tree.topLevelItemCount() - 1, -1, -1):
+            project_item = tree.topLevelItem(i)
+            # 如果项目组没有子容器且不是独立容器，删除它
+            if project_item.childCount() == 0 and not project_item.text(1):
+                tree.takeTopLevelItem(i)
+
+    @Slot(bool, str, dict)
+    def _on_docker_operation_finished(self, success, operation, container_info):
+        """容器操作完成后的回调 - 局部刷新状态和端口"""
+        operation_names = {
+            'stop': '停止',
+            'restart': '重启',
+            'rm': '删除',
+            'start': '启动'
+        }
+        op_name = operation_names.get(operation, operation)
+        
+        if success:
+            if operation == 'rm':
+                # 删除操作：从列表中移除容器
+                self._remove_containers_from_tree(list(container_info.keys()))
+            else:
+                # 其他操作：更新状态和端口
+                self._update_container_info_in_tree(container_info)
+        else:
+            # 操作失败，恢复显示并提示错误
+            for cid in container_info.keys() if container_info else []:
+                self._mark_containers_operating([cid], '操作失败')
+            self.alarm(f"容器{op_name}失败")
 
     # 删除文件夹
     def removeDir(self):
