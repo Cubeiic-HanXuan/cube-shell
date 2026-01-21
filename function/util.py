@@ -56,6 +56,8 @@ def get_default_file_icon(qt_str):
 
     if qt_str.endswith(".sh"):
         return QIcon(':icons8-ssh-48.png')
+    elif qt_str.endswith(".sql"):
+        return QIcon(':icons8-sql-48.png')
     elif qt_str.endswith(".py"):
         return QIcon(':icons8-python-48.png')
     elif qt_str.endswith(".java"):
@@ -66,7 +68,7 @@ def get_default_file_icon(qt_str):
         return QIcon(':icons8-c-48.png')
     elif qt_str.endswith(".cpp"):
         return QIcon(':icons8-c-48.png')
-    elif qt_str.endswith(".js"):
+    elif qt_str.endswith(".js") and not qt_str.startswith(".eslintrc"):
         return QIcon(':icons8-js-48.png')
     elif qt_str.endswith(".vue"):
         return QIcon(':icons8-vuejs-48.png')
@@ -75,7 +77,23 @@ def get_default_file_icon(qt_str):
     elif qt_str.endswith(".css"):
         return QIcon(':icons8-css-48.png')
     elif qt_str.endswith(".exe"):
-        return QIcon(':icons8-exe-48.png')
+        return QIcon(':icons8-windows-48.png')
+    elif qt_str.endswith(".dmg"):
+        return QIcon(':icons8-dmg-48.png')
+    elif qt_str.endswith(('.bat', '.vbs')):
+        return QIcon(':icons8-bat-48.png')
+    elif qt_str.endswith(".ini"):
+        return QIcon(':icons8-ini-48.png')
+    elif qt_str.endswith(".tsx"):
+        return QIcon(':icons8-react-48.png')
+    elif qt_str.endswith(".ts"):
+        return QIcon(':icons8-ts-48.png')
+    elif qt_str.startswith(".env"):
+        return QIcon(':icons8-env-48.png')
+    elif qt_str.startswith(".eslintrc"):
+        return QIcon(':icons8-eslintrc-48.png')
+    elif qt_str.endswith(".editorconfig"):
+        return QIcon(':icons8-editorconfig-48.png')
     elif qt_str.endswith(".jar"):
         return QIcon(':icons8-jar-48.png')
     elif qt_str.endswith(".so"):

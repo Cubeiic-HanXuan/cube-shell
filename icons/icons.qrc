@@ -33,6 +33,7 @@
     <file>icons8-python-48.png</file>
     <file>icons8-settings-40.png</file>
     <file>icons8-ssh-48.png</file>
+    <file>icons8-sql-48.png</file>
     <file>icons8-success-48.png</file>
     <file>icons8-txt-48.png</file>
     <file>icons8-vuejs-48.png</file>
@@ -72,6 +73,16 @@
     <file>icons-rename-48.png</file>
     <file>docs-log.png</file>
     <file>xml-48.png</file>
+    <file>icons8-windows-48.png</file>
+    <file>icons8-dmg-48.png</file>
+    <file>icons8-bat-48.png</file>
+    <file>icons8-ini-48.png</file>
+    <file>icons8-react-48.png</file>
+    <file>icons8-ts-48.png</file>
+    <file>icons8-env-48.png</file>
+    <file>icons8-editorconfig-48.png</file>
+    <file>icons8-eslintrc-48.png</file>
+    <file>icons8-exec-48.png</file>
     <file>nginx_128.png</file>
     <file>postgresql_128.png</file>
     <file>nacos_128.png</file>
