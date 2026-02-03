@@ -86,6 +86,8 @@ class KPtyProcess(KProcess):
         self._read_running = False
         self._win_input_filter_buf = ""
         self._win_input_filter_seq = "\x1b[2~"
+        self._window_lines = 24
+        self._window_cols = 80
 
         # 关键修复：严格对应C++构造函数中的pty->open()调用
         # 对应C++: d->pty->open() 或 d->pty->open(ptyMasterFd)
@@ -188,7 +190,12 @@ class KPtyProcess(KProcess):
         """Windows平台设置窗口大小"""
         if IS_WINDOWS and self._winpty_process:
             try:
-                self._winpty_process.set_winsize(lines, cols)
+                if hasattr(self._winpty_process, "setwinsize"):
+                    self._winpty_process.setwinsize(lines, cols)
+                elif hasattr(self._winpty_process, "set_winsize"):
+                    self._winpty_process.set_winsize(lines, cols)
+                elif hasattr(self._winpty_process, "pty") and hasattr(self._winpty_process.pty, "set_size"):
+                    self._winpty_process.pty.set_size(cols, lines)
             except Exception as e:
                 print(f"⚠️ 设置Windows PTY窗口大小失败: {e}")
 
@@ -701,6 +708,8 @@ class KPtyProcess(KProcess):
 
     def setWinSize(self, lines, cols):
         """设置窗口大小 - 关键：SSH连接需要正确的终端尺寸"""
+        self._window_lines = int(lines)
+        self._window_cols = int(cols)
         if IS_WINDOWS:
             self.setWinSizeWindows(lines, cols)
             return
@@ -785,7 +794,7 @@ class KPtyProcess(KProcess):
 
     def windowSize(self):
         """获取窗口大小"""
-        return QSize(80, 24)  # 默认大小
+        return QSize(getattr(self, "_window_cols", 80), getattr(self, "_window_lines", 24))
 
     def setWindowSize(self, lines, cols):
         """设置窗口大小"""
