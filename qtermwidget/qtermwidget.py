@@ -1026,6 +1026,18 @@ class QTermWidget(QWidget, QTermWidgetInterface):
         if emulation:
             # emulation.reset()
             emulation.clearEntireScreen()
+        try:
+            # 兼容Windows连接本地终端清屏功能
+            if os.name == "nt":
+                program = self.m_impl.m_session.program() if self.m_impl and self.m_impl.m_session else ""
+                base = os.path.basename(program or "").lower()
+                if base not in {"ssh", "ssh.exe"}:
+                    self.sendText("cls\r")
+                    self.m_impl.m_session.clearHistory()
+                    return
+        except Exception:
+            pass
+
         self.m_impl.m_session.refresh()
         self.m_impl.m_session.clearHistory()
     
