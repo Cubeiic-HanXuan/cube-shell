@@ -1992,7 +1992,7 @@ class MainDialog(QMainWindow):
                 terminal.setPlaceholderText(str(e))
             return False
 
-    def _connect_local_with_qtermwidget(self, terminal, label: str) -> int:
+    def _connect_local_with_qtermwidget(self, terminal, label: str, start_dir: str = "") -> int:
         if not terminal:
             return 0
 
@@ -2006,8 +2006,15 @@ class MainDialog(QMainWindow):
                 home_dir = os.path.expanduser("~")
         except Exception:
             home_dir = os.path.expanduser("~")
+        work_dir = home_dir
+        if start_dir:
+            try:
+                if os.path.isdir(start_dir):
+                    work_dir = start_dir
+            except Exception:
+                pass
         if hasattr(terminal, 'setWorkingDirectory'):
-            terminal.setWorkingDirectory(home_dir)
+            terminal.setWorkingDirectory(work_dir)
 
         shell_program = ""
         shell_args = []
@@ -2042,7 +2049,7 @@ class MainDialog(QMainWindow):
         # - 复用 initSftp() / refreshDirs() 的目录刷新逻辑
         # - 通过 tabWhatsThis 绑定 tab 与后端连接 id
         current_index = self.ui.ShellTab.currentIndex()
-        local_conn = LocalClient(pwd=home_dir, name=label)
+        local_conn = LocalClient(pwd=work_dir, name=label)
         local_conn.Shell = terminal
         self.ui.ShellTab.setTabWhatsThis(current_index, local_conn.id)
         self.ssh_clients[local_conn.id] = local_conn
@@ -2638,6 +2645,15 @@ class MainDialog(QMainWindow):
             self.ui.action5.setIconVisibleInMenu(True)
             self.ui.action6 = QAction(QIcon(':refresh.png'), self.tr('刷新'), self)
             self.ui.action6.setIconVisibleInMenu(True)
+            ssh_conn = self.ssh()
+            self.ui.action_new_local_terminal = None
+            if ssh_conn and getattr(ssh_conn, "is_local", False):
+                self.ui.action_new_local_terminal = QAction(
+                    QIcon(':Localhost.png'),
+                    self.tr('新建位于文件夹位置的终端窗口'),
+                    self
+                )
+                self.ui.action_new_local_terminal.setIconVisibleInMenu(True)
             self.ui.action7 = QAction(QIcon(':remove.png'), self.tr('删除'), self)
             self.ui.action7.setIconVisibleInMenu(True)
             self.ui.action8 = QAction(QIcon(':icons-rename-48.png'), self.tr('重命名'), self)
@@ -2654,6 +2670,8 @@ class MainDialog(QMainWindow):
             self.ui.tree_menu.addAction(self.ui.action4)
             self.ui.tree_menu.addAction(self.ui.action5)
             self.ui.tree_menu.addAction(self.ui.action6)
+            if self.ui.action_new_local_terminal is not None:
+                self.ui.tree_menu.addAction(self.ui.action_new_local_terminal)
 
             # 在子菜单中添加动作
             file_action = QAction(self.tr("权限"), self)
@@ -2683,6 +2701,8 @@ class MainDialog(QMainWindow):
             self.ui.action4.triggered.connect(self.createDir)
             self.ui.action5.triggered.connect(self.createFile)
             self.ui.action6.triggered.connect(self.refresh)
+            if self.ui.action_new_local_terminal is not None:
+                self.ui.action_new_local_terminal.triggered.connect(self.open_local_terminal_in_selected_folder)
             self.ui.action7.triggered.connect(self.remove)
             self.ui.action8.triggered.connect(self.rename)
             self.ui.action9.triggered.connect(self.unzip)
@@ -2690,6 +2710,37 @@ class MainDialog(QMainWindow):
 
             # 声明当鼠标在groupBox控件上右击时，在鼠标位置显示右键菜单   ,exec_,popup两个都可以，
             self.ui.tree_menu.popup(QCursor.pos())
+
+    def open_local_terminal_in_selected_folder(self):
+        ssh_conn = self.ssh()
+        if not ssh_conn or not getattr(ssh_conn, "is_local", False):
+            return
+
+        target_dir = getattr(ssh_conn, "pwd", "") or str(Path.home())
+        try:
+            selected_items = self.ui.treeWidget.selectedItems()
+            if selected_items:
+                item = selected_items[0]
+                name = (item.text(0) or "").strip()
+                perm = (item.text(3) or "").strip()
+                if name and perm.startswith("d"):
+                    target_dir = os.path.normpath(os.path.join(target_dir, name))
+        except Exception:
+            pass
+
+        base = os.path.basename(target_dir) or target_dir
+        tab_name = f"{self.tr('本机终端')} - {base}"
+        tab_index, terminal = self.add_new_tab(tab_name)
+        if tab_index < 0 or not terminal:
+            return
+
+        try:
+            self._connect_local_with_qtermwidget(terminal, tab_name, start_dir=target_dir)
+            self.isConnected = True
+            self.refreshDirs()
+            self.processInitUI()
+        except Exception as e:
+            util.logger.error(f"新建本机终端失败: {e}")
 
     # 创建docker列表树右键菜单函数
     def treeDocker(self, position):
@@ -6782,7 +6833,6 @@ if __name__ == '__main__':
     #
     # # 安装翻译
     # app.installTranslator(translator)
-
     window = MainDialog(app)
 
     window.show()
