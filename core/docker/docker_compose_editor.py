@@ -487,9 +487,9 @@ class ServiceSearchDialog(QDialog):
 
         services = {}
         try:
-            # 读取配置文件
+            # 读取配置文件（显式指定UTF-8编码，避免Windows平台GBK解码错误）
             if os.path.exists(config_file):
-                with open(config_file, 'r') as f:
+                with open(config_file, 'r', encoding='utf-8') as f:
                     config = yaml.safe_load(f) or {}
                     for name, service_config in config.get('services', {}).items():
                         # 从配置中提取描述信息
@@ -576,8 +576,8 @@ class DockerComposeEditor(QWidget):
 
         self.services_tree = QTreeWidget()
         self.services_tree.setHeaderHidden(True)  # 隐藏表头
-        self.services_tree.setAlternatingRowColors(True)  # 交替行颜色
         self.services_tree.setAnimated(True)  # 展开/折叠动画
+        self.services_tree.setAlternatingRowColors(False)  # 禁用交替行颜色，避免显示问题
         self.services_tree.setStyleSheet("""
             QTreeWidget {
                 border: 1px solid #ccc;
@@ -587,22 +587,22 @@ class DockerComposeEditor(QWidget):
             QTreeWidget::item {
                 padding: 10px;
                 border-bottom: 1px solid #eee;
-                color: #333;
             }
             QTreeWidget::item:selected {
                 background-color: #0078d7;
                 color: #ffffff;
             }
             QTreeWidget::item:hover {
-                background-color: #e9f5ff;
-                color: #333;
+                background-color: rgba(0, 120, 215, 0.1);
             }
             QTreeWidget::item:selected:hover {
                 background-color: #3297e6;
                 color: #ffffff;
             }
         """)
-        self.services_tree.setFont(QFont("Arial", 11))
+        self.services_tree.setRootIsDecorated(False)
+        self.services_tree.setIndentation(0)
+        #self.services_tree.setFont(QFont("Arial", 14))
         self.services_tree.setIconSize(QSize(24, 24))
         self.services_tree.itemClicked.connect(self.on_service_selected)
         left_layout.addWidget(self.services_tree)
