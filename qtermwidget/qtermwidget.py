@@ -193,10 +193,6 @@ class QTermWidget(QWidget, QTermWidgetInterface):
         # 创建搜索栏
         self._setup_search_bar()
         
-        # 如果需要立即启动
-        if startnow and self.m_impl.m_session:
-            self.m_impl.m_session.run()
-        
         # 设置焦点
         self.setFocus(Qt.FocusReason.OtherFocusReason)
         self.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
@@ -215,11 +211,16 @@ class QTermWidget(QWidget, QTermWidgetInterface):
         self.setScrollBarPosition(ScrollBarPosition.NoScrollBar)
         self.setKeyboardCursorShape(self.KeyboardCursorShape.BlockCursor)
         
-        # 连接会话和终端显示
+        # 连接会话和终端显示 - 关键：必须在 run() 之前连接
+        # 这样当 shell 启动时，尺寸变化信号才能正确传递
         self.m_impl.m_session.addView(self.m_impl.m_terminalDisplay)
         
         # 连接会话事件信号
         self._connect_session_events()
+        
+        # 如果需要立即启动 - 放在所有连接建立之后
+        if startnow and self.m_impl.m_session:
+            self.m_impl.m_session.run()
     
     def _setup_translations(self):
         """设置翻译"""

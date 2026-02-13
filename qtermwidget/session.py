@@ -933,6 +933,10 @@ class Session(QObject):
 
             # 延迟重连信号以确保进程启动后信号正常工作
             QTimer.singleShot(200, self._ensureSignalConnections)
+            
+            # 关键修复：延迟更新终端尺寸
+            # 在进程启动后，视图可能还没有完全初始化，延迟确保尺寸正确同步到PTY
+            QTimer.singleShot(100, self.updateTerminalSize)
 
             self.started.emit()
 

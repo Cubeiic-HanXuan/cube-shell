@@ -358,9 +358,6 @@ class KPtyProcess(KProcess):
             # 设置读取通知器
             self._setup_notifier()
 
-            # 关键：设置初始终端尺寸（SSH连接需要）
-            from PySide6.QtCore import QTimer
-            QTimer.singleShot(100, lambda: self.setWinSize(24, 80))
 
             # 发出started信号
             self.setProcessState(QProcess.ProcessState.Running)
