@@ -6257,7 +6257,21 @@ class SSHQTermWidget(QTermWidget):
 
     def setup_code_font(self):
         """设置适合代码显示的字体"""
-        # 优选等宽字体，支持更好的代码显示
+        # 优先使用用户配置的字体
+        saved_font = util.THEME.get('font', '')
+        current_size = util.THEME.get('font_size', 14)
+        
+        available_families = set(QFontDatabase.families())
+        
+        # 如果用户配置了字体且可用，直接使用
+        if saved_font and saved_font in available_families:
+            font = QFont(saved_font, current_size)
+            if hasattr(self, 'setTerminalFont'):
+                self.setTerminalFont(font)
+                print(f"使用用户配置字体: {saved_font}, 大小: {current_size}")
+                return
+        
+        # 否则使用默认字体优先级列表
         fonts_to_try = [
             "JetBrains Mono",
             "Fira Code",
@@ -6269,11 +6283,6 @@ class SSHQTermWidget(QTermWidget):
             "Liberation Mono",
             "Courier New"
         ]
-
-        current_size = util.THEME.get('font_size', 14)
-
-        # 提前获取可用字体列表，避免直接创建不存在的 QFont 导致系统开销和警告
-        available_families = set(QFontDatabase.families())
 
         for font_name in fonts_to_try:
             if font_name in available_families:

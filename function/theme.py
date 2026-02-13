@@ -1,110 +1,12 @@
 import os
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, Qt
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (QMainWindow, QVBoxLayout, QHBoxLayout,
-                               QLabel, QFrame, QStackedWidget, QPushButton, QWidget, QTableWidget, QTableWidgetItem,
-                               QAbstractItemView, QFontComboBox, QHeaderView, QMessageBox
+                               QLabel, QFrame, QPushButton, QWidget,
+                               QFontComboBox, QSpinBox, QMessageBox
                                )
 
 from function import util
-
-
-class ColorThemeButton(QPushButton):
-    def __init__(self, name, color, parent=None):
-        super().__init__(name, parent)
-        self.name = name
-        self.color = color
-        self.setStyleSheet(f"background-color: {color};")
-
-
-class ColorThemeList(QTableWidget):
-    def __init__(self, themes, parent=None):
-        super().__init__(len(themes), 1, parent)
-        self.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.setHorizontalHeaderLabels([""])
-        self.verticalHeader().hide()  # 隐藏垂直表头
-        self.horizontalHeader().setDefaultSectionSize(100)  # 设置默认列宽
-        self.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.setAlternatingRowColors(True)
-        self.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.setShowGrid(False)
-        self.setWordWrap(True)
-        self.setSortingEnabled(False)
-
-        self.themes = themes
-        self.buttons = []
-        self.selected_row = None
-
-        for i, (theme_name, theme_color) in enumerate(self.themes.items()):
-            button = ColorThemeButton(theme_name, theme_color)
-            button.clicked.connect(lambda _, idx=i: self.onThemeClick(idx, parent))
-            self.buttons.append(button)
-            # 将 QPushButton 放置在一个 QTableWidgetItem 中
-            item = QTableWidgetItem()
-            self.setItem(i, 0, item)
-            self.setCellWidget(i, 0, button)
-            # 设置项的可选中
-            item.setFlags(item.flags() | Qt.ItemIsSelectable)
-            item.setData(Qt.UserRole, i)  # 存储索引以便后续使用
-
-        self.itemSelectionChanged.connect(self.handleItemSelectionChanged)
-
-        # 设置水平头的大小调整模式
-        self.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-
-        # 设置样式表来控制选中行的颜色和边框
-        self.setStyleSheet("""
-            QTableWidget::item:selected {
-                background-color: yellow;
-                border: 2px solid green;
-            }
-            QTableWidget::item {
-                background-color: white;
-            }
-        """)
-
-    def handleItemSelectionChanged(self):
-        current_row = self.currentRow()
-        if current_row != self.selected_row:
-            self.deselectRow(self.selected_row)
-            self.selectRow(current_row)
-            self.selected_row = current_row
-            # 鼠标移上去触发
-            # self.onThemeClick(current_row)
-
-    def deselectRow(self, row):
-        if row is not None:
-            self.item(row, 0).setBackground(QColor("#FFFFFF"))  # 设置背景色为白色
-
-    def selectRow(self, row):
-        if row is not None:
-            self.item(row, 0).setBackground(QColor("#FFFF00"))  # 设置背景色为黄色
-            self.item(row, 0).setForeground(QColor("#FF0000"))  # 设置文本颜色为红色
-
-    def onThemeClick(self, index, parent):
-        # 打印当前选择的主题信息
-        theme_name, theme_color = list(self.themes.items())[index]
-        print(theme_name, theme_color)
-
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.abspath(os.path.join(current_dir, '../'))
-        file_path = os.path.join(project_root, 'conf', 'theme.json')
-
-        # 读取 JSON 文件内容
-        data = util.read_json(file_path)
-        data['theme'] = theme_name
-        data['theme_color'] = theme_color
-
-        # 将修改后的数据写回 JSON 文件
-        util.write_json(file_path, data)
-
-        util.THEME = data
-        QMessageBox.information(self, "切换主题", "主题切换成功")
-
-        # 关闭窗口
-        parent.close()
 
 
 class MainWindow(QMainWindow):
@@ -112,22 +14,22 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._main_window = main_window
 
-        self.setWindowTitle("主题切换")
+        self.setWindowTitle("主题设置")
+        self.setMinimumWidth(350)
 
         self.central_widget = QWidget(self)
         self.setCentralWidget(self.central_widget)
 
         self.main_layout = QVBoxLayout(self.central_widget)
 
-        # Title Bar
+        # Title Bar - 暗色/亮色切换
         self.title_bar = QFrame(self.central_widget)
         self.title_bar.setFixedHeight(50)
 
         title_layout = QHBoxLayout(self.title_bar)
-        title_layout.setContentsMargins(10, 0, 0, 0)  # 设置左边距
+        title_layout.setContentsMargins(10, 0, 10, 0)
         title_label = QLabel("终端主题", self.title_bar)
-        title_label.setStyleSheet("font-size: 20px;")
-        title_label.setAlignment(Qt.AlignCenter)  # 居中文本
+        title_label.setStyleSheet("font-size: 18px; font-weight: bold;")
         title_layout.addWidget(title_label)
 
         title_layout.addStretch(1)
@@ -138,73 +40,72 @@ class MainWindow(QMainWindow):
         self._btn_dark.clicked.connect(lambda: self._set_appearance("dark"))
         self._btn_light.clicked.connect(lambda: self._set_appearance("light"))
 
-        # Sidebar
-        self.sidebar = QFrame(self.central_widget)
-
-        self.sidebar_layout = QVBoxLayout(self.sidebar)
-
-        # 添加 “色彩主题” 标签
-        self.sidebar_layout.addWidget(QLabel("字体", self.sidebar))
-
-        # 字体选择框及其相关控件
-        font_group_box = QFrame(self.sidebar)
-        font_group_box.setFrameShape(QFrame.StyledPanel)
-        font_group_box_layout = QVBoxLayout(font_group_box)
-
-        self.font_combobox = QFontComboBox(font_group_box)
-        font_group_box_layout.addWidget(self.font_combobox)
-
-        # 连接 currentFontChanged 信号到槽函数
-        self.font_combobox.currentFontChanged.connect(self.print_selected_font)
-        self.sidebar_layout.addWidget(font_group_box)  # 添加字体选择框组
-
-        # 添加 “彩色主题” 标签
-        self.sidebar_layout.addWidget(QLabel("彩色主题", self.sidebar))
-
-        # 创建一个 widget 来容纳 `ColorThemeList` 表格
-        theme_list_widget = QWidget(self.sidebar)
-        self.sidebar_layout.addWidget(theme_list_widget)  # 添加 widget 到 sidebar 布局
-        theme_list_layout = QVBoxLayout(theme_list_widget)  # widget 内部的布局
-        theme_list_layout.setContentsMargins(0, 0, 0, 0)  # 移除边距
-
-        self.color_theme_list = ColorThemeList({
-            "rrt": "#000000",
-            "paraiso-light": "#E7E9DA",
-            "staroffice": "#FFFFFF",
-            "paraiso-dark": "#321D2F",
-            "native": "#202020",
-            "monokai": "#272821",
-            "lightbulb": "#1B2332",
-            "xcode": "#FFFFFF",
-            "fruity": "#000000",
-            "inkpot": "#1E1E28",
-            "material": "#233239",
-            "one-dark": "#272C35",
-            "zenburn": "#3F3F3F",
-            "solarized-dark": "#002C37",
-            "tango": "#F8F8F8"
-        }, self)  # 传递 MainWindow 实例作为父对象
-
-        theme_list_layout.addWidget(self.color_theme_list)  # 将 ColorThemeList 添加到布局
-
-        self.stacked_widget = QStackedWidget(self.central_widget)
-
         self.main_layout.addWidget(self.title_bar)
-        self.main_layout.addWidget(self.sidebar)
-        self.main_layout.addWidget(self.stacked_widget)
 
+        # 字体设置区域
+        font_frame = QFrame(self.central_widget)
+        font_frame.setFrameShape(QFrame.StyledPanel)
+        font_layout = QVBoxLayout(font_frame)
+
+        # 字体选择
+        font_label = QLabel("终端字体", font_frame)
+        font_label.setStyleSheet("font-weight: bold;")
+        font_layout.addWidget(font_label)
+
+        self.font_combobox = QFontComboBox(font_frame)
+        self.font_combobox.setFontFilters(QFontComboBox.MonospacedFonts)  # 只显示等宽字体
+        font_layout.addWidget(self.font_combobox)
+
+        # 字体大小
+        size_layout = QHBoxLayout()
+        size_label = QLabel("字体大小:", font_frame)
+        size_layout.addWidget(size_label)
+        
+        self.font_size_spinbox = QSpinBox(font_frame)
+        self.font_size_spinbox.setRange(8, 32)
+        self.font_size_spinbox.setValue(14)
+        size_layout.addWidget(self.font_size_spinbox)
+        size_layout.addStretch(1)
+        font_layout.addLayout(size_layout)
+
+        # 应用按钮
+        self.apply_btn = QPushButton("应用字体设置", font_frame)
+        self.apply_btn.clicked.connect(self.apply_font_settings)
+        font_layout.addWidget(self.apply_btn)
+
+        self.main_layout.addWidget(font_frame)
+        self.main_layout.addStretch(1)
+
+        # 加载当前配置
+        self._load_current_settings()
+
+    def _load_current_settings(self):
+        """加载当前配置"""
         try:
             current_dir = os.path.dirname(os.path.abspath(__file__))
             project_root = os.path.abspath(os.path.join(current_dir, '../'))
             file_path = os.path.join(project_root, 'conf', 'theme.json')
             data = util.read_json(file_path)
+            
+            # 加载外观设置
             appearance = str(data.get("appearance") or "dark").lower()
             self._btn_light.setEnabled(appearance != "light")
             self._btn_dark.setEnabled(appearance == "light")
-        except Exception:
-            pass
+            
+            # 加载字体设置
+            saved_font = data.get('font', '')
+            if saved_font:
+                self.font_combobox.setCurrentFont(QFont(saved_font))
+            
+            # 加载字体大小
+            font_size = data.get('font_size', 14)
+            self.font_size_spinbox.setValue(font_size)
+            
+        except Exception as e:
+            print(f"加载配置失败: {e}")
 
     def _set_appearance(self, appearance: str):
+        """设置暗色/亮色主题"""
         try:
             current_dir = os.path.dirname(os.path.abspath(__file__))
             project_root = os.path.abspath(os.path.join(current_dir, '../'))
@@ -217,19 +118,59 @@ class MainWindow(QMainWindow):
                 self._main_window.applyAppearance(data["appearance"])
             self._btn_light.setEnabled(data["appearance"] != "light")
             self._btn_dark.setEnabled(data["appearance"] == "light")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"设置外观失败: {e}")
 
-    def print_selected_font(self, font):
-        # 当前选择的字体改变时，打印字体名称
-        file_path = 'conf/theme.json'
-        print("Selected Font:", font.family())
-        # 读取 JSON 文件内容
-        data = util.read_json(file_path)
-        data['font'] = font.family()
+    def apply_font_settings(self):
+        """应用字体设置到所有终端"""
+        try:
+            # 获取选择的字体和大小
+            selected_font = self.font_combobox.currentFont()
+            font_family = selected_font.family()
+            font_size = self.font_size_spinbox.value()
+            
+            # 保存到配置文件
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.abspath(os.path.join(current_dir, '../'))
+            file_path = os.path.join(project_root, 'conf', 'theme.json')
+            
+            data = util.read_json(file_path)
+            data['font'] = font_family
+            data['font_size'] = font_size
+            util.write_json(file_path, data)
+            util.THEME = data
+            
+            # 应用到所有打开的终端
+            if self._main_window:
+                self._apply_font_to_terminals(font_family, font_size)
+            
+            QMessageBox.information(self, "字体设置", f"已应用字体: {font_family}, 大小: {font_size}")
+            
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"应用字体失败: {e}")
 
-        # 将修改后的数据写回 JSON 文件
-        util.write_json(file_path, data)
-
-        util.THEME = data
-        QMessageBox.information(self, "切换字体", "字体切换成功")
+    def _apply_font_to_terminals(self, font_family: str, font_size: int):
+        """应用字体到所有终端标签页"""
+        if not self._main_window:
+            return
+            
+        try:
+            # 获取主窗口的终端标签页控件 (ShellTab)
+            shell_tab = getattr(self._main_window.ui, 'ShellTab', None)
+            if not shell_tab:
+                print("未找到 ShellTab")
+                return
+            
+            new_font = QFont(font_family, font_size)
+            
+            # 遍历所有终端标签页
+            for i in range(shell_tab.count()):
+                # 使用主窗口的方法获取终端实例
+                if hasattr(self._main_window, 'get_text_browser_from_tab'):
+                    terminal = self._main_window.get_text_browser_from_tab(i)
+                    if terminal and hasattr(terminal, 'setTerminalFont'):
+                        terminal.setTerminalFont(new_font)
+                        print(f"已应用字体到终端 {i}: {font_family}, {font_size}")
+                    
+        except Exception as e:
+            print(f"应用字体到终端失败: {e}")
