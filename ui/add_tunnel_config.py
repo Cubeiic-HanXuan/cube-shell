@@ -31,7 +31,7 @@ class Ui_AddTunnelConfig(object):
         self.add_tunnel.setStandardButtons(QDialogButtonBox.StandardButton.Save)
         # 更改按钮文本
         ok_button = self.add_tunnel.button(QDialogButtonBox.StandardButton.Save)
-        ok_button.setText('保存')
+        ok_button.setText(QCoreApplication.translate("TunnelConfig", u"保存", None))
         ok_button.setStyleSheet(PrimaryButtonStyle)
         ok_button.setCursor(QCursor(Qt.PointingHandCursor))
 

@@ -14,7 +14,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._main_window = main_window
 
-        self.setWindowTitle("主题设置")
+        self.setWindowTitle(self.tr("主题设置"))
         self.setMinimumWidth(350)
 
         self.central_widget = QWidget(self)
@@ -28,13 +28,13 @@ class MainWindow(QMainWindow):
 
         title_layout = QHBoxLayout(self.title_bar)
         title_layout.setContentsMargins(10, 0, 10, 0)
-        title_label = QLabel("终端主题", self.title_bar)
+        title_label = QLabel(self.tr("终端主题"), self.title_bar)
         title_label.setStyleSheet("font-size: 18px; font-weight: bold;")
         title_layout.addWidget(title_label)
 
         title_layout.addStretch(1)
-        self._btn_dark = QPushButton("暗色", self.title_bar)
-        self._btn_light = QPushButton("亮色", self.title_bar)
+        self._btn_dark = QPushButton(self.tr("暗色"), self.title_bar)
+        self._btn_light = QPushButton(self.tr("亮色"), self.title_bar)
         title_layout.addWidget(self._btn_dark)
         title_layout.addWidget(self._btn_light)
         self._btn_dark.clicked.connect(lambda: self._set_appearance("dark"))
@@ -48,7 +48,7 @@ class MainWindow(QMainWindow):
         font_layout = QVBoxLayout(font_frame)
 
         # 字体选择
-        font_label = QLabel("终端字体", font_frame)
+        font_label = QLabel(self.tr("终端字体"), font_frame)
         font_label.setStyleSheet("font-weight: bold;")
         font_layout.addWidget(font_label)
 
@@ -58,7 +58,7 @@ class MainWindow(QMainWindow):
 
         # 字体大小
         size_layout = QHBoxLayout()
-        size_label = QLabel("字体大小:", font_frame)
+        size_label = QLabel(self.tr("字体大小:"), font_frame)
         size_layout.addWidget(size_label)
         
         self.font_size_spinbox = QSpinBox(font_frame)
@@ -69,7 +69,7 @@ class MainWindow(QMainWindow):
         font_layout.addLayout(size_layout)
 
         # 应用按钮
-        self.apply_btn = QPushButton("应用字体设置", font_frame)
+        self.apply_btn = QPushButton(self.tr("应用字体设置"), font_frame)
         self.apply_btn.clicked.connect(self.apply_font_settings)
         font_layout.addWidget(self.apply_btn)
 
@@ -144,10 +144,10 @@ class MainWindow(QMainWindow):
             if self._main_window:
                 self._apply_font_to_terminals(font_family, font_size)
             
-            QMessageBox.information(self, "字体设置", f"已应用字体: {font_family}, 大小: {font_size}")
+            QMessageBox.information(self, self.tr("字体设置"), self.tr("已应用字体: {}, 大小: {}").format(font_family, font_size))
             
         except Exception as e:
-            QMessageBox.warning(self, "错误", f"应用字体失败: {e}")
+            QMessageBox.warning(self, self.tr("错误"), self.tr("应用字体失败: {}").format(e))
 
     def _apply_font_to_terminals(self, font_family: str, font_size: int):
         """应用字体到所有终端标签页"""
