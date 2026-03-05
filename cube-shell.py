@@ -7145,7 +7145,7 @@ class TerminalThemeSelector(QDialog):
 
 
 if __name__ == '__main__':
-    logger.info("PySide6 version:", PySide6.__version__)
+    print("PySide6 version:", PySide6.__version__)
 
     app = QApplication(sys.argv)
 
@@ -7161,9 +7161,9 @@ if __name__ == '__main__':
         lang_manager.initialize(app, i18n_dir)
         lang_manager.load_from_config(saved_language)
 
-        logger.info(f"Language loaded: {saved_language}")
+        print(f"Language loaded: {saved_language}")
     except Exception as e:
-        logger.error(f"Failed to load language settings: {e}")
+        print(f"Failed to load language settings: {e}")
 
     window = MainDialog(app)
 
