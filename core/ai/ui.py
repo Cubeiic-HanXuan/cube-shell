@@ -178,6 +178,33 @@ class _TerminalIOBridge(QWidget):
         QMetaObject.invokeMethod(self, "_send_text", Qt.QueuedConnection, Q_ARG(str, text))
 
     @Slot(str)
+    def _print_message(self, message: str):
+        """直接在终端显示文本，不通过命令执行"""
+        try:
+            # 尝试通过 session.onReceiveBlock 直接显示
+            if hasattr(self._terminal, "m_impl"):
+                impl = self._terminal.m_impl
+                if hasattr(impl, "m_session") and impl.m_session:
+                    session = impl.m_session
+                    # 添加换行符并转换为 bytes
+                    data = (message + "\r\n").encode("utf-8")
+                    # 使用 onReceiveBlock 确保数据正确处理并刷新显示
+                    if hasattr(session, "onReceiveBlock"):
+                        session.onReceiveBlock(data, len(data))
+                        return
+                    # 备用：直接调用 emulation
+                    emu = session.emulation() if hasattr(session, "emulation") else None
+                    if emu:
+                        emu.receiveData(data, len(data))
+                        return
+        except Exception:
+            pass
+
+    def print_message(self, message: str):
+        """线程安全地在终端显示信息"""
+        QMetaObject.invokeMethod(self, "_print_message", Qt.QueuedConnection, Q_ARG(str, message))
+
+    @Slot(str)
     def _on_received_data(self, text: str):
         try:
             if self._sudo_password and text:
@@ -393,6 +420,198 @@ def _extract_first_fenced_code(markdown_text: str) -> str:
     return (markdown_text or "").strip()
 
 
+def _build_install_prompt(user_request: str, os_info: dict = None) -> str:
+    """
+    构建安装/卸载软件的AI提示词，包含Few-shot示例和结构化约束。
+    """
+    os_info = os_info or {}
+    distro_id = (os_info.get("id") or "").lower()
+    version_id = (os_info.get("version_id") or "")
+    pretty_name = os_info.get("pretty_name") or ""
+    
+    # 根据系统选择合适的示例
+    if distro_id == "centos" and version_id.startswith("7"):
+        example = '''### 示例: CentOS 7 安装软件
+```json
+{{
+  "operation": "install",
+  "target": "nginx",
+  "steps": [
+    {{"phase": "预处理", "cmd": "sudo yum install -y epel-release", "allow_failure": true}},
+    {{"phase": "预处理", "cmd": "sudo yum makecache", "allow_failure": true}},
+    {{"phase": "执行", "cmd": "sudo yum install -y nginx", "allow_failure": false}},
+    {{"phase": "执行", "cmd": "sudo systemctl enable nginx", "allow_failure": true}},
+    {{"phase": "执行", "cmd": "sudo systemctl start nginx", "allow_failure": true}},
+    {{"phase": "验证", "cmd": "nginx -v", "allow_failure": false}}
+  ]
+}}
+```'''
+        pkg_hint = """
+## CentOS 7 特殊说明
+- 包管理器使用 yum，不是 dnf
+- 安装前通常需要 `yum install -y epel-release`
+- Node.js 安装推荐使用: `curl -fsSL https://rpm.nodesource.com/setup_lts.x | sudo bash -` 然后 `yum install -y nodejs`
+- Docker 安装推荐使用: `yum install -y yum-utils && yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo && yum install -y docker-ce`
+- 服务管理使用 systemctl
+"""
+    elif distro_id in {"ubuntu", "debian"}:
+        example = '''### 示例: Ubuntu/Debian 安装软件
+```json
+{{
+  "operation": "install",
+  "target": "nginx",
+  "steps": [
+    {{"phase": "预处理", "cmd": "sudo apt update", "allow_failure": false}},
+    {{"phase": "执行", "cmd": "sudo apt install -y nginx", "allow_failure": false}},
+    {{"phase": "执行", "cmd": "sudo systemctl enable nginx", "allow_failure": true}},
+    {{"phase": "验证", "cmd": "nginx -v", "allow_failure": false}}
+  ]
+}}
+```'''
+        pkg_hint = """
+## Ubuntu/Debian 说明
+- 包管理器使用 apt，不要用 apt-get
+- 安装前必须运行 `apt update`
+"""
+    else:
+        example = '''### 示例: 通用安装
+```json
+{{
+  "operation": "install",
+  "target": "nginx",
+  "steps": [
+    {{"phase": "预处理", "cmd": "sudo yum makecache || sudo apt update", "allow_failure": true}},
+    {{"phase": "执行", "cmd": "sudo yum install -y nginx || sudo apt install -y nginx", "allow_failure": false}},
+    {{"phase": "验证", "cmd": "nginx -v", "allow_failure": false}}
+  ]
+}}
+```'''
+        pkg_hint = ""
+    
+    os_context = ""
+    if pretty_name:
+        os_context = f"\n## 目标系统\n{pretty_name}\n"
+    
+    return f'''你是一个 Linux 软件安装/卸载自动化规划器。
+
+## 任务
+{user_request}
+{os_context}
+## 输出要求
+必须且只能输出一个 ```json 代码块，禁止输出任何解释性文字。
+
+## JSON结构
+```json
+{{
+  "operation": "install" | "uninstall",
+  "target": "软件名",
+  "steps": [
+    {{"phase": "预处理"|"执行"|"验证", "cmd": "单条可执行命令", "allow_failure": false|true}}
+  ]
+}}
+```
+
+## 重要规则
+1. **cmd 必须是单条可执行命令**，禁止多行脚本、HereDoc、函数定义
+2. 安装流程必须包含三个阶段：
+   - **预处理**: 更新包索引、安装依赖
+   - **执行**: 安装/卸载主步骤（这是核心，必须有）
+   - **验证**: 确认安装成功
+3. 每个步骤的 allow_failure 设置：
+   - 预处理步骤可以设置 true
+   - 核心安装步骤必须设置 false
+   - 验证步骤通常设置 false
+4. 需要提权的命令必须包含 sudo
+{pkg_hint}
+## 正确示例
+
+{example}
+
+## 错误示例（禁止）
+- 禁止多行脚本: `"cmd": "for i in ...; do\n  ...\ndone"`
+- 禁止HereDoc: `"cmd": "cat <<EOF\n...\nEOF"`
+- 禁止只有验证步骤，必须包含实际的安装命令
+'''
+
+
+def _validate_install_plan(data: dict, distro_id: str = "") -> tuple[bool, list[str]]:
+    """
+    校验 AI 生成的安装计划。
+    
+    返回: (is_valid, warnings)
+    - is_valid: 是否通过校验
+    - warnings: 警告信息列表
+    """
+    warnings: list[str] = []
+    
+    if not isinstance(data, dict):
+        return False, ["计划格式错误：必须是 JSON 对象"]
+    
+    # 检查必要字段
+    if "steps" not in data:
+        return False, ["计划缺少 steps 字段"]
+    
+    steps = data.get("steps") or []
+    if not isinstance(steps, list) or len(steps) == 0:
+        return False, ["计划中没有可执行步骤"]
+    
+    # 检查每个步骤
+    distro_lower = (distro_id or "").lower()
+    is_debian_like = distro_lower in {"ubuntu", "debian"} or "debian" in distro_lower
+    is_rhel_like = distro_lower in {"centos", "rhel", "rocky", "almalinux", "fedora", "amzn", "amazon"}
+    is_alpine = distro_lower == "alpine"
+    is_arch = distro_lower in {"arch", "manjaro"}
+    
+    for idx, step in enumerate(steps):
+        if not isinstance(step, dict):
+            warnings.append(f"步骤 {idx + 1}: 格式错误，应为对象")
+            continue
+        
+        cmd = str(step.get("cmd") or "").strip()
+        if not cmd:
+            warnings.append(f"步骤 {idx + 1}: 缺少 cmd 字段")
+            continue
+        
+        # 检查多行命令（包含真实的换行符）
+        if "\n" in cmd and not cmd.strip().endswith("\\n'"):
+            warnings.append(f"步骤 {idx + 1}: 检测到多行命令，可能导致执行失败")
+        
+        # 检查 HereDoc
+        if "<<" in cmd and ("EOF" in cmd or "END" in cmd):
+            warnings.append(f"步骤 {idx + 1}: 检测到 HereDoc，可能导致执行失败")
+        
+        # 检查危险命令
+        cmd_lower = cmd.lower()
+        if "rm -rf /" in cmd_lower and not "/tmp" in cmd_lower and not "/var" in cmd_lower:
+            warnings.append(f"步骤 {idx + 1}: 检测到危险命令 rm -rf /")
+        
+        # 检查包管理器与发行版匹配
+        if distro_id:
+            if is_debian_like:
+                if cmd.startswith(("yum ", "dnf ", "pacman ", "apk ")):
+                    warnings.append(f"步骤 {idx + 1}: 在 Debian/Ubuntu 系统上使用了错误的包管理器")
+            elif is_rhel_like:
+                if cmd.startswith(("apt ", "apt-get ", "pacman ", "apk ")):
+                    warnings.append(f"步骤 {idx + 1}: 在 RHEL/CentOS 系统上使用了错误的包管理器")
+            elif is_alpine:
+                if cmd.startswith(("apt ", "apt-get ", "yum ", "dnf ", "pacman ")):
+                    warnings.append(f"步骤 {idx + 1}: 在 Alpine 系统上使用了错误的包管理器")
+            elif is_arch:
+                if cmd.startswith(("apt ", "apt-get ", "yum ", "dnf ", "apk ")):
+                    warnings.append(f"步骤 {idx + 1}: 在 Arch 系统上使用了错误的包管理器")
+    
+    # 检查是否包含验证阶段
+    has_verify = any(
+        isinstance(s, dict) and ("验证" in str(s.get("phase", "")) or "verify" in str(s.get("phase", "")).lower())
+        for s in steps
+    )
+    if not has_verify:
+        warnings.append("建议添加验证阶段以确认安装成功")
+    
+    # 警告不导致失败，只有严重错误才返回 False
+    has_critical_error = any("格式错误" in w or "缺少" in w for w in warnings)
+    return not has_critical_error, warnings
+
 def open_ai_dialog(terminal_widget, mode: str) -> None:
     """
     在终端控件上以交互方式唤起 AI。
@@ -455,35 +674,7 @@ def open_ai_dialog(terminal_widget, mode: str) -> None:
             )
             if not ok or not text.strip():
                 return
-            user_prompt = (
-                "你是一个“自我修复”的 Linux 软件安装/卸载自动化规划器。\n"
-                "目标：输出一个可被自动化状态机逐步执行、可断点续装、可自动诊断与修复的执行计划。\n\n"
-                "输出格式要求：\n"
-                "- 必须且只能输出一个 ```json 代码块，禁止输出任何解释性文字\n"
-                "- 代码块内必须是严格 JSON（双引号、无尾逗号）\n\n"
-                "JSON 结构要求：\n"
-                "{\n"
-                "  \"operation\": \"install\" | \"uninstall\",\n"
-                "  \"target\": \"软件名/组件名（如 docker/node/java）\",\n"
-                "  \"steps\": [\n"
-                "    {\"phase\": \"预处理\"|\"执行\"|\"错误处理\"|\"验证\", \"cmd\": \"单条可执行命令\", \"allow_failure\": false}\n"
-                "  ]\n"
-                "}\n\n"
-                "规则：\n"
-                "- cmd 必须是一条可直接在 shell 执行的命令（不要输出函数定义/循环/多行脚本/HereDoc）\n"
-                "- 遇到需要提权的命令必须显式包含 sudo（除非确定 root）\n"
-                "- 必须根据目标系统选择包管理器，禁止输出不匹配发行版的命令：\n"
-                "  - Debian/Ubuntu: apt\n"
-                "  - CentOS/RHEL 7 / Amazon Linux 2: yum\n"
-                "  - Fedora / RHEL/Rocky/Alma/CentOS 8+: dnf\n"
-                "  - openSUSE/SLES: zypper\n"
-                "  - Alpine: apk\n"
-                "  - Arch: pacman\n"
-                "- Debian/Ubuntu 系优先使用 apt（而不是 apt-get）\n"
-                "- 必须包含：环境检查与依赖验证(预处理)、安装/卸载主步骤(执行)、最终状态确认(验证)\n"
-                "- 卸载需覆盖常见来源（包管理器/二进制/源码）并在验证阶段确认已移除\n\n"
-                f"{text.strip()}"
-            )
+            user_prompt = _build_install_prompt(text.strip())
         elif mode == "log":
             title = "AI：日志分析"
             text, ok = QInputDialog.getMultiLineText(
@@ -557,7 +748,7 @@ class _AIInstallToTerminalController(QObject):
         self._worker.failed.connect(self._on_failed)
 
     def start(self):
-        self._bridge.send_text("echo '[cube-shell][AI] 正在生成安装/卸载计划…'\n")
+        self._bridge.print_message("[cube-shell][AI] 正在生成安装/卸载计划…")
         threading.Thread(target=self._prepare_and_start_worker_thread, daemon=True).start()
 
     @Slot()
@@ -569,28 +760,41 @@ class _AIInstallToTerminalController(QObject):
 
     def _prepare_and_start_worker_thread(self):
         os_info = self._detect_remote_os_info()
-        extra = self._format_os_prompt_hint(os_info)
-        if extra:
-            try:
-                title = (os_info.get("pretty_name") or os_info.get("id") or "").strip()
-                title_safe = title.replace("'", "'\"'\"'")
-                self._bridge.send_text(f"echo '[cube-shell][AI] 目标系统: {title_safe}'\n")
-            except Exception:
-                pass
-
-            try:
-                messages = [dict(m) for m in (self._messages or [])]
-                for m in reversed(messages):
-                    if m.get("role") == "user":
-                        m["content"] = ((m.get("content") or "").rstrip() + "\n\n" + extra).strip()
-                        break
-                self._worker.messages = messages
-            except Exception:
-                pass
+        
+        # 使用 OS 信息重新构建提示词
+        try:
+            title = (os_info.get("pretty_name") or os_info.get("id") or "").strip()
+            if title:
+                self._bridge.print_message(f"[cube-shell][AI] 目标系统: {title}")
+        except Exception:
+            pass
+        
+        try:
+            # 获取原始用户请求
+            user_request = ""
+            for m in (self._messages or []):
+                if m.get("role") == "user":
+                    user_request = (m.get("content") or "").strip()
+                    break
+            
+            # 使用 OS 信息重新构建提示词
+            new_prompt = _build_install_prompt(user_request, os_info)
+            
+            messages = [dict(m) for m in (self._messages or [])]
+            for m in messages:
+                if m.get("role") == "user":
+                    m["content"] = new_prompt
+                    break
+            self._worker.messages = messages
+        except Exception:
+            pass
 
         QMetaObject.invokeMethod(self, "_start_worker", Qt.QueuedConnection)
 
     def _detect_remote_os_info(self) -> dict[str, str]:
+        info: dict[str, str] = {}
+        
+        # 获取 /etc/os-release
         out = ""
         try:
             if hasattr(self._ssh_conn, "exec"):
@@ -602,7 +806,6 @@ class _AIInstallToTerminalController(QObject):
         except Exception:
             out = ""
 
-        info: dict[str, str] = {}
         if out:
             for line in out.splitlines():
                 if "=" not in line:
@@ -613,6 +816,7 @@ class _AIInstallToTerminalController(QObject):
                 if k:
                     info[k.lower()] = v
 
+        # 备用: 获取 /etc/redhat-release
         if not info.get("id"):
             try:
                 if hasattr(self._ssh_conn, "exec"):
@@ -638,6 +842,35 @@ class _AIInstallToTerminalController(QObject):
                 if m:
                     info["version_id"] = info.get("version_id") or m.group(1)
 
+        # 增强: 获取架构和内核信息
+        try:
+            arch_cmd = "uname -m 2>/dev/null || true"
+            if hasattr(self._ssh_conn, "exec"):
+                arch_out = self._ssh_conn.exec(cmd=arch_cmd, pty=False) or ""
+            elif getattr(self._ssh_conn, "conn", None):
+                _, stdout, _ = self._ssh_conn.conn.exec_command(command=arch_cmd, get_pty=False, timeout=5)
+                arch_out = stdout.read().decode("utf-8", errors="ignore")
+            else:
+                arch_out = ""
+            if arch_out:
+                info["arch"] = arch_out.strip()
+        except Exception:
+            pass
+
+        # 增强: 检测 systemd
+        try:
+            systemd_cmd = "command -v systemctl >/dev/null 2>&1 && echo 'yes' || echo 'no'"
+            if hasattr(self._ssh_conn, "exec"):
+                systemd_out = self._ssh_conn.exec(cmd=systemd_cmd, pty=False) or ""
+            elif getattr(self._ssh_conn, "conn", None):
+                _, stdout, _ = self._ssh_conn.conn.exec_command(command=systemd_cmd, get_pty=False, timeout=5)
+                systemd_out = stdout.read().decode("utf-8", errors="ignore")
+            else:
+                systemd_out = ""
+            info["has_systemd"] = "yes" if "yes" in systemd_out.lower() else "no"
+        except Exception:
+            pass
+
         return info
 
     def _format_os_prompt_hint(self, os_info: dict[str, str]) -> str:
@@ -651,6 +884,8 @@ class _AIInstallToTerminalController(QObject):
         version_id = (os_info.get("version_id") or "").strip()
         id_like = (os_info.get("id_like") or "").strip().lower()
         pretty_name = (os_info.get("pretty_name") or "").strip()
+        arch = (os_info.get("arch") or "").strip()
+        has_systemd = (os_info.get("has_systemd") or "").strip().lower()
 
         major = ""
         m = re.match(r"^(\d+)", version_id)
@@ -677,29 +912,52 @@ class _AIInstallToTerminalController(QObject):
         elif distro_id in {"arch", "manjaro"} or "arch" in id_like:
             pkg_mgr = "pacman"
 
+        # 服务管理器提示
+        service_mgr = "systemctl" if has_systemd == "yes" else "service"
+
         lines = [
             "目标主机系统信息（已检测，用于生成正确命令）：",
             f"- PRETTY_NAME: {pretty_name}" if pretty_name else "",
             f"- ID: {distro_id}" if distro_id else "",
             f"- VERSION_ID: {version_id}" if version_id else "",
             f"- ID_LIKE: {id_like}" if id_like else "",
+            f"- 架构: {arch}" if arch else "",
             f"- 首选包管理器: {pkg_mgr}" if pkg_mgr else "",
+            f"- 服务管理器: {service_mgr}",
             "",
-            "强约束：生成命令必须适配该发行版；例如在 CentOS/RHEL 上禁止使用 apt。",
+            "强约束：",
+            f"1. 必须使用 {pkg_mgr} 作为包管理器" if pkg_mgr else "1. 根据系统选择正确的包管理器",
+            f"2. 使用 {service_mgr} 管理服务",
+            "3. 禁止使用与目标系统不匹配的包管理器",
         ]
         return "\n".join([x for x in lines if x]).strip()
 
     def _on_failed(self, msg: str):
-        safe = (msg or "").replace("'", "'\"'\"'")
-        self._bridge.send_text(f"echo '[cube-shell][AI] 生成失败: {safe}'\n")
+        self._bridge.print_message(f"[cube-shell][AI] 生成失败: {msg or ''}")
 
     def _on_plan_ready(self, text: str):
         try:
             plan_text = _extract_first_fenced_code(text or "")
             data = json.loads((plan_text or "").strip())
         except Exception as e:
-            safe = str(e).replace("'", "'\"'\"'")
-            self._bridge.send_text(f"echo '[cube-shell][AI] 计划解析失败: {safe}'\n")
+            self._bridge.print_message(f"[cube-shell][AI] 计划解析失败: {e}")
+            return
+
+        # 校验计划
+        distro_id = ""
+        try:
+            os_info = self._detect_remote_os_info()
+            distro_id = (os_info.get("id") or "").strip().lower()
+        except Exception:
+            pass
+        
+        is_valid, warnings = _validate_install_plan(data, distro_id)
+        if warnings:
+            for warn in warnings[:3]:  # 最多显示3条警告
+                self._bridge.print_message(f"[cube-shell][AI] 警告: {warn}")
+        
+        if not is_valid:
+            self._bridge.print_message("[cube-shell][AI] 计划校验失败，请重试")
             return
 
         op = str((data or {}).get("operation") or "install").strip() if isinstance(data, dict) else "install"
@@ -718,11 +976,13 @@ class _AIInstallToTerminalController(QObject):
                 steps.append(AutomationStep(phase, _normalize_apt_command(cmd), allow_failure=allow_failure))
 
         if not steps:
-            self._bridge.send_text("echo '[cube-shell][AI] 计划中没有可执行步骤'\n")
+            self._bridge.print_message("[cube-shell][AI] 计划中没有可执行步骤")
             return
 
-        self._bridge.send_text(f"echo '[cube-shell][AI] 计划已生成，开始自动执行：{op} {target}'\n")
-        self._bridge.send_text("echo '[cube-shell][AI] 提示：可在终端按 Ctrl+C 手动中断当前命令'\n")
+        # 显示解析出的步骤数量
+        self._bridge.print_message(f"[cube-shell][AI] 计划包含 {len(steps)} 个步骤")
+        self._bridge.print_message(f"[cube-shell][AI] 计划已生成，开始自动执行：{op} {target}")
+        self._bridge.print_message("[cube-shell][AI] 提示：可在终端按 Ctrl+C 手动中断当前命令")
 
         threading.Thread(target=self._run_steps_thread, args=(op, target, steps), daemon=True).start()
 
@@ -816,15 +1076,14 @@ class _AIInstallToTerminalController(QObject):
         )
 
         if run.report_path:
-            safe = str(run.report_path).replace("'", "'\"'\"'")
-            self._bridge.send_text(f"echo '[cube-shell][AI] 执行报告: {safe}'\n")
+            self._bridge.print_message(f"[cube-shell][AI] 执行报告: {run.report_path}")
 
         if run.status == "success":
-            self._bridge.send_text("echo '[cube-shell][AI] 自动执行完成：成功'\n")
+            self._bridge.print_message("[cube-shell][AI] 自动执行完成：成功")
         elif run.status == "failed":
-            self._bridge.send_text("echo '[cube-shell][AI] 自动执行完成：失败（可查看上方输出与执行报告）'\n")
+            self._bridge.print_message("[cube-shell][AI] 自动执行完成：失败（可查看上方输出与执行报告）")
         elif run.status == "stopped":
-            self._bridge.send_text("echo '[cube-shell][AI] 自动执行已停止'\n")
+            self._bridge.print_message("[cube-shell][AI] 自动执行已停止")
 
 
 class AISettingsDialog(QDialog):
@@ -838,7 +1097,7 @@ class AISettingsDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("AI 设置")
+        self.setWindowTitle(self.tr("AI 设置"))
         self.setModal(True)
         self.setFixedWidth(520)
 
@@ -849,12 +1108,12 @@ class AISettingsDialog(QDialog):
         form = QGridLayout()
         row = 0
 
-        form.addWidget(QLabel("模型"), row, 0)
+        form.addWidget(QLabel(self.tr("模型")), row, 0)
         self.model_edit = QLineEdit(self._prefs.model)
         form.addWidget(self.model_edit, row, 1)
         row += 1
 
-        form.addWidget(QLabel("Base URL(可选)"), row, 0)
+        form.addWidget(QLabel(self.tr("Base URL(可选)")), row, 0)
         self.base_url_edit = QLineEdit(self._prefs.base_url)
         form.addWidget(self.base_url_edit, row, 1)
         row += 1
@@ -869,17 +1128,17 @@ class AISettingsDialog(QDialog):
         form.addWidget(self.temperature_edit, row, 1)
         row += 1
 
-        self.thinking_check = QCheckBox("启用深度思考")
+        self.thinking_check = QCheckBox(self.tr("启用深度思考"))
         self.thinking_check.setChecked(self._prefs.thinking_enabled)
         form.addWidget(self.thinking_check, row, 1)
         row += 1
 
-        self.stream_check = QCheckBox("启用流式输出")
+        self.stream_check = QCheckBox(self.tr("启用流式输出"))
         self.stream_check.setChecked(self._prefs.stream)
         form.addWidget(self.stream_check, row, 1)
         row += 1
 
-        form.addWidget(QLabel("系统提示词"), row, 0)
+        form.addWidget(QLabel(self.tr("系统提示词")), row, 0)
         self.system_prompt_edit = QLineEdit(self._prefs.system_prompt)
         form.addWidget(self.system_prompt_edit, row, 1)
         row += 1
@@ -887,16 +1146,16 @@ class AISettingsDialog(QDialog):
         layout.addLayout(form)
 
         key_box = QHBoxLayout()
-        key_box.addWidget(QLabel("API Key"))
+        key_box.addWidget(QLabel(self.tr("API Key")))
         self.key_edit = QLineEdit()
         self.key_edit.setEchoMode(QLineEdit.Password)
-        self.key_edit.setPlaceholderText("使用系统钥匙串保存，不写入配置文件")
+        self.key_edit.setPlaceholderText(self.tr("使用系统钥匙串保存，不写入配置文件"))
         key_box.addWidget(self.key_edit)
         layout.addLayout(key_box)
 
         btns = QHBoxLayout()
-        self.save_btn = QPushButton("保存")
-        self.cancel_btn = QPushButton("取消")
+        self.save_btn = QPushButton(self.tr("保存"))
+        self.cancel_btn = QPushButton(self.tr("取消"))
         btns.addStretch(1)
         btns.addWidget(self.save_btn)
         btns.addWidget(self.cancel_btn)
@@ -930,11 +1189,11 @@ class AISettingsDialog(QDialog):
             key = self.key_edit.text().strip()
             if key:
                 if not set_ai_api_key(key):
-                    QMessageBox.warning(self, "错误", "保存 API Key 失败")
+                    QMessageBox.warning(self, self.tr("错误"), self.tr("保存 API Key 失败"))
                     return
             self.accept()
         except Exception as e:
-            QMessageBox.warning(self, "错误", f"保存失败: {e}")
+            QMessageBox.warning(self, self.tr("错误"), self.tr("保存失败: {}").format(e))
 
 
 class AIOutputDialog(QDialog):
@@ -1466,19 +1725,28 @@ class AIOutputDialog(QDialog):
 
         sys_msg = "你是一个 Linux 运维自动修复引擎。只输出严格 JSON。"
         user_msg = (
-            "请基于失败信息生成“修复动作列表”，用于自动化系统继续执行。\n"
+            "请基于失败信息生成“修复动作列表”，用于自动化系统继续执行。\n\n"
             "输出要求：必须且只能输出一个 ```json 代码块，内容为 JSON 数组。\n"
-            "数组元素结构：{\"title\": \"...\", \"commands\": [\"...\"], \"retry_original\": true}\n"
-            "规则：\n"
-            "- commands 必须是可直接执行的单条命令（不要多行脚本/函数/循环）\n"
-            "- 危险命令需更保守（避免 rm -rf，除非明确必要且范围最小）\n\n"
-            f"distro_id: {distro_id}\n"
-            f"exit_code: {exit_code}\n"
-            f"failed_command: {command}\n"
+            "数组元素结构：{\"title\": \"修复描述\", \"commands\": [\"单条命令\"], \"retry_original\": true|false}\n\n"
+            "重要规则：\n"
+            "1. commands 必须是可直接执行的单条命令（禁止多行脚本/函数/循环）\n"
+            "2. 修复命令数量限制在 1-3 条，避免过度修复\n"
+            "3. 危险命令需保守（避免 rm -rf，除非明确必要且范围最小）\n"
+            "4. 必须根据目标系统选择正确的包管理器\n"
+            "5. retry_original 表示修复后是否重试原命令\n\n"
+            "常见修复示例：\n"
+            "- 包索引过旧 -> apt update 或 yum makecache\n"
+            "- dpkg 中断 -> dpkg --configure -a\n"
+            "- 包管理器锁 -> 等待或杀死占用进程\n"
+            "- 依赖缺失 -> 安装缺失的依赖包\n"
+            "- GPG密钥错误 -> 重新导入密钥\n\n"
+            f"目标系统: {distro_id or '未知'}\n"
+            f"退出码: {exit_code}\n"
+            f"失败命令: {command}\n"
             "stdout_tail:\n"
-            f"{(stdout or '')[-2000:]}\n"
+            f"{(stdout or '')[-1500:]}\n"
             "stderr_tail:\n"
-            f"{(stderr or '')[-2000:]}\n"
+            f"{(stderr or '')[-1500:]}\n"
         )
 
         try:

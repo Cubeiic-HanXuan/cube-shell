@@ -45,7 +45,7 @@ from PySide6.QtGui import QIcon, QAction, QCursor, QCloseEvent, QInputMethodEven
     QDragEnterEvent, QDropEvent, QFont, QFontDatabase, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QDialog, QMessageBox, QTreeWidgetItem, \
     QInputDialog, QFileDialog, QTreeWidget, QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QTableWidgetItem, \
-    QHeaderView, QStyle, QTabBar, QTextBrowser, QLineEdit, QScrollArea, QGridLayout, QProgressBar, QProgressDialog, \
+    QHeaderView, QTabBar, QTextBrowser, QLineEdit, QScrollArea, QGridLayout, QProgressBar, QProgressDialog, \
     QDockWidget, QCheckBox, QFrame, QListWidget, QListWidgetItem
 from deepdiff import DeepDiff
 from pygments import highlight
@@ -77,6 +77,7 @@ from ui.tunnel_config import Ui_TunnelConfig
 from ui.code_editor import CodeEditor, Highlighter
 from function.ssh_prompt_client import load_linux_commands
 from core.ai import AISettingsDialog, open_ai_dialog
+from i18n import get_language_manager, SUPPORTED_LANGUAGES
 
 # 配置日志输出到文件
 logging.basicConfig(
@@ -148,14 +149,14 @@ class DockerInfoThread(QThread):
                 # 最后一个部分是配置文件路径
                 config = parts[-1]
                 project_name = parts[0]
-                
+
                 if not config.endswith('.yml') and not config.endswith('.yaml'):
                     continue
-                
+
                 # 获取该项目的容器列表
                 ps_cmd = f"docker compose --file {config} ps -a --format json 2>/dev/null"
                 conn_exec = self.ssh_conn.sudo_exec(ps_cmd)
-                
+
                 if conn_exec and conn_exec.strip():
                     for line in conn_exec.strip().splitlines():
                         if line.strip():
@@ -197,11 +198,11 @@ class DockerInfoThread(QThread):
                         config = project.get('ConfigFiles', '')
                         if not config or not project_name:
                             continue
-                        
+
                         # 获取该项目的容器列表（使用 JSON 格式）
                         ps_cmd = f"docker compose --file {config} ps -a --format json 2>/dev/null"
                         conn_exec = self.ssh_conn.sudo_exec(ps_cmd)
-                        
+
                         if conn_exec and conn_exec.strip():
                             # docker compose ps --format json 输出可能是每行一个 JSON 或 JSON 数组
                             for line in conn_exec.strip().splitlines():
@@ -230,7 +231,7 @@ class DockerInfoThread(QThread):
             # 获取所有独立容器（使用表格格式提升性能）
             # 分两次获取：运行中 + 已停止，比直接 -a 更快
             standalone_containers = []
-            
+
             # 1. 获取运行中的容器
             running_cmd = f"docker ps --format '{self.DOCKER_PS_FORMAT}' 2>/dev/null"
             conn_exec = self.ssh_conn.sudo_exec(running_cmd)
@@ -310,24 +311,24 @@ class DockerOperationThread(QThread):
     """后台执行 Docker 容器操作的线程（停止、重启、删除等）"""
     # (成功与否, 操作类型, 容器信息字典 {id: {state, ports}})
     operation_finished = Signal(bool, str, dict)
-    
+
     def __init__(self, ssh_conn, operation, container_ids):
         super().__init__()
         self.ssh_conn = ssh_conn
         self.operation = operation  # 'stop', 'restart', 'rm', 'start'
         self.container_ids = container_ids
-    
+
     def run(self):
         if not self.ssh_conn or not self.ssh_conn.active:
             self.operation_finished.emit(False, self.operation, {})
             return
-        
+
         try:
             for container_id in self.container_ids:
                 cmd = f"docker {self.operation} {container_id}"
                 # 使用 sudo_exec 并等待命令完成
                 self.ssh_conn.sudo_exec(cmd)
-            
+
             # 操作完成后，获取被操作容器的最新状态和端口信息
             container_info = {}
             if self.operation != 'rm':
@@ -342,7 +343,7 @@ class DockerOperationThread(QThread):
                         parts = result.strip().split('|||')
                         state = parts[0] if len(parts) > 0 else ''
                         ports_str = parts[1] if len(parts) > 1 else ''
-                    
+
                     container_info[container_id] = {
                         'state': state,
                         'ports': ports_str
@@ -351,7 +352,7 @@ class DockerOperationThread(QThread):
                 # 删除操作，标记为 removed
                 for container_id in self.container_ids:
                     container_info[container_id] = {'state': 'removed', 'ports': ''}
-            
+
             self.operation_finished.emit(True, self.operation, container_info)
         except Exception as e:
             util.logger.error(f"Docker {self.operation} error: {e}")
@@ -361,7 +362,7 @@ class DockerOperationThread(QThread):
 class FRPInstallThread(QThread):
     """后台下载和安装 FRP 的线程"""
     progress_updated = Signal(int)  # 进度百分比
-    status_updated = Signal(str)   # 状态消息
+    status_updated = Signal(str)  # 状态消息
     finished_signal = Signal(bool, str)  # (成功与否, 错误消息)
 
     def __init__(self, frp_manager, ssh_conn=None, sftp=None, install_client=True, install_server=False):
@@ -377,56 +378,56 @@ class FRPInstallThread(QThread):
             # 安装客户端
             if self.install_client and not self.frp_manager.is_frpc_ready():
                 self.status_updated.emit("正在下载 FRP 客户端...")
-                
+
                 def update_progress(downloaded, total):
                     if total > 0:
                         percent = int(downloaded * 100 / total)
                         self.progress_updated.emit(percent)
-                
+
                 def update_status(msg):
                     self.status_updated.emit(msg)
-                
+
                 success = self.frp_manager.ensure_frpc(
                     progress_callback=update_progress,
                     status_callback=update_status
                 )
-                
+
                 if not success:
                     self.finished_signal.emit(False, "FRP 客户端下载失败，请检查网络连接后重试。")
                     return
-            
+
             # 安装服务端
             if self.install_server and self.ssh_conn and self.sftp:
                 self.status_updated.emit("正在部署 FRP 服务端...")
                 self.progress_updated.emit(0)
-                
+
                 def update_progress(downloaded, total):
                     if total > 0:
                         percent = int(downloaded * 100 / total)
                         self.progress_updated.emit(percent)
-                
+
                 def update_status(msg):
                     self.status_updated.emit(msg)
-                
+
                 success = self.frp_manager.ensure_frps_on_server(
                     self.ssh_conn, self.sftp,
                     progress_callback=update_progress,
                     status_callback=update_status
                 )
-                
+
                 if not success:
                     self.finished_signal.emit(False, "FRP 服务端部署失败，请检查网络连接后重试。")
                     return
-            
+
             self.finished_signal.emit(True, "")
-            
+
         except Exception as e:
             self.finished_signal.emit(False, str(e))
 
 
 class FRPServiceThread(QThread):
     """后台启动/停止 FRP 服务的线程"""
-    status_updated = Signal(str)   # 状态消息
+    status_updated = Signal(str)  # 状态消息
     finished_signal = Signal(bool, str)  # (成功与否, 错误消息)
 
     def __init__(self, ssh_conn, host, token, ant_type, local_port, server_prot, frp_manager, action='start'):
@@ -458,7 +459,7 @@ class FRPServiceThread(QThread):
                 remote_user = whoami_result.strip() if whoami_result else ""
                 if remote_user != "root":
                     self.finished_signal.emit(
-                        False, 
+                        False,
                         f"服务端代理端口 {server_port} 需要 root 权限。\n"
                         f"当前用户为: {remote_user}\n"
                         f"请使用大于 1024 的端口（如 1080、8888 等）"
@@ -466,48 +467,50 @@ class FRPServiceThread(QThread):
                     return
             except:
                 pass
-        
+
         self.status_updated.emit("正在启动服务端...")
-        
+
         # 先彻底杀死所有 frps 进程
-        self.ssh_conn.conn.exec_command(timeout=2, command="killall -9 frps 2>/dev/null; pkill -9 frps 2>/dev/null", get_pty=False)
+        self.ssh_conn.conn.exec_command(timeout=2, command="killall -9 frps 2>/dev/null; pkill -9 frps 2>/dev/null",
+                                        get_pty=False)
         time.sleep(2)  # 等待端口释放
-        
+
         # 写入配置并启动 frps（使用 $HOME/frp）
         frps_config = traversal.frps(self.token, self.ant_type, self.server_prot)
         self.ssh_conn.exec(cmd=f"cat > $HOME/frp/frps.toml << 'EOF'\n{frps_config}\nEOF", pty=False)
-        
+
         cmd1 = f"cd $HOME/frp && nohup ./frps -c frps.toml &> frps.log &"
         self.ssh_conn.conn.exec_command(timeout=1, command=cmd1, get_pty=False)
         time.sleep(2)
-        
+
         # 检查 frps 是否启动成功
         check_result = self.ssh_conn.exec(cmd="pgrep -x frps", pty=False)
         if not check_result or not check_result.strip():
             self.finished_signal.emit(False, "服务端 frps 启动失败，请检查服务器日志")
             return
-        
+
         self.status_updated.emit("正在启动客户端...")
-        
+
         # 停止旧的 frpc
         if platform.system() == 'Darwin' or platform.system() == 'Linux':
             os.system("pkill -9 frpc 2>/dev/null")
         elif platform.system() == 'Windows':
             subprocess.run(['taskkill', '/f', '/im', 'frpc.exe'], capture_output=True, text=True)
         time.sleep(0.5)
-        
+
         # 写入 frpc 配置
         frpc = traversal.frpc(self.host.split(':')[0], self.token, self.ant_type, self.local_port, self.server_prot)
         with open(abspath('frpc.toml'), 'w') as file:
             file.write(frpc)
-        
-        util.logger.info(f"FRP 配置: 服务器={self.host.split(':')[0]}, 服务端端口={self.server_prot}, 本地端口={self.local_port}")
-        
+
+        util.logger.info(
+            f"FRP 配置: 服务器={self.host.split(':')[0]}, 服务端端口={self.server_prot}, 本地端口={self.local_port}")
+
         # 启动 frpc
         frpc_path = str(self.frp_manager.frpc_path)
         frp_log_dir = str(self.frp_manager.frpc_path.parent)
         frpc_config_path = abspath('frpc.toml')
-        
+
         if platform.system() == 'Darwin' or platform.system() == 'Linux':
             cmd_u = f'cd "{frp_log_dir}" && nohup "{frpc_path}" -c "{frpc_config_path}" > frpc.log 2>&1 &'
             os.system(cmd_u)
@@ -518,22 +521,22 @@ class FRPServiceThread(QThread):
                 stderr=subprocess.STDOUT,
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
-        
+
         time.sleep(2)
-        
+
         self.ssh_conn.close()
         self.finished_signal.emit(True, "")
 
     def _stop_services(self):
         self.status_updated.emit("正在停止服务...")
-        
+
         self.ssh_conn.conn.exec_command(timeout=1, command="pkill -9 frps", get_pty=False)
-        
+
         if platform.system() == 'Darwin' or platform.system() == 'Linux':
             os.system("pkill -9 frpc")
         elif platform.system() == 'Windows':
             subprocess.run(['taskkill', '/f', '/im', 'frpc.exe'], capture_output=True, text=True)
-        
+
         self.ssh_conn.close()
         self.finished_signal.emit(True, "")
 
@@ -553,13 +556,13 @@ class FRPConnectThread(QThread):
     def run(self):
         try:
             host = self.params['host']
-            
+
             # 检查服务器可达性
             self.status_updated.emit("正在检查服务器连接...")
             if not util.check_server_accessibility(host.split(':')[0], int(host.split(':')[1])):
                 self.finished_signal.emit(False, "服务器无法连接，请检查网络或服务器状态。", not self.is_stop)
                 return
-            
+
             # 建立 SSH 连接
             self.status_updated.emit("正在建立 SSH 连接...")
             ssh_conn = SshClient(
@@ -568,7 +571,7 @@ class FRPConnectThread(QThread):
                 self.params['key_type'], self.params['key_file']
             )
             ssh_conn.connect()
-            
+
             if self.is_stop:
                 # 停止服务
                 self._stop_services(ssh_conn)
@@ -576,7 +579,7 @@ class FRPConnectThread(QThread):
                 # 启动服务
                 sftp = ssh_conn.open_sftp()
                 self._start_services(ssh_conn, sftp)
-                
+
         except Exception as e:
             util.logger.error(str(e))
             self.finished_signal.emit(False, str(e), not self.is_stop)
@@ -591,28 +594,28 @@ class FRPConnectThread(QThread):
                 remote_user = whoami_result.strip() if whoami_result else ""
                 if remote_user != "root":
                     self.finished_signal.emit(
-                        False, 
+                        False,
                         f"服务端代理端口 {server_port} 需要 root 权限。\n"
                         f"当前用户为: {remote_user}\n"
-                        f"请使用大于 1024 的端口（如 8088、8888 等）", 
+                        f"请使用大于 1024 的端口（如 8088、8888 等）",
                         True
                     )
                     return
             except:
                 pass
-        
+
         # 检查是否需要安装
         need_client = not self.frp_manager.is_frpc_ready()
         need_server = not util.check_remote_frp_exists(ssh_conn)
-        
+
         # 安装客户端
         if need_client:
             self.status_updated.emit("正在下载 FRP 客户端...")
-            
+
             def update_progress(downloaded, total):
                 if total > 0:
                     self.progress_updated.emit(int(downloaded * 100 / total))
-            
+
             success = self.frp_manager.ensure_frpc(
                 progress_callback=update_progress,
                 status_callback=lambda msg: self.status_updated.emit(msg)
@@ -620,16 +623,16 @@ class FRPConnectThread(QThread):
             if not success:
                 self.finished_signal.emit(False, "FRP 客户端下载失败", True)
                 return
-        
+
         # 安装服务端
         if need_server:
             self.status_updated.emit("正在部署 FRP 服务端...")
             self.progress_updated.emit(0)
-            
+
             def update_progress(downloaded, total):
                 if total > 0:
                     self.progress_updated.emit(int(downloaded * 100 / total))
-            
+
             success = self.frp_manager.ensure_frps_on_server(
                 ssh_conn, sftp,
                 progress_callback=update_progress,
@@ -638,34 +641,35 @@ class FRPConnectThread(QThread):
             if not success:
                 self.finished_signal.emit(False, "FRP 服务端部署失败", True)
                 return
-        
+
         # 启动服务端
         self.status_updated.emit("正在启动服务端...")
         # 先彻底杀死所有 frps 进程（包括可能在 /opt/frp 下的旧进程）
-        ssh_conn.conn.exec_command(timeout=2, command="killall -9 frps 2>/dev/null; pkill -9 frps 2>/dev/null", get_pty=False)
+        ssh_conn.conn.exec_command(timeout=2, command="killall -9 frps 2>/dev/null; pkill -9 frps 2>/dev/null",
+                                   get_pty=False)
         time.sleep(2)  # 等待端口释放
-        
+
         frps_config = traversal.frps(self.params['token'], self.params['ant_type'], self.params['server_prot'])
         ssh_conn.exec(cmd=f"cat > $HOME/frp/frps.toml << 'EOF'\n{frps_config}\nEOF", pty=False)
-        
+
         cmd1 = f"cd $HOME/frp && nohup ./frps -c frps.toml &> frps.log &"
         ssh_conn.conn.exec_command(timeout=1, command=cmd1, get_pty=False)
         time.sleep(2)
-        
+
         check_result = ssh_conn.exec(cmd="pgrep -x frps", pty=False)
         if not check_result or not check_result.strip():
             self.finished_signal.emit(False, "服务端 frps 启动失败，请检查服务器日志", True)
             return
-        
+
         # 启动客户端
         self.status_updated.emit("正在启动客户端...")
-        
+
         if platform.system() == 'Darwin' or platform.system() == 'Linux':
             os.system("pkill -9 frpc 2>/dev/null")
         elif platform.system() == 'Windows':
             subprocess.run(['taskkill', '/f', '/im', 'frpc.exe'], capture_output=True, text=True)
         time.sleep(0.5)
-        
+
         frpc = traversal.frpc(
             self.params['host'].split(':')[0],
             self.params['token'],
@@ -675,13 +679,14 @@ class FRPConnectThread(QThread):
         )
         with open(abspath('frpc.toml'), 'w') as file:
             file.write(frpc)
-        
-        util.logger.info(f"FRP 配置: 服务器={self.params['host'].split(':')[0]}, 服务端端口={self.params['server_prot']}, 本地端口={self.params['local_port']}")
-        
+
+        util.logger.info(
+            f"FRP 配置: 服务器={self.params['host'].split(':')[0]}, 服务端端口={self.params['server_prot']}, 本地端口={self.params['local_port']}")
+
         frpc_path = str(self.frp_manager.frpc_path)
         frp_log_dir = str(self.frp_manager.frpc_path.parent)
         frpc_config_path = abspath('frpc.toml')
-        
+
         if platform.system() == 'Darwin' or platform.system() == 'Linux':
             cmd_u = f'cd "{frp_log_dir}" && nohup "{frpc_path}" -c "{frpc_config_path}" > frpc.log 2>&1 &'
             os.system(cmd_u)
@@ -692,26 +697,151 @@ class FRPConnectThread(QThread):
                 stderr=subprocess.STDOUT,
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
-        
+
         time.sleep(2)
         ssh_conn.close()
         self.finished_signal.emit(True, "", True)
 
     def _stop_services(self, ssh_conn):
         self.status_updated.emit("正在停止服务...")
-        
+
         ssh_conn.conn.exec_command(timeout=1, command="pkill -9 frps", get_pty=False)
-        
+
         if platform.system() == 'Darwin' or platform.system() == 'Linux':
             os.system("pkill -9 frpc")
         elif platform.system() == 'Windows':
             subprocess.run(['taskkill', '/f', '/im', 'frpc.exe'], capture_output=True, text=True)
-        
+
         ssh_conn.close()
         self.finished_signal.emit(True, "", False)
 
 
 # 主界面逻辑
+class TabCloseButton(QWidget):
+    """
+    自定义Tab关闭按钮组件
+    - 默认显示绿色圆点（表示终端正常连接）
+    - 鼠标悬浮到tab时显示关闭按钮（叉叉）
+    """
+    clicked = Signal()
+
+    def __init__(self, parent=None, tab_bar=None):
+        super().__init__(parent)
+        self.setFixedSize(18, 18)
+        self.tab_bar = tab_bar
+        self._is_hovered = False
+
+        # 创建布局
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # 绿色圆点标签
+        self.status_dot = QLabel(self)
+        self.status_dot.setFixedSize(10, 10)
+        self.status_dot.setStyleSheet("""
+            QLabel {
+                background-color: #4CAF50;
+                border-radius: 5px;
+            }
+        """)
+
+        # 关闭按钮 - 使用QLabel显示叉号，更清晰
+        self.close_btn = QLabel(self)
+        self.close_btn.setFixedSize(16, 16)
+        self.close_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self.close_btn.setAlignment(Qt.AlignCenter)
+        self.close_btn.setText("✕")
+        self.close_btn.setStyleSheet("""
+            QLabel {
+                background-color: transparent;
+                color: #888;
+                font-size: 14px;
+                font-weight: bold;
+            }
+            QLabel:hover {
+                background-color: #e81123;
+                color: white;
+                border-radius: 3px;
+            }
+        """)
+        # 为QLabel添加点击事件
+        self.close_btn.mousePressEvent = lambda e: self.clicked.emit()
+
+        layout.addWidget(self.status_dot, 0, Qt.AlignCenter)
+        layout.addWidget(self.close_btn, 0, Qt.AlignCenter)
+
+        # 默认显示绿色圆点，隐藏关闭按钮
+        self.close_btn.hide()
+        self.status_dot.show()
+
+        # 安装事件过滤器到tab_bar
+        if self.tab_bar:
+            self.tab_bar.installEventFilter(self)
+            self.tab_bar.setMouseTracking(True)
+
+    def getCurrentTabIndex(self):
+        """动态获取当前TabCloseButton所在的tab索引"""
+        if not self.tab_bar:
+            return -1
+        # 遍历所有tab，查找当前按钮对应的tab
+        for i in range(self.tab_bar.count()):
+            if self.tab_bar.tabButton(i, QTabBar.LeftSide) == self:
+                return i
+        return -1
+
+    def eventFilter(self, obj, event):
+        """监听tab bar的鼠标事件"""
+        if obj == self.tab_bar:
+            if event.type() == QEvent.MouseMove:
+                # 获取鼠标所在的tab索引
+                pos = event.pos()
+                hovered_index = self.tab_bar.tabAt(pos)
+                # 动态获取当前按钮所在的tab索引
+                my_index = self.getCurrentTabIndex()
+                if hovered_index == my_index and my_index >= 0:
+                    if not self._is_hovered:
+                        self._is_hovered = True
+                        self.showCloseButton()
+                else:
+                    if self._is_hovered:
+                        self._is_hovered = False
+                        self.showStatusDot()
+            elif event.type() == QEvent.Leave:
+                # 鼠标离开tab bar
+                if self._is_hovered:
+                    self._is_hovered = False
+                    self.showStatusDot()
+        return super().eventFilter(obj, event)
+
+    def showCloseButton(self):
+        """显示关闭按钮"""
+        self.status_dot.hide()
+        self.close_btn.show()
+
+    def showStatusDot(self):
+        """显示状态圆点"""
+        self.close_btn.hide()
+        self.status_dot.show()
+
+    def setConnected(self, connected):
+        """设置连接状态"""
+        if connected:
+            self.status_dot.setStyleSheet("""
+                QLabel {
+                    background-color: #4CAF50;
+                    border-radius: 5px;
+                }
+            """)
+        else:
+            self.status_dot.setStyleSheet("""
+                QLabel {
+                    background-color: #f44336;
+                    border-radius: 5px;
+                }
+            """)
+
+
 class MainDialog(QMainWindow):
     initSftpSignal = Signal()
     # 信号：成功结果 (命令, 输出)
@@ -1154,7 +1284,7 @@ class MainDialog(QMainWindow):
         self._frp_progress.setMinimumWidth(300)
         self._frp_progress.show()
         QApplication.processEvents()
-        
+
         # 保存参数供后续使用
         self._frp_params = {
             'host': host,
@@ -1167,7 +1297,7 @@ class MainDialog(QMainWindow):
             'local_port': local_port,
             'server_prot': server_prot,
         }
-        
+
         # 启动后台线程处理连接和服务
         self._frp_connect_thread = FRPConnectThread(
             self._frp_params,
@@ -1178,25 +1308,25 @@ class MainDialog(QMainWindow):
         self._frp_connect_thread.progress_updated.connect(self._on_frp_progress_updated)
         self._frp_connect_thread.finished_signal.connect(self._on_frp_connect_finished)
         self._frp_connect_thread.start()
-    
+
     def _on_frp_progress_updated(self, percent):
         if hasattr(self, '_frp_progress') and self._frp_progress:
             self._frp_progress.setValue(percent)
-    
+
     def _on_frp_status_updated(self, msg):
         if hasattr(self, '_frp_progress') and self._frp_progress:
             self._frp_progress.setLabelText(msg)
-    
+
     def _on_frp_connect_finished(self, success, error_msg, is_start):
         """FRP 连接线程完成回调"""
         if hasattr(self, '_frp_progress') and self._frp_progress:
             self._frp_progress.close()
             self._frp_progress = None
-        
+
         if not success:
             QMessageBox.warning(self, self.tr("错误"), error_msg)
             return
-        
+
         if is_start:
             # 启动成功
             icon1 = QIcon()
@@ -1314,15 +1444,10 @@ class MainDialog(QMainWindow):
         self.ui.ShellTab.setCurrentIndex(tab_index)
 
         if tab_index > 0:
-            close_button = QPushButton(self)
-            close_button.setCursor(QCursor(Qt.PointingHandCursor))
-            close_button.setIcon(self.style().standardIcon(QStyle.SP_TitleBarCloseButton))
-            close_button.setMaximumSize(QSize(16, 16))
-            close_button.setFlat(True)
-            close_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-
+            tab_bar = self.ui.ShellTab.tabBar()
+            close_button = TabCloseButton(self, tab_bar=tab_bar)
             close_button.clicked.connect(lambda: self.off(tab_index, tab_name))
-            self.ui.ShellTab.tabBar().setTabButton(tab_index, QTabBar.LeftSide, close_button)
+            tab_bar.setTabButton(tab_index, QTabBar.LeftSide, close_button)
         else:
             self.ui.ShellTab.tabBar().setTabButton(tab_index, QTabBar.LeftSide, None)
 
@@ -1485,13 +1610,13 @@ class MainDialog(QMainWindow):
     # 进程管理开始
     def showContextMenu(self, position):
         context_menu = QMenu()
-        refresh_action = QAction("刷新进程列表", self)
+        refresh_action = QAction(self.tr("刷新进程列表"), self)
         refresh_action.triggered.connect(self.update_process_list)
         context_menu.addAction(refresh_action)
 
         # 如果已选择进程，添加终止进程选项
         if len(self.ui.result.selectedItems()) > 0:
-            kill_action = QAction("终止进程", self)
+            kill_action = QAction(self.tr("终止进程"), self)
             kill_action.triggered.connect(self.kill_selected_process)
             context_menu.addAction(kill_action)
 
@@ -1552,7 +1677,7 @@ class MainDialog(QMainWindow):
 
     def display_processes(self):
         # 设置列头
-        headers = ["PID", "用户", "内存", "CPU", "端口", "命令行"]
+        headers = ["PID", self.tr("用户"), self.tr("内存"), "CPU", self.tr("端口"), self.tr("命令行")]
         if self.ui.result.columnCount() != len(headers):
             self.ui.result.setColumnCount(len(headers))
 
@@ -1809,6 +1934,13 @@ class MainDialog(QMainWindow):
         ai_setting_action.setStatusTip(self.tr("配置 GLM-4.7 AI 能力"))
         setting_menu.addAction(ai_setting_action)
         ai_setting_action.triggered.connect(self.show_ai_settings)
+
+        # 语言设置
+        language_action = QAction(QIcon(":settings.png"), self.tr("&语言设置"), self)
+        language_action.setShortcut("Shift+Ctrl+L")
+        language_action.setStatusTip(self.tr("设置应用程序语言"))
+        setting_menu.addAction(language_action)
+        language_action.triggered.connect(self.show_language_settings)
         #
         # 创建"重做"动作
         # docker_action = QAction(QIcon(":redo.png"), "&容器编排", self)
@@ -1818,19 +1950,23 @@ class MainDialog(QMainWindow):
         # docker_action.triggered.connect(self.container_orchestration)
 
         # 创建"关于"动作
-        about_action = QAction(QIcon(":about.png"), self.tr("&关于"), self)
+        about_action = QAction(self.tr("&关于"), self)
+        about_action.setIconVisibleInMenu(True)
+        about_action.setMenuRole(QAction.MenuRole.NoRole)  # 防止 macOS 自动移动到应用程序菜单
         about_action.setShortcut("Shift+Ctrl+B")
         about_action.setStatusTip(self.tr("cubeShell 有关信息"))
         help_menu.addAction(about_action)
         about_action.triggered.connect(self.about)
 
-        linux_action = QAction(QIcon(":about.png"), self.tr("&Linux常用命令"), self)
+        linux_action = QAction(self.tr("&Linux常用命令"), self)
+        linux_action.setIconVisibleInMenu(True)
         linux_action.setShortcut("Shift+Ctrl+P")
         linux_action.setStatusTip(self.tr("最常用的Linux命令查找"))
         help_menu.addAction(linux_action)
         linux_action.triggered.connect(self.linux)
 
-        help_action = QAction(QIcon(":about.png"), self.tr("&帮助"), self)
+        help_action = QAction(self.tr("&帮助"), self)
+        help_action.setIconVisibleInMenu(True)
         help_action.setShortcut("Shift+Ctrl+H")
         help_action.setStatusTip(self.tr("cubeShell使用说明"))
         help_menu.addAction(help_action)
@@ -1848,6 +1984,30 @@ class MainDialog(QMainWindow):
     def show_ai_settings(self):
         dialog = AISettingsDialog(self)
         dialog.exec()
+
+    def show_language_settings(self):
+        """显示语言设置对话框"""
+        dialog = LanguageSettingsDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            selected_lang = dialog.get_selected_language()
+            if selected_lang:
+                # 保存语言设置到配置文件
+                try:
+                    theme_file = abspath("theme.json")
+                    data = util.read_json(theme_file)
+                    data["language"] = selected_lang
+                    util.write_json(theme_file, data)
+                    util.THEME = data
+
+                    # 提示用户重启应用
+                    QMessageBox.information(
+                        self,
+                        self.tr("语言设置"),
+                        self.tr("语言设置已更改，请重启应用程序以生效。")
+                    )
+                except Exception as e:
+                    util.logger.error(f"保存语言设置失败: {e}")
+                    QMessageBox.warning(self, self.tr("错误"), f"保存语言设置失败: {e}")
 
     # linux 常用命令
     def linux(self):
@@ -2808,7 +2968,7 @@ class MainDialog(QMainWindow):
         """向当前 SSH 终端发送 docker exec 命令进入容器"""
         current_index = self.ui.ShellTab.currentIndex()
         terminal = self.get_text_browser_from_tab(current_index)
-        
+
         if terminal:
             # 发送 docker exec 命令
             cmd = f"docker exec -ti {container_id} /bin/bash\n"
@@ -2818,7 +2978,7 @@ class MainDialog(QMainWindow):
         """向当前 SSH 终端发送 docker logs 命令查看容器日志"""
         current_index = self.ui.ShellTab.currentIndex()
         terminal = self.get_text_browser_from_tab(current_index)
-        
+
         if terminal:
             # 发送 docker logs 命令（-f 跟踪日志，-t 显示时间戳，--tail=1000 显示最后1000行）
             cmd = f"docker logs -n 100 -f {container_id}\n"
@@ -4086,10 +4246,10 @@ class MainDialog(QMainWindow):
             'start': '启动'
         }
         op_name = operation_names.get(operation, operation)
-        
+
         # 先标记被操作的容器为“操作中”状态
         self._mark_containers_operating(container_ids, f"{op_name}中...")
-        
+
         # 启动操作线程
         self.docker_op_thread = DockerOperationThread(self.ssh(), operation, container_ids)
         self.docker_op_thread.operation_finished.connect(self._on_docker_operation_finished)
@@ -4098,17 +4258,17 @@ class MainDialog(QMainWindow):
     def _mark_containers_operating(self, container_ids, status_text):
         """标记容器为操作中状态（黄色高亮）"""
         tree = self.ui.treeWidgetDocker
-        
+
         for i in range(tree.topLevelItemCount()):
             project_item = tree.topLevelItem(i)
-            
+
             # 检查子容器
             for j in range(project_item.childCount()):
                 container_item = project_item.child(j)
                 if container_item.text(1) in container_ids:
                     container_item.setText(4, status_text)
                     container_item.setBackground(4, QColor(255, 193, 7, 80))
-            
+
             # 检查顶层容器
             if project_item.text(1) in container_ids:
                 project_item.setText(4, status_text)
@@ -4117,15 +4277,15 @@ class MainDialog(QMainWindow):
     def _update_container_info_in_tree(self, container_info):
         """局部更新容器状态和端口信息"""
         tree = self.ui.treeWidgetDocker
-        
+
         for i in range(tree.topLevelItemCount()):
             project_item = tree.topLevelItem(i)
-            
+
             # 检查子容器
             for j in range(project_item.childCount()):
                 container_item = project_item.child(j)
                 item_id = container_item.text(1)
-                
+
                 if item_id in container_info:
                     info = container_info[item_id]
                     # 更新状态列（第 5 列，索引 4）
@@ -4134,7 +4294,7 @@ class MainDialog(QMainWindow):
                     container_item.setText(6, info['ports'])
                     # 清除高亮背景
                     container_item.setBackground(4, QColor(0, 0, 0, 0))
-            
+
             # 检查顶层容器
             item_id = project_item.text(1)
             if item_id in container_info:
@@ -4147,28 +4307,28 @@ class MainDialog(QMainWindow):
         """从树中移除已删除的容器"""
         tree = self.ui.treeWidgetDocker
         items_to_remove = []
-        
+
         # 收集要删除的项
         for i in range(tree.topLevelItemCount()):
             project_item = tree.topLevelItem(i)
-            
+
             # 检查子容器
             for j in range(project_item.childCount() - 1, -1, -1):
                 container_item = project_item.child(j)
                 if container_item.text(1) in container_ids:
                     items_to_remove.append((project_item, j))
-            
+
             # 检查顶层容器
             if project_item.text(1) in container_ids:
                 items_to_remove.append((None, i))
-        
+
         # 从后往前删除，避免索引变化
         for parent, index in reversed(items_to_remove):
             if parent:
                 parent.removeChild(parent.child(index))
             else:
                 tree.takeTopLevelItem(index)
-        
+
         # 清理空的项目组
         for i in range(tree.topLevelItemCount() - 1, -1, -1):
             project_item = tree.topLevelItem(i)
@@ -4186,7 +4346,7 @@ class MainDialog(QMainWindow):
             'start': '启动'
         }
         op_name = operation_names.get(operation, operation)
-        
+
         if success:
             if operation == 'rm':
                 # 删除操作：从列表中移除容器
@@ -4401,6 +4561,27 @@ class MainDialog(QMainWindow):
                 terminal.setColorScheme(terminal.current_theme_name)
             else:
                 terminal.setColorScheme("Ubuntu")
+
+    def sync_terminal_theme(self, theme_name, exclude_terminal=None):
+        """
+        同步终端主题到所有打开的终端
+        
+        :param theme_name: 要应用的主题名称
+        :param exclude_terminal: 要排除的终端实例（通常是触发切换的终端，已经应用了主题）
+        """
+        try:
+            for index in range(self.ui.ShellTab.count()):
+                terminal = self.get_text_browser_from_tab(index)
+                if not terminal or not hasattr(terminal, 'setColorScheme'):
+                    continue
+                # 跳过触发切换的终端（已经应用了主题）
+                if exclude_terminal and terminal is exclude_terminal:
+                    continue
+                # 更新终端的当前主题名并应用
+                terminal.current_theme_name = theme_name
+                terminal.setColorScheme(theme_name)
+        except Exception as e:
+            util.logger.error(f"同步终端主题失败: {e}")
 
     def on_system_theme_changed(self, is_dark_theme):
         """系统主题切换时，重新应用终端主题"""
@@ -4785,7 +4966,7 @@ class TextEditor(QMainWindow):
             return
         found = self.editor.find_text(text, self.regexCheck.isChecked(), self.caseSensCheck.isChecked())
         if not found:
-            QMessageBox.information(self, "查找", "未找到匹配项")
+            QMessageBox.information(self, self.tr("查找"), self.tr("未找到匹配项"))
 
     def replace(self):
         text = self.findInput.text()
@@ -4800,7 +4981,7 @@ class TextEditor(QMainWindow):
         if not text:
             return
         count = self.editor.replace_all(text, new_text, self.regexCheck.isChecked(), self.caseSensCheck.isChecked())
-        QMessageBox.information(self, "替换", f"已替换 {count} 处匹配项")
+        QMessageBox.information(self, self.tr("替换"), self.tr("已替换 {count} 处匹配项").format(count=count))
 
     def flushNewText(self):
         self.timer1 = QTimer()
@@ -5129,7 +5310,7 @@ class TunnelConfig(QDialog):
 
     def __init__(self, parent, data):
         super(TunnelConfig, self).__init__(parent)
-        
+
         # 保存隧道名称，用于保存时更新 JSON 文件
         self._tunnel_name = None
 
@@ -5158,7 +5339,7 @@ class TunnelConfig(QDialog):
         self.ui.browser_open.setText(data.get(KEYS.BROWSER_OPEN))
         self.ui.copy.clicked.connect(self.do_copy_ssh_command)
         self.ui.comboBox_tunnel_type.currentIndexChanged.connect(self.readonly_remote_bind_address_edit)
-        
+
         # 连接保存按钮到保存方法
         self.ui.buttonBox.accepted.disconnect()  # 断开原有的连接
         self.ui.buttonBox.accepted.connect(self.save_config)
@@ -5172,13 +5353,13 @@ class TunnelConfig(QDialog):
         if not self._tunnel_name:
             QMessageBox.warning(self, self.tr("保存失败"), self.tr("隧道名称未设置"))
             return
-        
+
         # 验证本地绑定地址
         local = self.ui.local_bind_address_edit.text().strip()
         if not local or ':' not in local:
             QMessageBox.warning(self, self.tr("警告"), self.tr("本地绑定地址格式不正确，请使用 host:port 格式"))
             return
-        
+
         # 验证远程绑定地址（非动态模式）
         tunnel_type = self.ui.comboBox_tunnel_type.currentText()
         remote = self.ui.remote_bind_address_edit.text().strip()
@@ -5186,7 +5367,7 @@ class TunnelConfig(QDialog):
             if not remote or ':' not in remote:
                 QMessageBox.warning(self, self.tr("警告"), self.tr("远程绑定地址格式不正确，请使用 host:port 格式"))
                 return
-        
+
         try:
             file_path = get_config_path('tunnel.json')
             # 读取 JSON 文件内容
@@ -5195,10 +5376,10 @@ class TunnelConfig(QDialog):
             data[self._tunnel_name] = self.as_dict()
             # 将修改后的数据写回 JSON 文件
             util.write_json(file_path, data)
-            
+
             # 关闭对话框
             self.accept()
-            
+
             # 刷新父窗口的隧道列表
             parent = self.parent()
             if parent and hasattr(parent, 'parent') and parent.parent():
@@ -5207,7 +5388,7 @@ class TunnelConfig(QDialog):
                     util.clear_grid_layout(main_window.ui.gridLayout_tunnel_tabs)
                     util.clear_grid_layout(main_window.ui.gridLayout_kill_all)
                     main_window.tunnel_refresh()
-                    
+
         except Exception as e:
             util.logger.error(f"Error saving tunnel config: {e}")
             QMessageBox.warning(self, self.tr("保存失败"), str(e))
@@ -5394,7 +5575,7 @@ class Tunnel(QWidget):
     def start_tunnel(self):
         type_ = self.tunnelconfig.ui.comboBox_tunnel_type.currentText()
         ssh = self.tunnelconfig.ui.comboBox_ssh.currentText()
-        
+
         if not ssh:
             raise ValueError("请先选择 SSH 服务器")
 
@@ -5402,7 +5583,7 @@ class Tunnel(QWidget):
         local_bind_address = self.tunnelconfig.ui.local_bind_address_edit.text().strip()
         if not local_bind_address or ':' not in local_bind_address:
             raise ValueError("本地绑定地址格式错误，请使用 host:port 格式，例如 localhost:1080")
-        
+
         try:
             local_host, local_port = local_bind_address.split(':')[0], int(local_bind_address.split(':')[1])
         except (ValueError, IndexError):
@@ -5410,12 +5591,12 @@ class Tunnel(QWidget):
 
         # 获取SSH信息
         ssh_user, ssh_password, host, key_type, key_file = open_data(ssh)
-        
+
         if not host or ':' not in host:
             raise ValueError(f"SSH 服务器配置错误，请检查 '{ssh}' 的配置")
-        
+
         ssh_host, ssh_port = host.split(':')[0], int(host.split(':')[1])
-        
+
         if not ssh_user:
             raise ValueError("用户名不能为空")
 
@@ -5764,8 +5945,8 @@ class SSHQTermWidget(QTermWidget):
             'clear': QIcon(":clear.png")
         }
 
-        # 记录当前主题
-        self.current_theme_name = "Ubuntu"
+        # 记录当前主题 - 从配置文件读取持久化的主题，如果没有则使用默认值 "Ubuntu"
+        self.current_theme_name = (util.THEME or {}).get("terminal_theme", "Ubuntu")
         self._theme_reapply_pending = False
 
         self._prompt_index = {"commands": [], "options": {}}
@@ -6260,9 +6441,9 @@ class SSHQTermWidget(QTermWidget):
         # 优先使用用户配置的字体
         saved_font = util.THEME.get('font', '')
         current_size = util.THEME.get('font_size', 14)
-        
+
         available_families = set(QFontDatabase.families())
-        
+
         # 如果用户配置了字体且可用，直接使用
         if saved_font and saved_font in available_families:
             font = QFont(saved_font, current_size)
@@ -6270,7 +6451,7 @@ class SSHQTermWidget(QTermWidget):
                 self.setTerminalFont(font)
                 print(f"使用用户配置字体: {saved_font}, 大小: {current_size}")
                 return
-        
+
         # 否则使用默认字体优先级列表
         fonts_to_try = [
             "JetBrains Mono",
@@ -6472,14 +6653,14 @@ class SSHQTermWidget(QTermWidget):
         """添加自定义动作到菜单"""
 
         # 复制操作 - 使用QTermWidget内置方法
-        copy_action = QAction(self._action_icons['copy'], "复制", self)
+        copy_action = QAction(self._action_icons['copy'], self.tr("复制"), self)
         copy_action.setIconVisibleInMenu(True)
         # copy_action.setShortcut("Ctrl+C")
         copy_action.triggered.connect(self.copyClipboard)
         menu.addAction(copy_action)
 
         # 粘贴操作 - 使用QTermWidget内置方法
-        paste_action = QAction(self._action_icons['paste'], "粘贴", self)
+        paste_action = QAction(self._action_icons['paste'], self.tr("粘贴"), self)
         paste_action.setIconVisibleInMenu(True)
         # paste_action.setShortcut("Ctrl+V")
         paste_action.triggered.connect(self.pasteClipboard)
@@ -6489,7 +6670,7 @@ class SSHQTermWidget(QTermWidget):
         menu.addSeparator()
 
         # 清屏操作 - 使用QTermWidget内置方法
-        clear_action = QAction(self._action_icons['clear'], "清屏", self)
+        clear_action = QAction(self._action_icons['clear'], self.tr("清屏"), self)
         clear_action.setIconVisibleInMenu(True)
         clear_action.triggered.connect(self.clear)
         menu.addAction(clear_action)
@@ -6498,25 +6679,25 @@ class SSHQTermWidget(QTermWidget):
         menu.addSeparator()
 
         # 终端主题切换
-        theme_action = QAction("🎨 切换终端主题", self)
+        theme_action = QAction(self.tr("🎨 切换终端主题"), self)
         theme_action.triggered.connect(self.show_theme_selector)
         menu.addAction(theme_action)
 
         menu.addSeparator()
-        ai_menu = menu.addMenu("🤖 AI")
-        explain_action = QAction("解释文本", self)
+        ai_menu = menu.addMenu(self.tr("🤖 AI"))
+        explain_action = QAction(self.tr("解释文本"), self)
         explain_action.triggered.connect(lambda: open_ai_dialog(self, "explain"))
         ai_menu.addAction(explain_action)
 
-        script_action = QAction("编写脚本", self)
+        script_action = QAction(self.tr("编写脚本"), self)
         script_action.triggered.connect(lambda: open_ai_dialog(self, "script"))
         ai_menu.addAction(script_action)
 
-        install_action = QAction("软件环境", self)
+        install_action = QAction(self.tr("软件环境"), self)
         install_action.triggered.connect(lambda: open_ai_dialog(self, "install"))
         ai_menu.addAction(install_action)
 
-        log_action = QAction("日志分析", self)
+        log_action = QAction(self.tr("日志分析"), self)
         log_action.triggered.connect(lambda: open_ai_dialog(self, "log"))
         ai_menu.addAction(log_action)
 
@@ -6550,10 +6731,29 @@ class SSHQTermWidget(QTermWidget):
         }
 
     def apply_theme(self, theme_name):
-        """应用终端主题"""
+        """应用终端主题并持久化保存"""
         try:
             # 应用主题
             self.setColorScheme(theme_name)
+
+            # 持久化保存主题到配置文件
+            try:
+                theme_file = abspath("theme.json")
+                data = util.read_json(theme_file)
+                data["terminal_theme"] = theme_name
+                util.write_json(theme_file, data)
+                util.THEME = data
+            except Exception as save_err:
+                util.logger.error(f"保存终端主题配置失败: {save_err}")
+
+            # 同步主题到所有其他打开的终端
+            try:
+                main_window = self.window()
+                if main_window and hasattr(main_window, 'sync_terminal_theme'):
+                    main_window.sync_terminal_theme(theme_name, exclude_terminal=self)
+            except Exception as sync_err:
+                util.logger.error(f"同步终端主题失败: {sync_err}")
+
         except Exception as e:
             QMessageBox.warning(
                 self,
@@ -6597,6 +6797,134 @@ class SSHQTermWidget(QTermWidget):
             return []
 
 
+class LanguageSettingsDialog(QDialog):
+    """语言设置对话框 - 支持多国语言选择"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._selected_language = ""
+        self.setup_ui()
+        self.load_languages()
+
+    def setup_ui(self):
+        """设置 UI"""
+        self.setWindowTitle(self.tr("语言设置"))
+        self.setMinimumSize(400, 500)
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(15, 15, 15, 15)
+
+        # 标题
+        title_label = QLabel(self.tr("选择应用程序语言"))
+        title_label.setStyleSheet("font-size: 16px; font-weight: bold; margin-bottom: 10px;")
+        layout.addWidget(title_label)
+
+        # 说明
+        desc_label = QLabel(self.tr("更改语言后需要重启应用程序才能生效"))
+        desc_label.setStyleSheet("color: gray; margin-bottom: 10px;")
+        layout.addWidget(desc_label)
+
+        # 搜索框
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText(self.tr("搜索语言..."))
+        self.search_edit.textChanged.connect(self.filter_languages)
+        layout.addWidget(self.search_edit)
+
+        # 语言列表
+        self.language_list = QListWidget()
+        self.language_list.setAlternatingRowColors(True)
+        self.language_list.itemDoubleClicked.connect(self.on_item_double_clicked)
+        layout.addWidget(self.language_list, 1)
+
+        # 当前语言显示
+        current_lang = (util.THEME or {}).get("language", "zh_CN")
+        current_lang_name = self._get_language_name(current_lang)
+        self.current_label = QLabel(self.tr("当前语言: ") + current_lang_name)
+        self.current_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+        layout.addWidget(self.current_label)
+
+        # 按钮
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+
+        cancel_btn = QPushButton(self.tr("取消"))
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_btn)
+
+        ok_btn = QPushButton(self.tr("确定"))
+        ok_btn.setDefault(True)
+        ok_btn.clicked.connect(self.on_accept)
+        button_layout.addWidget(ok_btn)
+
+        layout.addLayout(button_layout)
+
+    def load_languages(self):
+        """加载语言列表"""
+        current_lang = (util.THEME or {}).get("language", "zh_CN")
+
+        for lang_code, english_name, native_name in SUPPORTED_LANGUAGES:
+            # 显示格式: 原生名称 (English Name)
+            display_text = f"{native_name}  ({english_name})"
+
+            item = QListWidgetItem(display_text)
+            item.setData(Qt.UserRole, lang_code)
+
+            # 标记当前语言
+            if lang_code == current_lang:
+                item.setText(f"✓ {display_text}")
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+
+            self.language_list.addItem(item)
+
+        # 选中当前语言
+        for i in range(self.language_list.count()):
+            item = self.language_list.item(i)
+            if item.data(Qt.UserRole) == current_lang:
+                self.language_list.setCurrentItem(item)
+                break
+
+    def filter_languages(self, text):
+        """过滤语言列表"""
+        text = text.lower()
+        for i in range(self.language_list.count()):
+            item = self.language_list.item(i)
+            item_text = item.text().lower()
+            lang_code = item.data(Qt.UserRole).lower()
+
+            # 搜索匹配显示文本或语言代码
+            visible = text in item_text or text in lang_code
+            item.setHidden(not visible)
+
+    def _get_language_name(self, lang_code):
+        """获取语言名称"""
+        for code, english_name, native_name in SUPPORTED_LANGUAGES:
+            if code == lang_code:
+                return native_name
+        return lang_code
+
+    def on_item_double_clicked(self, item):
+        """双击选择语言"""
+        self._selected_language = item.data(Qt.UserRole)
+        self.accept()
+
+    def on_accept(self):
+        """确认选择"""
+        current_item = self.language_list.currentItem()
+        if current_item:
+            self._selected_language = current_item.data(Qt.UserRole)
+            self.accept()
+        else:
+            QMessageBox.warning(self, self.tr("警告"), self.tr("请选择一种语言"))
+
+    def get_selected_language(self):
+        """获取选择的语言代码"""
+        return self._selected_language
+
+
 class TerminalThemeSelector(QDialog):
     """增强的终端主题选择器对话框"""
 
@@ -6632,19 +6960,6 @@ class TerminalThemeSelector(QDialog):
             }
         """)
         layout.addWidget(title_label)
-
-        # 当前主题显示
-        self.current_label = QLabel()
-        self.current_label.setStyleSheet("""
-            QLabel {
-                padding: 8px;
-                background-color: #3498db;
-                color: white;
-                border-radius: 3px;
-                font-weight: bold;
-            }
-        """)
-        layout.addWidget(self.current_label)
 
         # 主题网格布局
         scroll_area = QScrollArea()
@@ -6712,8 +7027,6 @@ class TerminalThemeSelector(QDialog):
                 self.current_theme = self.terminal_widget.colorScheme()
             except:
                 self.current_theme = "未知"
-
-            self.current_label.setText(f"📌 当前主题: {self.current_theme}")
 
             # 获取推荐主题
             themes = self.terminal_widget.get_recommended_themes()
@@ -6832,16 +7145,26 @@ class TerminalThemeSelector(QDialog):
 
 
 if __name__ == '__main__':
-    print("PySide6 version:", PySide6.__version__)
+    logger.info("PySide6 version:", PySide6.__version__)
 
     app = QApplication(sys.argv)
 
-    # translator = QTranslator()
-    # # 加载编译后的 .qm 文件
-    # translator.load("app_zh_CN.qm")
-    #
-    # # 安装翻译
-    # app.installTranslator(translator)
+    # 初始化语言管理器并加载语言设置
+    try:
+        # 读取配置中的语言设置
+        theme_config = util.read_json(abspath('theme.json'))
+        saved_language = theme_config.get('language', 'zh_CN')
+
+        # 初始化语言管理器
+        lang_manager = get_language_manager()
+        i18n_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'i18n')
+        lang_manager.initialize(app, i18n_dir)
+        lang_manager.load_from_config(saved_language)
+
+        logger.info(f"Language loaded: {saved_language}")
+    except Exception as e:
+        logger.error(f"Failed to load language settings: {e}")
+
     window = MainDialog(app)
 
     window.show()
