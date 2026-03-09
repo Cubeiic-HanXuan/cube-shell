@@ -4753,7 +4753,7 @@ class Auth(QDialog):
             # Mac 不设置，弹层会放主窗口的后面
             self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
         self.dial.setupUi(self)
-        self.setWindowIcon(QIcon("Resources/icon.ico"))
+        self.setWindowIcon(QIcon(":logo.ico"))
         # 同意
         self.dial.buttonBox.accepted.connect(self.ok_auth)
         self.dial.buttonBox.rejected.connect(self.reject)
@@ -4821,7 +4821,7 @@ class AddConfigUi(QDialog):
             self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
         self.dial.pushButton_3.setEnabled(False)
         self.dial.lineEdit.setEnabled(False)
-        self.setWindowIcon(QIcon("Resources/icon.ico"))
+        self.setWindowIcon(QIcon(":logo.ico"))
         self.dial.pushButton.clicked.connect(self.addDev)
         self.dial.pushButton_3.clicked.connect(self.addKeyFile)
 
@@ -4879,7 +4879,7 @@ class AddConfigUi(QDialog):
             return
 
         self.dial.alarmbox = QMessageBox(self)  # 指定父对象
-        self.dial.alarmbox.setWindowIcon(QIcon("Resources/icon.ico"))
+        self.dial.alarmbox.setWindowIcon(QIcon(":logo.ico"))
         self.dial.alarmbox.setText(alart)
         self.dial.alarmbox.setWindowTitle(self.tr('错误提示'))
         self.dial.alarmbox.show()
@@ -4893,7 +4893,7 @@ class TextEditor(QMainWindow):
         super().__init__()
         self.te = text_editor.Ui_MainWindow()
         self.te.setupUi(self)
-        self.setWindowIcon(QIcon("Resources/icon.ico"))
+        self.setWindowIcon(QIcon(":logo.ico"))
         self.setWindowTitle(title)
 
         self.old_text = old_text
@@ -5020,7 +5020,7 @@ class Confirm(QDialog):
         super().__init__()
         self.cfm = confirm.Ui_confirm()
         self.cfm.setupUi(self)
-        self.setWindowIcon(QIcon("Resources/icon.ico"))
+        self.setWindowIcon(QIcon(":logo.ico"))
 
 
 class Communicate(QObject):
@@ -7147,7 +7147,23 @@ class TerminalThemeSelector(QDialog):
 if __name__ == '__main__':
     print("PySide6 version:", PySide6.__version__)
 
+    # Windows 高DPI支持 - 解决图标模糊问题
+    if platform.system() == 'Windows':
+        # 启用高DPI缩放
+        QApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
+        # 设置环境变量确保高DPI渲染
+        os.environ['QT_ENABLE_HIGHDPI_SCALING'] = '1'
+        os.environ['QT_SCALE_FACTOR_ROUNDING_POLICY'] = 'PassThrough'
+
     app = QApplication(sys.argv)
+
+    # Windows 下设置应用图标（用于任务栏）
+    if platform.system() == 'Windows':
+        import ctypes
+        # 设置AppUserModelID让Windows正确显示任务栏图标
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('hanxuan.cubeshell.app.1')
 
     # 初始化语言管理器并加载语言设置
     try:
