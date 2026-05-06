@@ -495,3 +495,29 @@ def resume_upload(sftp, local_path, remote_path, progress_callback):
                 remote_file.write(data)
                 remote_file_size += len(data)
                 progress_callback(int((remote_file_size / file_size) * 100))
+
+
+def open_file_in_explorer(path: str) -> None:
+    """
+    跨平台打开文件资源管理器并定位到指定路径
+    :param path: 文件或文件夹的绝对路径
+    """
+    import platform
+    import subprocess
+
+    try:
+        if platform.system() == 'Darwin':  # macOS
+            subprocess.run(['open', '-R', path], check=True)
+        elif platform.system() == 'Linux':
+            if shutil.which('nautilus'):
+                subprocess.Popen(['nautilus', '--select', path])
+            elif shutil.which('dolphin'):
+                subprocess.Popen(['dolphin', '--select', path])
+            elif shutil.which('thunar'):
+                subprocess.Popen(['thunar', os.path.dirname(path)])
+            elif shutil.which('xdg-open'):
+                subprocess.Popen(['xdg-open', os.path.dirname(path)])
+        elif platform.system() == 'Windows':
+            subprocess.run(['explorer', '/select,', os.path.normpath(path)], check=True)
+    except Exception as e:
+        logger.error(f"Failed to open explorer for path {path}: {e}")

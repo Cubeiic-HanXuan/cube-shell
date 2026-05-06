@@ -2807,13 +2807,20 @@ class MainDialog(QMainWindow):
             self.ui.action6.setIconVisibleInMenu(True)
             ssh_conn = self.ssh()
             self.ui.action_new_local_terminal = None
+            self.ui.action_show_in_explorer = None
             if ssh_conn and getattr(ssh_conn, "is_local", False):
                 self.ui.action_new_local_terminal = QAction(
-                    QIcon(':Localhost.png'),
+                    QIcon(':icons8-ssh-48.png'),
                     self.tr('新建位于文件夹位置的终端窗口'),
                     self
                 )
                 self.ui.action_new_local_terminal.setIconVisibleInMenu(True)
+                self.ui.action_show_in_explorer = QAction(
+                    QIcon(':open.png'),
+                    self.tr('在文件资源管理器中显示'),
+                    self
+                )
+                self.ui.action_show_in_explorer.setIconVisibleInMenu(True)
             self.ui.action7 = QAction(QIcon(':remove.png'), self.tr('删除'), self)
             self.ui.action7.setIconVisibleInMenu(True)
             self.ui.action8 = QAction(QIcon(':icons-rename-48.png'), self.tr('重命名'), self)
@@ -2832,6 +2839,8 @@ class MainDialog(QMainWindow):
             self.ui.tree_menu.addAction(self.ui.action6)
             if self.ui.action_new_local_terminal is not None:
                 self.ui.tree_menu.addAction(self.ui.action_new_local_terminal)
+            if getattr(self.ui, 'action_show_in_explorer', None) is not None:
+                self.ui.tree_menu.addAction(self.ui.action_show_in_explorer)
 
             # 在子菜单中添加动作
             file_action = QAction(self.tr("权限"), self)
@@ -2863,6 +2872,8 @@ class MainDialog(QMainWindow):
             self.ui.action6.triggered.connect(self.refresh)
             if self.ui.action_new_local_terminal is not None:
                 self.ui.action_new_local_terminal.triggered.connect(self.open_local_terminal_in_selected_folder)
+            if getattr(self.ui, 'action_show_in_explorer', None) is not None:
+                self.ui.action_show_in_explorer.triggered.connect(self.show_file_in_explorer)
             self.ui.action7.triggered.connect(self.remove)
             self.ui.action8.triggered.connect(self.rename)
             self.ui.action9.triggered.connect(self.unzip)
@@ -2901,6 +2912,35 @@ class MainDialog(QMainWindow):
             self.processInitUI()
         except Exception as e:
             util.logger.error(f"新建本机终端失败: {e}")
+
+    def show_file_in_explorer(self):
+        """在文件资源管理器中显示选中的文件或目录"""
+        from function import util
+
+        ssh_conn = self.ssh()
+        if not ssh_conn or not getattr(ssh_conn, "is_local", False):
+            return
+
+        try:
+            selected_items = self.ui.treeWidget.selectedItems()
+            if not selected_items:
+                return
+
+            item = selected_items[0]
+            name = (item.text(0) or "").strip()
+            pwd = getattr(ssh_conn, "pwd", "") or ""
+
+            if name and pwd:
+                target_path = os.path.normpath(os.path.join(pwd, name))
+                if os.path.exists(target_path):
+                    util.open_file_in_explorer(target_path)
+                else:
+                    QMessageBox.warning(self, self.tr("错误"),
+                                        self.tr("路径不存在: ") + target_path)
+        except Exception as e:
+            util.logger.error(f"Show in explorer failed: {e}")
+            QMessageBox.warning(self, self.tr("错误"),
+                                self.tr("打开文件管理器失败: ") + str(e))
 
     # 创建docker列表树右键菜单函数
     def treeDocker(self, position):
