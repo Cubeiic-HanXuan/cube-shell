@@ -3258,6 +3258,12 @@ class MainDialog(QMainWindow):
 
             # 如果当前显示的连接就是此连接，且数据未变，则跳过刷新
             if self.current_displayed_connection_id == conn_id and is_data_same:
+                # 即使数据未变也要确保 _dir_tree_ready 为 True，
+                # 否则 refreshDirs() 中设为 False 后不会恢复，导致 cd() 失效
+                try:
+                    ssh_conn._dir_tree_ready = True
+                except Exception:
+                    pass
                 return
 
         # 检查当前显示的标签页是否对应此连接
