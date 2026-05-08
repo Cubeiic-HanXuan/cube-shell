@@ -1,4 +1,6 @@
+import json
 import os
+import threading
 
 import yaml
 from PySide6.QtCore import Qt, Signal, QSize
@@ -525,6 +527,68 @@ class ServiceSearchDialog(QDialog):
         return None, None
 
 
+class DockerDaemonConfigDialog(QDialog):
+    """Docker守护进程配置对话框"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Docker守护进程配置")
+        self.setMinimumWidth(600)
+        self.setMinimumHeight(400)
+
+        # 创建主布局
+        layout = QVBoxLayout(self)
+
+        # 创建配置编辑器
+        self.editor = QTextEdit()
+        self.editor.setFont(QFont("Courier New", 10))
+        self.editor.setPlaceholderText("请输入daemon.json的配置内容...")
+
+        # 添加默认配置
+        default_config = {
+            "registry-mirrors": [
+                "https://mirror.ccs.tencentyun.com"
+            ]
+        }
+        self.editor.setText(json.dumps(default_config, indent=2))
+
+        # 创建按钮
+        button_layout = QHBoxLayout()
+
+        self.validate_button = QPushButton("验证配置")
+        self.validate_button.clicked.connect(self.validate_config)
+
+        self.apply_button = QPushButton("应用配置")
+        self.apply_button.clicked.connect(self.accept)
+
+        self.cancel_button = QPushButton("取消")
+        self.cancel_button.clicked.connect(self.reject)
+
+        button_layout.addWidget(self.validate_button)
+        button_layout.addWidget(self.apply_button)
+        button_layout.addWidget(self.cancel_button)
+
+        # 添加组件到主布局
+        layout.addWidget(QLabel("Docker守护进程配置 (daemon.json):"))
+        layout.addWidget(self.editor)
+        layout.addLayout(button_layout)
+
+    def validate_config(self):
+        """验证配置是否有效"""
+        try:
+            json.loads(self.editor.toPlainText())
+            QMessageBox.information(self, "验证成功", "配置格式正确！")
+        except json.JSONDecodeError as e:
+            QMessageBox.warning(self, "验证失败", f"配置格式错误：{str(e)}")
+
+    def get_config(self):
+        """获取配置内容"""
+        try:
+            return json.loads(self.editor.toPlainText())
+        except json.JSONDecodeError:
+            return {}
+
+
 class DockerComposeEditor(QWidget):
     def __init__(self, parent=None, ssh=None):
         super().__init__(parent)
@@ -658,11 +722,14 @@ class DockerComposeEditor(QWidget):
         ps_btn.clicked.connect(lambda: self.execute_command("ps"))
         logs_btn = QPushButton("查看日志")
         logs_btn.clicked.connect(self.toggle_logs)
+        config_docker_btn = QPushButton("配置Docker")
+        config_docker_btn.clicked.connect(self.on_config_docker_clicked)
         button_layout.addWidget(up_btn)
         button_layout.addWidget(down_btn)
         button_layout.addWidget(restart_btn)
         button_layout.addWidget(ps_btn)
         button_layout.addWidget(logs_btn)
+        button_layout.addWidget(config_docker_btn)
         command_layout.addLayout(button_layout)
 
         # 输出显示区域
@@ -941,6 +1008,81 @@ class DockerComposeEditor(QWidget):
         self.config['services'][service_name] = self.config_widget.config
         # 显示保存成功消息
         QMessageBox.information(self, "成功", f"服务 {service_name} 的配置已更新")
+
+    def on_config_docker_clicked(self):
+        """配置Docker守护进程"""
+        if not self.ssh:
+            QMessageBox.warning(self, "警告", "未配置SSH管理器")
+            return
+
+        dialog = DockerDaemonConfigDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            config = dialog.get_config()
+            if not config:
+                QMessageBox.warning(self, "警告", "配置内容为空或格式错误")
+                return
+
+            # 在新线程中执行配置操作
+            def apply_docker_config():
+                try:
+                    password = self.ssh.password
+                    config_json = json.dumps(config, indent=2)
+
+                    # 创建配置目录
+                    self.output_text.append("[配置Docker] 创建Docker配置目录...")
+                    mkdir_cmd = "sudo -S mkdir -p /etc/docker"
+                    stdin, stdout, stderr = self.ssh.conn.exec_command(mkdir_cmd)
+                    stdin.write(f"{password}\n")
+                    stdin.flush()
+                    exit_code = stdout.channel.recv_exit_status()
+                    if exit_code != 0:
+                        error = stderr.read().decode('utf-8')
+                        self.output_text.append(f"[配置Docker] 创建配置目录失败: {error}")
+                        return
+
+                    # 备份现有配置
+                    self.output_text.append("[配置Docker] 备份现有配置...")
+                    backup_cmd = "sudo -S cp /etc/docker/daemon.json /etc/docker/daemon.json.bak 2>/dev/null || true"
+                    stdin, stdout, stderr = self.ssh.conn.exec_command(backup_cmd)
+                    stdin.write(f"{password}\n")
+                    stdin.flush()
+                    stdout.channel.recv_exit_status()
+
+                    # 写入新配置
+                    self.output_text.append("[配置Docker] 写入新配置...")
+                    write_cmd = f"echo '{config_json}' | sudo tee /etc/docker/daemon.json"
+                    stdin, stdout, stderr = self.ssh.conn.exec_command(write_cmd)
+                    if self.ssh.username != "root":
+                        stdin.write(f"{password}\n")
+                        stdin.flush()
+                    exit_code = stdout.channel.recv_exit_status()
+                    if exit_code != 0:
+                        error = stderr.read().decode('utf-8')
+                        self.output_text.append(f"[配置Docker] 写入配置失败: {error}")
+                        return
+
+                    # 重启Docker服务
+                    self.output_text.append("[配置Docker] 重启Docker服务...")
+                    restart_cmd = "sudo -S systemctl restart docker"
+                    stdin, stdout, stderr = self.ssh.conn.exec_command(restart_cmd)
+                    stdin.write(f"{password}\n")
+                    stdin.flush()
+                    exit_code = stdout.channel.recv_exit_status()
+                    if exit_code != 0:
+                        error = stderr.read().decode('utf-8')
+                        self.output_text.append(f"[配置Docker] 重启Docker服务失败: {error}")
+                        return
+
+                    self.output_text.append("[配置Docker] Docker守护进程配置完成！")
+
+                except Exception as e:
+                    self.output_text.append(f"[配置Docker] 配置过程中出现错误: {str(e)}")
+
+            # 清空输出区域并启动线程
+            self.output_text.clear()
+            thread = threading.Thread(target=apply_docker_config)
+            thread.daemon = True
+            thread.start()
 
     def add_service(self):
         dialog = ServiceSearchDialog(self)

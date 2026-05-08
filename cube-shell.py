@@ -53,7 +53,6 @@ from pygments.formatters import HtmlFormatter
 from pygments.lexers import BashLexer
 
 from core.docker.docker_compose_editor import DockerComposeEditor
-from core.docker.docker_installer_ui import DockerInstallerWidget
 from core.forwarder import ForwarderManager
 from core.frequently_used_commands import TreeSearchApp
 from core.uploader.progress_adapter import ProgressAdapter
@@ -3931,7 +3930,7 @@ class MainDialog(QMainWindow):
             container_layout = QVBoxLayout()
             container_widget.setLayout(container_layout)
             container_layout.setContentsMargins(0, 0, 0, 0)  # 去掉布局的内边距
-            container_widget.setStyleSheet("background-color: rgb(187, 232, 221);")
+            #container_widget.setStyleSheet("background-color: rgb(187, 232, 221);")
 
             text_browser = QTextBrowser(container_widget)
             text_browser.append("\n")
@@ -3941,16 +3940,8 @@ class MainDialog(QMainWindow):
             # 设置内容居中对齐
             text_browser.setAlignment(Qt.AlignCenter)
 
-            install_button = QPushButton("服务器还没有安装docker容器，开始安装")
-            install_button.clicked.connect(self.start_installation)
-
-            self.ui.gridLayout_7.addWidget(install_button)
-
-    def start_installation(self):
-        docker_installer = DockerInstallerWidget(self.ssh())
-        self.ui.tabWidget.addTab(docker_installer, self.tr('docker安装'))
-        # 切换到Docker安装器标签页
-        self.ui.tabWidget.setCurrentWidget(docker_installer)
+            container_layout.addWidget(text_browser)
+            self.ui.gridLayout_7.addWidget(container_widget)
 
     # 下载文件
     def downloadFile(self):
