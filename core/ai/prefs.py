@@ -7,6 +7,70 @@ import appdirs
 from function import util
 
 
+PROVIDER_PRESETS = {
+    "zhipuai": {
+        "name": "智谱 GLM",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "models": ["glm-4.5", "glm-4.5-air", "glm-4.6", "glm-4.7", "glm-5", "glm-5-turbo", "glm-5.1"],
+        "supports_thinking": True,
+    },
+    "deepseek": {
+        "name": "DeepSeek",
+        "base_url": "https://api.deepseek.com/v1",
+        "models": ["deepseek-v4-pro", "deepseek-v4-flash"],
+        "supports_thinking": True,
+    },
+    "aliyun": {
+        "name": "通义千问",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "models": ["qwen-max", "qwen-plus", "qwen-turbo"],
+        "supports_thinking": False,
+    },
+    "moonshot": {
+        "name": "Kimi (月之暗面)",
+        "base_url": "https://api.moonshot.cn/v1",
+        "models": ["kimi-k2.6", "kimi-k2.5", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
+        "supports_thinking": False,
+    },
+    "spark": {
+        "name": "讯飞星火",
+        "base_url": "https://spark-api-open.xf-yun.com/v1",
+        "models": ["general", "generalv3", "generalv3.5"],
+        "supports_thinking": False,
+    },
+    "baichuan": {
+        "name": "百川",
+        "base_url": "https://api.baichuan-ai.com/v1",
+        "models": ["Baichuan4", "Baichuan3-Turbo"],
+        "supports_thinking": False,
+    },
+    "minimax": {
+        "name": "MiniMax",
+        "base_url": "https://api.minimax.chat/v1",
+        "models": ["MiniMax-Text-01", "abab6.5s-chat", "abab5.5-chat"],
+        "supports_thinking": False,
+    },
+    "xiaomi": {
+        "name": "小米 MiLM",
+        "base_url": "https://api.xiaomi.com/v1",
+        "models": ["MiLM-1"],
+        "supports_thinking": False,
+    },
+    "doubao": {
+        "name": "豆包 (火山引擎)",
+        "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+        "models": ["doubao-seed-2-0-code-preview-260215", "doubao-seed-2-0-mini-260215", "doubao-seed-2-0-pro-260215"],
+        "supports_thinking": True,
+    },
+    "custom": {
+        "name": "自定义",
+        "base_url": "",
+        "models": [],
+        "supports_thinking": False,
+    },
+}
+
+
 @dataclass
 class AIUserPrefs:
     """
@@ -17,6 +81,7 @@ class AIUserPrefs:
     - API Key 绝不写入该配置文件，避免泄漏（Key 使用系统钥匙串或环境变量）。
     """
 
+    provider: str = "zhipuai"  # AI 服务提供商
     model: str = "glm-4.7"
     base_url: str = ""
     thinking_enabled: bool = True
@@ -66,6 +131,7 @@ def load_ai_prefs() -> AIUserPrefs:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f) or {}
         return AIUserPrefs(
+            provider=str(data.get("provider") or "zhipuai"),
             model=str(data.get("model") or "glm-4.7"),
             base_url=str(data.get("base_url") or ""),
             thinking_enabled=bool(data.get("thinking_enabled", True)),
@@ -92,6 +158,7 @@ def save_ai_prefs(prefs: AIUserPrefs) -> None:
     path = get_ai_prefs_path()
     try:
         data = {
+            "provider": prefs.provider,
             "model": prefs.model,
             "base_url": prefs.base_url,
             "thinking_enabled": prefs.thinking_enabled,
@@ -104,4 +171,9 @@ def save_ai_prefs(prefs: AIUserPrefs) -> None:
             json.dump(data, f, indent=2, ensure_ascii=False)
     except Exception as e:
         util.logger.error(f"保存 AI 配置失败: {e}")
+
+
+def get_provider_preset(provider: str) -> dict:
+    """获取指定提供商的预设配置"""
+    return PROVIDER_PRESETS.get(provider, PROVIDER_PRESETS["custom"])
 

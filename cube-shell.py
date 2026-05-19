@@ -75,7 +75,10 @@ from core.frp_manager import get_frp_manager
 from ui.tunnel_config import Ui_TunnelConfig
 from ui.code_editor import CodeEditor, Highlighter
 from function.ssh_prompt_client import load_linux_commands
-from core.ai import AISettingsDialog, open_ai_dialog
+from core.ai import AISettingsDialog
+from core.ai.ai_panel import AIChatPanel
+from core.ai.ssh_agent import SSHAIAgent
+from core.ai.confirm_dialog import CommandConfirmDialog
 from i18n import get_language_manager, SUPPORTED_LANGUAGES
 
 # 配置日志输出到文件
@@ -964,6 +967,21 @@ class MainDialog(QMainWindow):
         self._last_connect_attempt_ts = 0
         self.is_closing = False
 
+        # AI 面板 - 存储每个 Tab 的 SSHAIAgent 实例
+        self._ai_agents = {}  # key: conn_id, value: SSHAIAgent
+
+        # 创建 AI 面板 DockWidget
+        self.ai_dock = QDockWidget("AI 助手", self)
+        self.ai_dock.setObjectName("ai_dock")
+        self.ai_panel = AIChatPanel(self.ai_dock)
+        self.ai_dock.setWidget(self.ai_panel)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.ai_dock)
+        self.ai_dock.setVisible(False)  # 默认隐藏
+
+        # Ctrl+Shift+K 切换 AI 面板显示/隐藏 (K=Knowledge AI, 避免与已有快捷键冲突)
+        ai_shortcut = QShortcut(QKeySequence("Ctrl+Shift+K"), self)
+        ai_shortcut.activated.connect(self._toggle_ai_panel)
+
         self._move_monitor_and_process_to_bottom_tabs()
 
     def _move_monitor_and_process_to_bottom_tabs(self):
@@ -1535,6 +1553,10 @@ class MainDialog(QMainWindow):
                     self.ui.treeWidget.clear()
                     self.refreshConf()
 
+        # 切换 Tab 时始终同步 AI 面板的终端绑定（不论 AI 面板是否可见），
+        # 避免 AI 面板在隐藏后重新显示时 agent 仍指向旧 Tab 的终端。
+        self._connect_ai_to_current_tab()
+
     def zoom_in(self):
         """增大字体 - 支持 QTermWidget"""
         current_index = self.ui.ShellTab.currentIndex()
@@ -1923,19 +1945,19 @@ class MainDialog(QMainWindow):
         import_configuration.triggered.connect(self.import_configuration)
 
         # 创建"主题设置"动作
-        theme_action = QAction(QIcon(":undo.png"), self.tr("&主题设置"), self)
+        theme_action = QAction(self.tr("&主题设置"), self)
         theme_action.setShortcut("Shift+Ctrl+T")
         theme_action.setStatusTip(self.tr("设置主题"))
         setting_menu.addAction(theme_action)
         theme_action.triggered.connect(self.theme)
 
-        ai_setting_action = QAction(QIcon(":settings.png"), self.tr("&AI 设置"), self)
+        ai_setting_action = QAction(self.tr("&AI 设置"), self)
         ai_setting_action.setStatusTip(self.tr("配置 GLM-4.7 AI 能力"))
         setting_menu.addAction(ai_setting_action)
         ai_setting_action.triggered.connect(self.show_ai_settings)
 
         # 语言设置
-        language_action = QAction(QIcon(":settings.png"), self.tr("&语言设置"), self)
+        language_action = QAction(self.tr("&语言设置"), self)
         language_action.setShortcut("Shift+Ctrl+L")
         language_action.setStatusTip(self.tr("设置应用程序语言"))
         setting_menu.addAction(language_action)
@@ -1983,6 +2005,13 @@ class MainDialog(QMainWindow):
     def show_ai_settings(self):
         dialog = AISettingsDialog(self)
         dialog.exec()
+        # 配置对话框关闭后，同步刷新 AI 面板顶部状态栏中的模型名称显示
+        try:
+            if hasattr(self, "ai_panel") and self.ai_panel is not None:
+                if hasattr(self.ai_panel, "refresh_model_label"):
+                    self.ai_panel.refresh_model_label()
+        except Exception:
+            pass
 
     def show_language_settings(self):
         """显示语言设置对话框"""
@@ -2230,10 +2259,13 @@ class MainDialog(QMainWindow):
         buf = {"text": ""}
 
         def cleanup():
-            try:
-                terminal.receivedData.disconnect(on_chunk)
-            except Exception:
-                pass
+            import warnings as _warnings
+            with _warnings.catch_warnings():
+                _warnings.simplefilter("ignore", RuntimeWarning)
+                try:
+                    terminal.receivedData.disconnect(on_chunk)
+                except Exception:
+                    pass
 
         def on_chunk(chunk: str):
             if state["done"]:
@@ -2627,6 +2659,16 @@ class MainDialog(QMainWindow):
 
     def closeEvent(self, event):
         try:
+            # 先关闭 AI agents 的工作线程，避免 'QThread: Destroyed while thread is still running'
+            if hasattr(self, '_ai_agents') and self._ai_agents:
+                for _agent in list(self._ai_agents.values()):
+                    try:
+                        if hasattr(_agent, 'shutdown'):
+                            _agent.shutdown(wait_ms=1500)
+                    except Exception as _e:
+                        util.logger.error(f"Failed to shutdown AI agent: {_e}")
+                self._ai_agents.clear()
+
             # 尝试关闭所有终端组件，给它们机会清理进程
             if hasattr(self.ui, 'ShellTab'):
                 total_tabs = self.ui.ShellTab.count()
@@ -4642,6 +4684,186 @@ class MainDialog(QMainWindow):
                                 self.tr("后台SSH连接失败，文件管理/监控功能不可用，但终端仍可用。"))
         except Exception:
             pass
+
+    # ──────────────────────────── AI 面板相关方法 ────────────────────────────
+
+    def _toggle_ai_panel(self):
+        """切换 AI 面板显示/隐藏"""
+        visible = self.ai_dock.isVisible()
+        self.ai_dock.setVisible(not visible)
+        if not visible:
+            self._connect_ai_to_current_tab()
+
+    def _connect_ai_to_current_tab(self):
+        """将 AI 面板连接到当前活跃的 SSH Tab"""
+        ssh_conn = self.ssh()
+        if not ssh_conn:
+            self.ai_panel.set_status(False)
+            return
+
+        conn_id = getattr(ssh_conn, 'id', None)
+        if not conn_id:
+            self.ai_panel.set_status(False)
+            return
+
+        # 更新 AI 面板连接状态
+        host_info = f"{getattr(ssh_conn, 'username', '')}@{getattr(ssh_conn, 'host', '')}"
+        self.ai_panel.set_status(True, host_info)
+
+        # 复用已有 agent 或创建新的
+        if conn_id not in self._ai_agents:
+            agent = SSHAIAgent(ssh_conn, parent=self)
+            self._ai_agents[conn_id] = agent
+        else:
+            agent = self._ai_agents[conn_id]
+
+        # 将当前 Tab 的终端注入 agent，以供 interactive=true 的命令发送到终端中执行
+        try:
+            current_terminal = self.get_text_browser_from_tab(self.ui.ShellTab.currentIndex())
+            agent.set_terminal(current_terminal)
+        except Exception as e:
+            util.logger.error(f"注入终端到 AI agent 失败: {e}")
+
+        # 断开旧连接，避免重复连接
+        # 注意：Qt 的 signal.disconnect() 在没有连接时会发出 RuntimeWarning（而不是抛出异常），
+        # try/except 拦不住，需要用 warnings.catch_warnings() 抑制。
+        import warnings as _warnings
+
+        def _safe_disconnect(sig):
+            with _warnings.catch_warnings():
+                _warnings.simplefilter("ignore", RuntimeWarning)
+                try:
+                    sig.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
+
+        _safe_disconnect(self.ai_panel.user_message_sent)
+        _safe_disconnect(self.ai_panel.command_execute_requested)
+        _safe_disconnect(self.ai_panel.stop_requested)
+        _safe_disconnect(self.ai_panel.clear_requested)
+        _safe_disconnect(agent.ai_message)
+        _safe_disconnect(agent.command_ready)
+        _safe_disconnect(agent.execution_started)
+        _safe_disconnect(agent.execution_finished)
+        _safe_disconnect(agent.thinking_started)
+        _safe_disconnect(agent.thinking_finished)
+        _safe_disconnect(agent.error_occurred)
+        _safe_disconnect(agent.execution_progress)
+        _safe_disconnect(agent.command_output)
+        _safe_disconnect(agent.diagnosing_started)
+        _safe_disconnect(agent.task_summary)
+
+        # 连接信号槽
+        self.ai_panel.user_message_sent.connect(agent.process_user_input)
+        agent.ai_message.connect(self.ai_panel.append_ai_delta)
+        agent.command_ready.connect(self._show_confirm_dialog)
+        agent.execution_started.connect(
+            lambda cmd: self.ai_panel.set_executing(True, cmd)
+        )
+        agent.execution_finished.connect(self._on_execution_finished)
+        # 执行进度 -- 更新底部标签显示 [2/5]
+        agent.execution_progress.connect(
+            lambda cur, tot: self.ai_panel.set_executing(True, "", cur, tot)
+        )
+        # 实时输出 -- 显示下载进度等
+        agent.command_output.connect(self.ai_panel.update_command_output, Qt.QueuedConnection)
+        # 诊断开始 -- 在聊天流中插入提示
+        agent.diagnosing_started.connect(self.ai_panel.append_diagnosing_hint)
+        # 任务总结 -- 插入总结卡片
+        agent.task_summary.connect(self.ai_panel.append_task_summary)
+        agent.thinking_started.connect(lambda: self.ai_panel.set_thinking(True))
+        agent.thinking_finished.connect(lambda: self.ai_panel.set_thinking(False))
+        agent.error_occurred.connect(lambda msg: self.ai_panel.append_ai_message(f"❌ 错误: {msg}"))
+        self.ai_panel.command_execute_requested.connect(self._on_single_command_exec)
+        self.ai_panel.stop_requested.connect(agent.stop)
+        self.ai_panel.clear_requested.connect(agent.clear_conversation)
+
+    def _on_execution_finished(self, result: dict):
+        """处理命令执行完成"""
+        cmd = result.get("cmd", "")
+        exit_code = result.get("exit_code", -1)
+        stdout = result.get("stdout", "")
+        stderr = result.get("stderr", "")
+        description = result.get("description", "")
+        output = stdout if exit_code == 0 else (stderr or stdout)
+        self.ai_panel.append_execution_result(cmd, exit_code, output, description)
+        self.ai_panel.set_executing(False)
+
+    def _on_single_command_exec(self, cmd: str):
+        """从 AI 面板直接执行单条命令到当前终端"""
+        current_index = self.ui.ShellTab.currentIndex()
+        terminal = self.get_text_browser_from_tab(current_index)
+        if terminal and hasattr(terminal, 'sendText'):
+            terminal.sendText(cmd + '\n')
+
+    def _show_confirm_dialog(self, commands: list):
+        """显示命令确认对话框（仅对危险命令）
+
+        根据安全检查结果自动分流：
+        - SAFE/LOW 风险命令：自动执行，不弹窗
+        - MEDIUM/HIGH/CRITICAL 命令：弹窗让用户确认
+        """
+        auto_commands = []   # 安全命令，自动执行
+        risky_commands = []  # 危险命令，需要确认
+
+        for cmd_info in commands:
+            safety = cmd_info.get("safety", {})
+            risk_level = safety.get("risk_level", "low")
+            if risk_level in ("safe", "low"):
+                auto_commands.append(cmd_info)
+            else:
+                risky_commands.append(cmd_info)
+
+        # 如果所有命令都是安全的，直接执行
+        if not risky_commands:
+            self._on_commands_approved(commands)
+            return
+
+        # 如果有危险命令，弹窗确认（展示全部命令，标记风险命令）
+        dialog = CommandConfirmDialog(commands, parent=self)
+        dialog.commands_approved.connect(self._on_commands_approved)
+        dialog.command_step.connect(self._on_commands_step_mode)
+        dialog.exec()
+
+    def _on_commands_approved(self, commands: list):
+        """用户确认后执行命令"""
+        ssh_conn = self.ssh()
+        if not ssh_conn:
+            return
+        conn_id = getattr(ssh_conn, 'id', None)
+        if conn_id and conn_id in self._ai_agents:
+            self._ai_agents[conn_id].execute_commands(commands)
+
+    def _on_commands_step_mode(self, commands: list):
+        """逐条确认模式 - 逐条弹窗让用户审批每个命令"""
+        from core.ai.confirm_dialog import SingleCommandConfirmDialog
+
+        approved_commands = []
+        for i, cmd_info in enumerate(commands):
+            dialog = SingleCommandConfirmDialog(
+                cmd_info=cmd_info,
+                index=i + 1,
+                total=len(commands),
+                parent=self,
+            )
+            result = dialog.exec()
+            if result == dialog.DialogCode.Accepted:
+                approved_commands.append(cmd_info)
+            elif result == dialog.DialogCode.Rejected:
+                # 检查是否是"终止全部"
+                if dialog.abort_all:
+                    break
+                # 否则只是跳过当前命令，继续下一条
+                continue
+
+        # 执行用户批准的命令
+        if approved_commands:
+            ssh_conn = self.ssh()
+            if not ssh_conn:
+                return
+            conn_id = getattr(ssh_conn, 'id', None)
+            if conn_id and conn_id in self._ai_agents:
+                self._ai_agents[conn_id].execute_commands(approved_commands)
 
     # 获取当前标签页的backend
     def ssh(self):
@@ -6716,27 +6938,15 @@ class SSHQTermWidget(QTermWidget):
         menu.addSeparator()
 
         # 终端主题切换
-        theme_action = QAction(self.tr("🎨 切换终端主题"), self)
+        theme_action = QAction(QIcon(":icons8-bg-48.png"), self.tr("切换终端主题"), self)
         theme_action.triggered.connect(self.show_theme_selector)
         menu.addAction(theme_action)
 
         menu.addSeparator()
-        ai_menu = menu.addMenu(self.tr("🤖 AI"))
-        explain_action = QAction(self.tr("解释文本"), self)
-        explain_action.triggered.connect(lambda: open_ai_dialog(self, "explain"))
-        ai_menu.addAction(explain_action)
 
-        script_action = QAction(self.tr("编写脚本"), self)
-        script_action.triggered.connect(lambda: open_ai_dialog(self, "script"))
-        ai_menu.addAction(script_action)
-
-        install_action = QAction(self.tr("软件环境"), self)
-        install_action.triggered.connect(lambda: open_ai_dialog(self, "install"))
-        ai_menu.addAction(install_action)
-
-        log_action = QAction(self.tr("日志分析"), self)
-        log_action.triggered.connect(lambda: open_ai_dialog(self, "log"))
-        ai_menu.addAction(log_action)
+        ai_action = QAction(QIcon(":icons8-ai-48.png"), self.tr("AI"), self)
+        ai_action.triggered.connect(lambda: self.window()._toggle_ai_panel())
+        menu.addAction(ai_action)
 
     def show_theme_selector(self):
         """显示增强的主题选择器"""

@@ -10,7 +10,14 @@ cube-shell 的 AI 子模块（GLM-4.7 / zai-sdk）。
 from .prefs import AIUserPrefs, load_ai_prefs, save_ai_prefs
 from .secrets import get_ai_api_key, set_ai_api_key
 from .worker import AIChatWorker
-from .ui import AISettingsDialog, AIOutputDialog, open_ai_dialog
+from .ui import AISettingsDialog
+from .safety import RiskLevel, SafetyCheckResult, CommandSafetyChecker
+from .confirm_dialog import CommandConfirmDialog, SingleCommandConfirmDialog
+from .ai_panel import AIChatPanel
+from .ssh_agent import SSHAIAgent
+from .voice_input import VoiceInputManager
+from .audit import AuditLogger
+from .history_panel import HistoryPanel
 
 __all__ = [
     "AIUserPrefs",
@@ -20,6 +27,14 @@ __all__ = [
     "set_ai_api_key",
     "AIChatWorker",
     "AISettingsDialog",
-    "AIOutputDialog",
-    "open_ai_dialog",
+    "RiskLevel",
+    "SafetyCheckResult",
+    "CommandSafetyChecker",
+    "CommandConfirmDialog",
+    "SingleCommandConfirmDialog",
+    "AIChatPanel",
+    "SSHAIAgent",
+    "VoiceInputManager",
+    "AuditLogger",
+    "HistoryPanel",
 ]

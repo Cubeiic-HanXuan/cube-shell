@@ -3,7 +3,7 @@ import traceback
 from PySide6.QtCore import QThread, Signal
 
 from function import util
-from .prefs import AIUserPrefs
+from .prefs import AIUserPrefs, get_provider_preset
 from .secrets import get_ai_api_key
 
 
@@ -32,14 +32,14 @@ class AIChatWorker(QThread):
 
         说明：
         - SDK 的流式迭代器通常不支持强制中断 socket；
-        - 这里采用“软停止”：停止后不再消费后续 chunk。
+        - 这里采用"软停止"：停止后不再消费后续 chunk。
         """
 
         self._stop_flag = True
 
     def run(self):
         """
-        线程入口：调用 zai-sdk 的 chat.completions.create。
+        线程入口：调用 OpenAI 兼容 SDK 的 chat.completions.create。
 
         关键点：
         - 读取 API Key：环境变量或系统钥匙串；
@@ -48,27 +48,28 @@ class AIChatWorker(QThread):
         """
 
         try:
-            from zai import ZhipuAiClient
+            from openai import OpenAI
 
-            api_key = get_ai_api_key()
+            api_key = get_ai_api_key(self.prefs.provider)
             if not api_key:
-                self.failed.emit("未配置 API Key，请在“设置 -> AI 设置”中配置，或设置环境变量 ZAI_API_KEY")
+                self.failed.emit("未配置 API Key，请在「设置 -> AI 设置」中配置")
                 return
 
-            kwargs = {"api_key": api_key}
-            if self.prefs.base_url:
-                kwargs["base_url"] = self.prefs.base_url
-            client = ZhipuAiClient(**kwargs)
+            preset = get_provider_preset(self.prefs.provider)
+            base_url = self.prefs.base_url or preset["base_url"]
+            client = OpenAI(api_key=api_key, base_url=base_url)
 
-            thinking = {"type": "enabled"} if self.prefs.thinking_enabled else {"type": "disabled"}
-            response = client.chat.completions.create(
-                model=self.prefs.model,
-                messages=self.messages,
-                thinking=thinking,
-                stream=self.prefs.stream,
-                max_tokens=self.prefs.max_tokens,
-                temperature=self.prefs.temperature,
-            )
+            call_kwargs = {
+                "model": self.prefs.model,
+                "messages": self.messages,
+                "stream": self.prefs.stream,
+                "max_tokens": self.prefs.max_tokens,
+                "temperature": self.prefs.temperature,
+            }
+            if preset["supports_thinking"] and self.prefs.thinking_enabled:
+                call_kwargs["thinking"] = {"type": "enabled"}
+
+            response = client.chat.completions.create(**call_kwargs)
 
             full_text = ""
             if self.prefs.stream:
