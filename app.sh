@@ -20,7 +20,7 @@ nuitka \
   --include-module=pygments \
   --include-module=paramiko \
   --include-module=yaml \
-  --include-module=zai \
+  --include-module=openai \
   --include-module=keyring \
   --include-module=prompt_toolkit \
   --include-module=pygments.formatters.html \
