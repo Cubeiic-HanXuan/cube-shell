@@ -67,7 +67,7 @@ class AIChatWorker(QThread):
                 "temperature": self.prefs.temperature,
             }
             if preset["supports_thinking"] and self.prefs.thinking_enabled:
-                call_kwargs["thinking"] = {"type": "enabled"}
+                call_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
 
             response = client.chat.completions.create(**call_kwargs)
 

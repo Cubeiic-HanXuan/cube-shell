@@ -145,7 +145,7 @@ class _AIWorkerThread(QThread):
                 "stream": True,
             }
             if preset["supports_thinking"] and self._prefs.thinking_enabled:
-                call_kwargs["thinking"] = {"type": "enabled"}
+                call_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
             if self._tools:
                 call_kwargs["tools"] = self._tools
                 call_kwargs["tool_choice"] = "auto"
