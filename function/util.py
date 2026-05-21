@@ -35,101 +35,110 @@ APP_NAME = "cube-shell"
 logger = logging.getLogger(__name__)
 
 
+# 文件夹图标缓存：QFileIconProvider 创建开销大，全局只创建一次
+_FOLDER_ICON_CACHE = None
+
+
 def get_default_folder_icon():
     """
-    # 获取系统默认文件夹图标
+    # 获取系统默认文件夹图标（带全局缓存）
     :return:
     """
-    # 创建一个 QFileIconProvider 对象
-    icon_provider = QFileIconProvider()
-
-    # 获取文件夹的默认图标
-    folder_icon = icon_provider.icon(QFileIconProvider.Folder)
-
-    return folder_icon
+    global _FOLDER_ICON_CACHE
+    if _FOLDER_ICON_CACHE is None:
+        icon_provider = QFileIconProvider()
+        _FOLDER_ICON_CACHE = icon_provider.icon(QFileIconProvider.IconType.Folder)
+    return _FOLDER_ICON_CACHE
 
 
-# 获取系统默认文件图标
+# 扩展名 → 图标资源路径映射（模块级，仅创建一次）
+_EXT_ICON_MAP = {
+    ".sh": ':icons8-ssh-48.png',
+    ".sql": ':icons8-sql-48.png',
+    ".py": ':icons8-python-48.png',
+    ".java": ':icons8-java-48.png',
+    ".go": ':icons8-golang-48.png',
+    ".c": ':icons8-c-48.png',
+    ".cpp": ':icons8-c-48.png',
+    ".js": ':icons8-js-48.png',
+    ".vue": ':icons8-vuejs-48.png',
+    ".html": ':icons8-html-48.png',
+    ".css": ':icons8-css-48.png',
+    ".exe": ':icons8-windows-48.png',
+    ".dmg": ':icons8-dmg-48.png',
+    ".bat": ':icons8-bat-48.png',
+    ".vbs": ':icons8-bat-48.png',
+    ".ini": ':icons8-ini-48.png',
+    ".tsx": ':icons8-react-48.png',
+    ".ts": ':icons8-ts-48.png',
+    ".editorconfig": ':icons8-editorconfig-48.png',
+    ".jar": ':icons8-jar-48.png',  # 原逻辑中 .jar elif 先于元组匹配，使用专用 jar 图标
+    ".so": ':icons8-linux-48.png',
+    ".tar": ':icons8-zip-48.png',
+    ".gz": ':icons8-zip-48.png',
+    ".zip": ':icons8-zip-48.png',
+    ".cfg": ':icons8-settings-40.png',
+    ".gitconfig": ':icons8-settings-40.png',
+    ".conf": ':icons8-settings-40.png',
+    ".png": ':icons8-png-48.png',
+    ".gif": ':icons8-gif-48.png',
+    ".jpg": ':icons8-jpg-48.png',
+    ".jpeg": ':icons8-jpg-48.png',
+    ".license": ':icons8-license-48.png',
+    ".json": ':icons8-json-48.png',
+    ".txt": ':icons8-txt-48.png',
+    ".gitignore": ':icons8-gitignore-48.png',
+    ".md": ':icons8-md-48.png',
+    ".yaml": ':icons8-yaml-48.png',
+    ".yml": ':icons8-yaml-48.png',
+    ".properties": ':icons8-properties-48.png',
+    ".log": ':icons-log-48.png',
+    ".toml": ':icons-toml-48.png',
+    ".xml": ':xml-48.png',
+}
+
+# 文件名前缀（如 .env、.eslintrc）→ 图标路径：保留原 startswith 语义
+_PREFIX_ICON_MAP = (
+    (".eslintrc", ':icons8-eslintrc-48.png'),  # 必须在 .env 之前匹配（避免 .eslintrc.js 走到 .env）
+    (".env", ':icons8-env-48.png'),
+)
+
+# QIcon 对象缓存：避免每次 QIcon(path) 重复加载
+_FILE_ICON_CACHE = {}
+_DEFAULT_FILE_ICON = None
+
+
+# 获取系统默认文件图标（带缓存与字典查询，避免 40+ elif 与重复对象创建）
 def get_default_file_icon(qt_str):
-    # 创建一个 QFileIconProvider 对象
-    icon_provider = QFileIconProvider()
+    global _DEFAULT_FILE_ICON
 
-    if qt_str.endswith(".sh"):
-        return QIcon(':icons8-ssh-48.png')
-    elif qt_str.endswith(".sql"):
-        return QIcon(':icons8-sql-48.png')
-    elif qt_str.endswith(".py"):
-        return QIcon(':icons8-python-48.png')
-    elif qt_str.endswith(".java"):
-        return QIcon(':icons8-java-48.png')
-    elif qt_str.endswith(".go"):
-        return QIcon(':icons8-golang-48.png')
-    elif qt_str.endswith(".c"):
-        return QIcon(':icons8-c-48.png')
-    elif qt_str.endswith(".cpp"):
-        return QIcon(':icons8-c-48.png')
-    elif qt_str.endswith(".js") and not qt_str.startswith(".eslintrc"):
-        return QIcon(':icons8-js-48.png')
-    elif qt_str.endswith(".vue"):
-        return QIcon(':icons8-vuejs-48.png')
-    elif qt_str.endswith(".html"):
-        return QIcon(':icons8-html-48.png')
-    elif qt_str.endswith(".css"):
-        return QIcon(':icons8-css-48.png')
-    elif qt_str.endswith(".exe"):
-        return QIcon(':icons8-windows-48.png')
-    elif qt_str.endswith(".dmg"):
-        return QIcon(':icons8-dmg-48.png')
-    elif qt_str.endswith(('.bat', '.vbs')):
-        return QIcon(':icons8-bat-48.png')
-    elif qt_str.endswith(".ini"):
-        return QIcon(':icons8-ini-48.png')
-    elif qt_str.endswith(".tsx"):
-        return QIcon(':icons8-react-48.png')
-    elif qt_str.endswith(".ts"):
-        return QIcon(':icons8-ts-48.png')
-    elif qt_str.startswith(".env"):
-        return QIcon(':icons8-env-48.png')
-    elif qt_str.startswith(".eslintrc"):
-        return QIcon(':icons8-eslintrc-48.png')
-    elif qt_str.endswith(".editorconfig"):
-        return QIcon(':icons8-editorconfig-48.png')
-    elif qt_str.endswith(".jar"):
-        return QIcon(':icons8-jar-48.png')
-    elif qt_str.endswith(".so"):
-        return QIcon(':icons8-linux-48.png')
-    elif qt_str.endswith(('.tar', '.gz', '.zip', '.jar')):
-        return QIcon(':icons8-zip-48.png')
-    elif qt_str.endswith(('.cfg', '.gitconfig', '.conf')):
-        return QIcon(':icons8-settings-40.png')
-    elif qt_str.endswith('.png'):
-        return QIcon(':icons8-png-48.png')
-    elif qt_str.endswith('.gif'):
-        return QIcon(':icons8-gif-48.png')
-    elif qt_str.endswith(('.jpg', '.jpeg')):
-        return QIcon(':icons8-jpg-48.png')
-    elif qt_str.endswith('.license'):
-        return QIcon(':icons8-license-48.png')
-    elif qt_str.endswith('.json'):
-        return QIcon(':icons8-json-48.png')
-    elif qt_str.endswith('.txt'):
-        return QIcon(':icons8-txt-48.png')
-    elif qt_str.endswith('.gitignore'):
-        return QIcon(':icons8-gitignore-48.png')
-    elif qt_str.endswith('.md'):
-        return QIcon(':icons8-md-48.png')
-    elif qt_str.endswith(('.yaml', '.yml')):
-        return QIcon(':icons8-yaml-48.png')
-    elif qt_str.endswith('.properties'):
-        return QIcon(':icons8-properties-48.png')
-    elif qt_str.endswith('.log'):
-        return QIcon(':icons-log-48.png')
-    elif qt_str.endswith('.toml'):
-        return QIcon(':icons-toml-48.png')
-    elif qt_str.endswith('.xml'):
-        return QIcon(':xml-48.png')
+    # 1) 先按文件名前缀匹配（保留原 startswith 语义，如 .env / .eslintrc）
+    for prefix, icon_path in _PREFIX_ICON_MAP:
+        if qt_str.startswith(prefix):
+            cached = _FILE_ICON_CACHE.get(prefix)
+            if cached is None:
+                cached = QIcon(icon_path)
+                _FILE_ICON_CACHE[prefix] = cached
+            return cached
 
-    return icon_provider.icon(QFileIconProvider.File)
+    # 2) 按扩展名查表
+    dot_idx = qt_str.rfind('.')
+    ext = qt_str[dot_idx:].lower() if dot_idx != -1 else ""
+
+    if ext in _FILE_ICON_CACHE:
+        return _FILE_ICON_CACHE[ext]
+
+    icon_path = _EXT_ICON_MAP.get(ext)
+    if icon_path:
+        icon = QIcon(icon_path)
+        _FILE_ICON_CACHE[ext] = icon
+        return icon
+
+    # 3) 兜底：系统默认文件图标（缓存）
+    if _DEFAULT_FILE_ICON is None:
+        icon_provider = QFileIconProvider()
+        _DEFAULT_FILE_ICON = icon_provider.icon(QFileIconProvider.IconType.File)
+    return _DEFAULT_FILE_ICON
 
 
 def format_file_size(size_in_bytes):

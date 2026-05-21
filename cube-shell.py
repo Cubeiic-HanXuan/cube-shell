@@ -3396,10 +3396,14 @@ class MainDialog(QMainWindow):
                 return "", []
 
         dir_n_info = []
+        # 远程目录同步上限：与本地保持一致，避免超大目录冲垄主线程渲染
+        MAX_DIR_ITEMS = 5000
         for d in dir_info:
             d_list = ssh_conn.del_more_space(d)
             if d_list:
                 dir_n_info.append(d_list)
+                if len(dir_n_info) >= MAX_DIR_ITEMS:
+                    break
             else:
                 pass
         return pwd[:-1], dir_n_info
@@ -3473,21 +3477,28 @@ class MainDialog(QMainWindow):
         except Exception:
             names = []
 
-        def _sort_key(n: str):
-            p = os.path.join(pwd_abs, n)
+        # 大目录优化：预先一次性获取所有 stat 信息，避免排序+遍历重复 lstat
+        stat_cache = {}
+        for name in names:
             try:
-                st = os.lstat(p)
-                is_dir = _stat.S_ISDIR(st.st_mode)
-            except Exception:
-                is_dir = False
-            return (0 if is_dir else 1, n.lower())
-
-        for name in sorted(names, key=_sort_key):
-            p = os.path.join(pwd_abs, name)
-            try:
-                st = os.lstat(p)
-            except Exception:
+                p = os.path.join(pwd_abs, name)
+                stat_cache[name] = os.lstat(p)
+            except OSError:
                 continue
+
+        def _sort_key(n: str):
+            st = stat_cache.get(n)
+            if st is None:
+                return (2, n.lower())
+            return (0 if _stat.S_ISDIR(st.st_mode) else 1, n.lower())
+
+        # 大目录上限：避免主线程创建过多 QTreeWidgetItem 导致 UI 卡死
+        MAX_DIR_ITEMS = 5000
+
+        for i, name in enumerate(sorted(stat_cache.keys(), key=_sort_key)):
+            if i >= MAX_DIR_ITEMS:
+                break
+            st = stat_cache[name]
             perm = _stat.filemode(st.st_mode)
             links = str(getattr(st, "st_nlink", 1))
             owner = _owner_name(getattr(st, "st_uid", 0))
