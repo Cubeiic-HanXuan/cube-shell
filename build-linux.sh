@@ -146,11 +146,43 @@ cp    qtermwidget/default.keytab "${DIST_DIR}/"
 # 6.4 确保主程序可执行
 chmod +x "${DIST_DIR}/${APP_NAME}.bin" 2>/dev/null || true
 
-# 6.5 生成一个便捷启动脚本（可直接 ./cube-shell.sh 运行）
+# 6.5 复制应用图标（PNG 格式，用于 Linux 桌面显示）
+if [ -f "icons/logo.png" ]; then
+  cp icons/logo.png "${DIST_DIR}/"
+else
+  echo "   WARNING: icons/logo.png not found, desktop icon may be missing."
+fi
+
+# 6.6 生成 .desktop 桌面入口文件（路径占位，由启动脚本首次运行时修正为绝对路径）
+DESKTOP_FILE="${DIST_DIR}/${APP_NAME}.desktop"
+cat > "${DESKTOP_FILE}" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Cube Shell
+Comment=${FILE_DESC}
+Exec=${APP_NAME}.bin
+Icon=logo.png
+Terminal=false
+Categories=Development;System;Utility;
+StartupNotify=true
+StartupWMClass=cubeShell
+EOF
+chmod +x "${DESKTOP_FILE}"
+
+# 6.7 生成一个便捷启动脚本（可直接 ./cube-shell.sh 运行）
+#     首次运行时自动将 .desktop 中的 Exec/Icon 修正为绝对路径，便于复制到 ~/.local/share/applications/
 LAUNCHER="${DIST_DIR}/${APP_NAME}.sh"
 cat > "${LAUNCHER}" <<'EOF'
 #!/bin/bash
 DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# 自动修正 .desktop 文件中的路径（每次运行均会刷新，确保移动目录后仍可用）
+DESKTOP="${DIR}/cube-shell.desktop"
+if [ -f "${DESKTOP}" ]; then
+  sed -i "s|^Exec=.*|Exec=${DIR}/cube-shell.bin|" "${DESKTOP}"
+  sed -i "s|^Icon=.*|Icon=${DIR}/logo.png|" "${DESKTOP}"
+fi
+
 exec "${DIR}/cube-shell.bin" "$@"
 EOF
 chmod +x "${LAUNCHER}"
@@ -183,4 +215,6 @@ echo " Build finished."
 echo "   App dir : ${DIST_DIR}"
 echo "   Tarball : ${TARBALL}"
 echo "   Run     : ${DIST_DIR}/${APP_NAME}.sh"
+echo "   Install : run ${APP_NAME}.sh once, then"
+echo "             cp ${DIST_DIR}/${APP_NAME}.desktop ~/.local/share/applications/"
 echo "============================================================"
