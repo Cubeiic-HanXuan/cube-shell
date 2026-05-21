@@ -104,46 +104,106 @@
 `https://www.iconfont.cn/`
 
 #### 安装教程
-可以下载最新版本发行版应用程序，也可以下载源代码自行编译。
 
-`cubeShell 1.5.x`版本采用`Nuitka`进行编译，这样可以直接把`python`代码转成`c++`代码，然后直接编译成二进制文件，性能比之前提升了50%左右，包大小减少了40%左右。在编译之前首先要保证机器上要安装`python`环境，并安装相应的依赖包。
+可以直接下载 [Releases](https://github.com/Cubeiic-HanXuan/cube-shell/releases) 中最新发行版应用程序，也可以克隆源代码自行编译。
 
-##### 编译windows 程序
-1.  安装环境
-``` python
-pip install pipenv
+`cube-shell` 采用 [Nuitka](https://nuitka.net/) 将 Python 源码编译为原生二进制文件，性能提升约 50%，包体积减小约 40%。
+
+##### 前置条件
+
+| 条件 | 说明 |
+| --- | --- |
+| Python | **3.11** 或更高版本 |
+| Git | 用于克隆仓库 |
+| C 编译工具链 | Windows 需要 MinGW64 或 MSVC；macOS 需要 Xcode Command Line Tools；Linux 需要 `build-essential` |
+| 磁盘空间 | 建议至少预留 **2 GB**（编译过程会生成大量中间文件） |
+
+##### 通用步骤（所有平台）
+
+1. 克隆仓库
+
+```bash
+git clone https://github.com/Cubeiic-HanXuan/cube-shell.git
+cd cube-shell
 ```
-2.  下载依赖
-``` python
-//切换虚拟环境
-pipenv shell
-//安装依赖
-pipenv install
+
+2. 创建并激活 Python 虚拟环境
+
+```bash
+python3 -m venv venv
+
+# Linux / macOS
+source venv/bin/activate
+
+# Windows (PowerShell)
+.\venv\Scripts\Activate.ps1
 ```
-3. 编译
+
+3. 安装项目依赖
+
+```bash
+pip install -r requirements.txt
 ```
+
+##### 编译 Windows 程序
+
+> 需要已安装 **MinGW64** 或 **MSVC** 编译器，以及 [Inno Setup](https://jrsoftware.org/isinfo.php)（用于打包安装程序）。
+
+1. 编译为独立可执行程序
+
+```bash
 build-exe.bat
 ```
-4. 打包exe 安装包
-```
+
+脚本会自动安装 Nuitka 并编译，产物位于 `deploy\cube-shell.dist\` 目录。
+
+2. 打包为 EXE 安装包（可选）
+
+```bash
 deploy-install.bat
 ```
-##### 编译Mac程序
-1.  安装环境
-``` python
-pip install pipenv
+
+最终生成 Windows 安装程序（`.exe`），可分发给用户直接安装。
+
+##### 编译 macOS 程序
+
+> 需要已安装 **Xcode Command Line Tools** 以及 [create-dmg](https://github.com/create-dmg/create-dmg)（脚本会自动通过 Homebrew 安装）。
+
+1. 赋予脚本执行权限并运行
+
+```bash
+chmod +x app.sh
+./app.sh
 ```
-2.  下载依赖
-``` python
-//切换虚拟环境
-pipenv shell
-//安装依赖
-pipenv install
+
+脚本会自动完成 Nuitka 编译、资源拷贝、DMG 打包等步骤。
+
+2. 产物说明
+
+| 文件 | 说明 |
+| --- | --- |
+| `deploy/cube-shell.dmg` | macOS 磁盘映像安装包，双击挂载后拖入 Applications 即可使用 |
+
+##### 编译 Linux (Ubuntu/Debian) 程序
+
+> 适用于 Ubuntu / Debian 系发行版，脚本内置 `apt-get` 自动安装所需系统依赖。
+
+1. 赋予脚本执行权限并运行
+
+```bash
+chmod +x build-linux.sh
+./build-linux.sh
 ```
-3.  编译打包
-```
-chmod +x app.sh && ./app.sh
-```
+
+脚本会自动安装系统依赖（`patchelf`、`ccache`、Qt 运行库等）、编译应用、生成桌面入口文件和启动脚本。
+
+2. 产物说明
+
+| 文件 | 说明 |
+| --- | --- |
+| `deploy/cube-shell.dist/` | 完整的应用目录，可直接运行 `./cube-shell.sh` 启动 |
+| `deploy/cube-shell-linux-x86_64.tar.gz` | 压缩发布包，可分发至其他机器解压使用 |
+| `deploy/cube-shell.dist/cube-shell.desktop` | 桌面快捷方式文件，复制到 `~/.local/share/applications/` 后可在应用菜单中找到 |
 
 #### 参与贡献
 欢迎各位朋友积极参与代码贡献。
