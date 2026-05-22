@@ -38,7 +38,7 @@ if platform.system() == "Darwin":
     except Exception:
         pass
 
-from PySide6.QtCore import QTimer, Signal, Qt, QPoint, QRect, QEvent, QObject, Slot, QUrl, QCoreApplication, \
+from PySide6.QtCore import QTimer, Signal, Qt, QPoint, QRect, QRectF, QEvent, QObject, Slot, QUrl, QCoreApplication, \
     QSize, QThread, QMetaObject, Q_ARG, QProcessEnvironment
 from PySide6.QtGui import QColor
 from PySide6.QtGui import QIcon, QAction, QCursor, QCloseEvent, QInputMethodEvent, QPixmap, QKeySequence, QShortcut, \
@@ -46,7 +46,7 @@ from PySide6.QtGui import QIcon, QAction, QCursor, QCloseEvent, QInputMethodEven
 from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QDialog, QMessageBox, QTreeWidgetItem, \
     QInputDialog, QFileDialog, QTreeWidget, QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QTableWidgetItem, \
     QHeaderView, QTabBar, QTextBrowser, QLineEdit, QScrollArea, QGridLayout, QProgressBar, QProgressDialog, \
-    QDockWidget, QCheckBox, QFrame, QListWidget, QListWidgetItem
+    QDockWidget, QCheckBox, QFrame, QListWidget, QListWidgetItem, QStyledItemDelegate
 from deepdiff import DeepDiff
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
@@ -6013,6 +6013,46 @@ def get_config_path(file_name):
     return os.path.join(get_config_directory(util.APP_NAME), file_name)
 
 
+# 候选列表自定义绘制代理 —— 左侧圆点 + 文本 + 右侧淡色类型标注（CubeShell 原创风格）
+class _SuggestionDelegate(QStyledItemDelegate):
+    """绘制候选项：左侧圆点 + 命令文本 + 右侧类型标注。"""
+
+    # 类型 -> (圆点颜色, 右侧标注文字)
+    _KIND_INFO = {
+        "history": ("#4fc1ff", "history"),
+        "token":   ("#c586c0", "cmd"),
+        "command": ("#c586c0", "cmd"),
+    }
+
+    def paint(self, painter, option, index):
+        # 基类绘制背景和文本
+        super().paint(painter, option, index)
+        # 叠加左侧彩色圆点
+        payload = index.data(Qt.UserRole)
+        if not isinstance(payload, dict):
+            return
+        try:
+            kind = str(payload.get("kind") or "token")
+            dot_color = self._KIND_INFO.get(kind, ("#c586c0", ""))[0]
+            rect = option.rect
+
+            painter.save()
+            dot_x = rect.left() + 10
+            dot_y = rect.top() + (rect.height() - 8) / 2.0
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(dot_color))
+            painter.drawEllipse(int(dot_x), int(dot_y), 8, 8)
+            painter.restore()
+        except Exception:
+            try:
+                painter.restore()
+            except Exception:
+                pass
+
+    def sizeHint(self, option, index):
+        return QSize(200, 28)
+
+
 # 自定义QTermWidget类，使用内置功能
 class _SuggestionPopup(QFrame):
     def __init__(self, owner):
@@ -6023,14 +6063,16 @@ class _SuggestionPopup(QFrame):
         - 展示补全候选但不抢占终端焦点，避免 QMenu 抢焦点导致的闪烁与输入卡顿
         - 支持鼠标选择与键盘上下选择
         - 默认不选中任何候选，避免用户直接回车执行命令时误触发补全
+        - 作为主窗口子控件定位，绕开 Linux/Wayland 下 mapToGlobal() 坐标失效问题
         """
         super().__init__(None)
         # 轻量、非激活式的提示弹窗：展示补全候选但不抢占终端焦点，
-        # 避免“弹窗抢焦点 -> 终端失焦 -> 弹窗关闭”的闪烁，并保证输入流畅。
+        # 避免"弹窗抢焦点 -> 终端失焦 -> 弹窗关闭"的闪烁，并保证输入流畅。
         self._owner = owner
         self._interacting = False
         self._sig = None
         self._has_user_selection = False
+        self._reparented = False
         self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setFocusPolicy(Qt.NoFocus)
@@ -6038,7 +6080,7 @@ class _SuggestionPopup(QFrame):
         self.setLineWidth(1)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(0)
 
         self.list = QListWidget(self)
@@ -6046,15 +6088,16 @@ class _SuggestionPopup(QFrame):
         self.list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.list.setSelectionMode(QListWidget.SingleSelection)
         self.list.setFocusPolicy(Qt.NoFocus)
+        self.list.setItemDelegate(_SuggestionDelegate(self.list))
         self.list.itemClicked.connect(self._on_item_clicked)
         layout.addWidget(self.list)
 
         self.setStyleSheet("""
             QFrame {
-                background-color: #2d2d30;
-                color: #d4d4d4;
-                border: 1px solid #3c3c3c;
-                border-radius: 3px;
+                background-color: #252526;
+                color: #cccccc;
+                border: 1px solid #404040;
+                border-radius: 6px;
             }
             QListWidget {
                 background-color: transparent;
@@ -6062,11 +6105,14 @@ class _SuggestionPopup(QFrame):
                 outline: 0px;
             }
             QListWidget::item {
-                padding: 6px 10px;
+                padding: 2px 8px 2px 26px;
             }
             QListWidget::item:selected {
                 background-color: #094771;
-                color: white;
+                color: #ffffff;
+            }
+            QListWidget::item:hover {
+                background-color: #2a2d2e;
             }
         """)
 
@@ -6115,14 +6161,19 @@ class _SuggestionPopup(QFrame):
             self.list.setUpdatesEnabled(True)
 
         fm = self.list.fontMetrics()
-        max_w = 180
+        max_w = 200
+        extra = 28 + 12  # 左侧圆点留白 + 右侧留白
         for i in range(self.list.count()):
             t = self.list.item(i).text()
-            max_w = max(max_w, fm.horizontalAdvance(t) + 36)
+            max_w = max(max_w, fm.horizontalAdvance(t) + extra + 16)
         visible_rows = min(8, max(1, self.list.count()))
-        row_h = self.list.sizeHintForRow(0) if self.list.count() else fm.height() + 10
-        self.list.setFixedHeight(visible_rows * row_h + 4)
-        self.setFixedWidth(min(520, max_w))
+        row_h = 28  # 与 delegate sizeHint 保持一致
+        list_h = visible_rows * row_h + 4
+        self.list.setFixedHeight(list_h)
+        frame_w = min(420, max_w)
+        # 高度 = 列表高度 + 上下边距(4+4) + 边框(1+1)
+        frame_h = list_h + 10
+        self.setFixedSize(frame_w, frame_h)
 
     def hasUserSelection(self) -> bool:
         """是否存在用户显式选择的候选（鼠标点击或上下键导航）。"""
@@ -6176,9 +6227,30 @@ class _SuggestionPopup(QFrame):
         self.hide()
         return True
 
-    def popupAt(self, global_pos: QPoint):
-        """在全局坐标位置弹出候选窗口。"""
-        self.move(global_pos)
+    def _ensure_parent(self):
+        """确保弹窗是主窗口的子控件（懒初始化）。
+
+        将弹窗从独立顶层窗口转为主窗口子控件，使得所有坐标计算
+        基于主窗口内部相对坐标，彻底绕开 Linux/Wayland 下
+        mapToGlobal() 坐标失效的问题。
+        """
+        if self._reparented:
+            return
+        main_window = self._owner.window()
+        if main_window and main_window is not self._owner:
+            self._reparented = True
+            self.setParent(main_window)
+            # 作为子控件不需要窗口级别标志，setParent 已自动重置
+            # 重新设置关键属性（setParent 会重置部分状态）
+            self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+            self.setFocusPolicy(Qt.NoFocus)
+            self.setFrameShape(QFrame.Box)
+            self.setLineWidth(1)
+
+    def popupAt(self, pos: QPoint):
+        """在指定坐标弹出候选窗口（坐标相对于父控件/主窗口）。"""
+        self._ensure_parent()
+        self.move(pos)
         self.show()
         self.raise_()
 
@@ -6797,7 +6869,7 @@ class SSHQTermWidget(QTermWidget):
             if self._should_disable_command_suggestions():
                 return
             if hasattr(self, "_suggest_timer") and self._suggest_timer:
-                self._suggest_timer.start(300)
+                self._suggest_timer.start(80)
         except Exception:
             pass
 
@@ -6899,10 +6971,23 @@ class SSHQTermWidget(QTermWidget):
         try:
             display = self.m_impl.m_terminalDisplay
             rect = display.inputMethodQuery(Qt.InputMethodQuery.ImCursorRectangle)
-            p = display.mapToGlobal(rect.bottomLeft())
+            # 使用 mapTo 计算相对于主窗口的坐标，绕开 Wayland 下 mapToGlobal 失效问题
+            popup._ensure_parent()
+            parent = popup.parentWidget()
+            if parent and rect and hasattr(rect, 'bottomLeft'):
+                p = display.mapTo(parent, rect.bottomLeft())
+            else:
+                p = display.mapToGlobal(rect.bottomLeft())
+            # 增加 6px 垂直偏移，避免弹窗紧贴光标
+            p.setY(p.y() + 6)
             popup.popupAt(p)
         except Exception:
-            popup.popupAt(QCursor.pos())
+            popup._ensure_parent()
+            parent = popup.parentWidget()
+            if parent:
+                popup.popupAt(parent.mapFromGlobal(QCursor.pos()))
+            else:
+                popup.popupAt(QCursor.pos())
 
     def contextMenuEvent(self, event):
         """优化的右键菜单实现"""
