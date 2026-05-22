@@ -7417,6 +7417,10 @@ if __name__ == '__main__':
 
     app = QApplication(sys.argv)
 
+    # ARM shiboken6 None 引用计数泄漏全局修复（必须在任何 widget 创建前执行）
+    from core.shiboken_heal import install_global_heal
+    install_global_heal(app)
+
     # Windows 下设置应用图标（用于任务栏）
     if platform.system() == 'Windows':
         import ctypes
