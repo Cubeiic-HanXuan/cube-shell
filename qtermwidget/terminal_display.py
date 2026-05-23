@@ -1076,7 +1076,22 @@ class TerminalDisplay(QWidget):
 
     def _update_cursor(self):
         """Updates the cursor display"""
-        cursor_rect = self._image_to_widget(QRect(self._cursor_position(), QSize(1, 1)))
+        cursor_pos = self._cursor_position()
+        char_width = 1
+        if self._image:
+            idx = cursor_pos.y() * self._columns + cursor_pos.x()
+            if 0 <= idx < len(self._image):
+                c = self._image[idx].character
+                # 如果光标在续位列上，回退到宽字符起始列
+                if c == 0 and cursor_pos.x() > 0:
+                    cursor_pos = QPoint(cursor_pos.x() - 1, cursor_pos.y())
+                    idx -= 1
+                    c = self._image[idx].character
+                if c > 0:
+                    w = konsole_wcwidth(c)
+                    if w > 1:
+                        char_width = w
+        cursor_rect = self._image_to_widget(QRect(cursor_pos, QSize(char_width, 1)))
         self.update(cursor_rect)
 
     def _cursor_position(self) -> QPoint:
@@ -1702,9 +1717,13 @@ class TerminalDisplay(QWidget):
             current_selected = bool(sel_range and sel_range[0] <= start_x <= sel_range[1])
 
             while x <= rlx and line_start + x < len(self._image):
-                selected = bool(sel_range and sel_range[0] <= x <= sel_range[1])
-                if selected != current_selected:
-                    break
+                # 续位列继承起始列的选中状态，避免拆分宽字符导致闪烁
+                if self._image[line_start + x].character == 0 and x > 0:
+                    pass  # 保持 current_selected 不变，不 break
+                else:
+                    selected = bool(sel_range and sel_range[0] <= x <= sel_range[1])
+                    if selected != current_selected:
+                        break
 
                 char = self._image[line_start + x]
 
@@ -1829,12 +1848,12 @@ class TerminalDisplay(QWidget):
         if self._fixed_font:
             current_x = rect.x()
             baseline_y = rect.y() + self._fontAscent + self._line_spacing
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
 
             for char in text:
                 w = konsole_wcwidth(ord(char))
                 if w <= 0:
                     w = 1
-                painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
                 painter.drawText(current_x, baseline_y, char)
 
                 current_x += w * self._fontWidth
@@ -2464,11 +2483,17 @@ class TerminalDisplay(QWidget):
 
         while column < self._usedColumns:
             char_idx = line * self._columns + column
-            w = 1
             if char_idx < len(self._image):
-                # Ensure consistent width calculation with _draw_contents
-                w = konsole_wcwidth(self._image[char_idx].character)
-                if w <= 0: w = 1
+                c = self._image[char_idx].character
+                # 续位列（character==0）不占额外像素宽度，跳过
+                if c == 0:
+                    column += 1
+                    continue
+                w = konsole_wcwidth(c)
+                if w <= 0:
+                    w = 1
+            else:
+                w = 1
 
             char_pixel_width = w * self._fontWidth
 
@@ -2476,7 +2501,7 @@ class TerminalDisplay(QWidget):
                 break
 
             current_width += char_pixel_width
-            column += 1
+            column += w  # 跳过宽字符占用的所有列（包括续位列）
 
         column = max(0, min(column, self._usedColumns))
         return line, column
@@ -2636,10 +2661,24 @@ class TerminalDisplay(QWidget):
                         end_x -= 1
 
                     if start_x <= end_x:
+                        # 宽字符边界扩展：确保脏区域覆盖完整的宽字符
+                        # 左边界：如果 start_x 是续位列，回退到宽字符起始列
+                        adj_start = start_x
+                        while adj_start > 0 and new_line[adj_start].character == 0:
+                            adj_start -= 1
+                        # 右边界：如果 end_x 是宽字符起始列，扩展到覆盖其所有续位列
+                        adj_end = end_x
+                        if adj_end < len(new_line):
+                            c = new_line[adj_end].character
+                            if c != 0:
+                                w = konsole_wcwidth(c)
+                                if w > 1:
+                                    adj_end = min(len(new_line) - 1, adj_end + w - 1)
+
                         dirty_rect = QRect(
-                            self._leftMargin + self.contentsRect().left() + start_x * self._fontWidth,
+                            self._leftMargin + self.contentsRect().left() + adj_start * self._fontWidth,
                             self._topMargin + self.contentsRect().top() + self._fontHeight * y,
-                            (end_x - start_x + 1) * self._fontWidth,
+                            (adj_end - adj_start + 1) * self._fontWidth,
                             self._fontHeight
                         )
                         dirty_region |= dirty_rect
@@ -3604,9 +3643,10 @@ class TerminalDisplay(QWidget):
             ohere = i_pnt_sel_corr
             offset = -1
 
-        # 检查是否移动了
-        if here == pnt_sel_corr and self._scroll_bar.value() == self._scroll_bar.value():
+        # 检查是否移动了（位置和滚动值都没变则跳过）
+        if here == pnt_sel_corr and self._scroll_bar.value() == getattr(self, '_prev_sel_scroll_value', -1):
             return
+        self._prev_sel_scroll_value = self._scroll_bar.value()
 
         if here == ohere:
             return
