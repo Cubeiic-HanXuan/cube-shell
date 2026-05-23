@@ -15,7 +15,6 @@ from bisect import bisect_left
 from collections import defaultdict
 from pathlib import Path
 from socket import socket
-
 import PySide6
 import appdirs
 import qdarktheme
@@ -79,6 +78,11 @@ from core.ai import AISettingsDialog
 from core.ai.ai_panel import AIChatPanel
 from core.ai.ssh_agent import SSHAIAgent
 from core.ai.confirm_dialog import CommandConfirmDialog
+from core.group_manager import (
+    load_groups, create_group, rename_group, delete_group,
+    move_device_to_group, remove_device_from_group,
+    get_grouped_devices, on_device_deleted, on_device_renamed
+)
 from i18n import get_language_manager, SUPPORTED_LANGUAGES
 
 # 配置日志输出到文件
@@ -2538,9 +2542,20 @@ class MainDialog(QMainWindow):
                 return
 
             # 获取选中的设备名称
-            focus = self.ui.treeWidget.currentIndex().row()
-            if focus != -1:
-                name = self.ui.treeWidget.topLevelItem(focus).text(0)
+            current_item = self.ui.treeWidget.currentItem()
+            if current_item is None:
+                self._release_connecting_state() if self.is_connecting_lock else None
+                return
+            item_type = current_item.data(0, Qt.UserRole)
+            # 双击分组节点时切换展开/折叠，不触发连接
+            if item_type == "group":
+                current_item.setExpanded(not current_item.isExpanded())
+                return
+            # 只允许设备节点和本机终端触发连接
+            if item_type not in ("device", "localhost"):
+                return
+            name = current_item.text(0)
+            if name:
 
                 # 标记开始连接
                 self.is_connecting_lock = True
@@ -2780,47 +2795,79 @@ class MainDialog(QMainWindow):
             self.ui.tree_menu = QMenu(self)
             self.ui.tree_menu.setStyleSheet("""
                 QMenu::item {
-                    padding-left: 5px;  /* 调整图标和文字之间的间距 */
+                    padding-left: 5px;
                 }
                 QMenu::icon {
-                    padding-right: 0px; /* 设置图标右侧的间距 */
+                    padding-right: 0px;
                 }
             """)
-            # 创建菜单选项对象
-            self.ui.action = QAction(QIcon(':addConfig.png'), self.tr('添加配置'), self)
-            self.ui.action.setIconVisibleInMenu(True)
-            self.ui.action1 = QAction(QIcon(':addConfig.png'), self.tr('编辑配置'), self)
-            self.ui.action1.setIconVisibleInMenu(True)
-            self.ui.action2 = QAction(QIcon(':delConf.png'), self.tr('删除配置'), self)
-            self.ui.action2.setIconVisibleInMenu(True)
-            # 把动作选项对象添加到菜单self.groupBox_menu上
-            self.ui.tree_menu.addAction(self.ui.action)
-            self.ui.tree_menu.addAction(self.ui.action1)
-            self.ui.tree_menu.addAction(self.ui.action2)
-            # 将动作A触发时连接到槽函数 button
-            self.ui.action.triggered.connect(self.showAddConfig)
 
             selected_items = self.ui.treeWidget.selectedItems()
-            is_local_item = False
-            try:
-                if selected_items and selected_items[0].text(0) == self.tr("本机终端"):
-                    is_local_item = True
-            except Exception:
-                is_local_item = False
+            current_item = selected_items[0] if selected_items else None
 
-            if selected_items and not is_local_item:
-                self.ui.action.setVisible(False)
-                self.ui.action1.setVisible(True)
-                self.ui.action2.setVisible(True)
+            # 判断当前选中项的类型
+            item_type = None
+            if current_item:
+                item_type = current_item.data(0, Qt.UserRole)
+
+            if item_type == "localhost":
+                # 本机终端：不显示任何管理菜单
+                return
+
+            elif item_type == "group":
+                # 分组节点右键菜单
+                action_new_group = QAction(self.tr('新建分组'), self)
+                action_new_group.triggered.connect(self._create_new_group)
+                self.ui.tree_menu.addAction(action_new_group)
+
+                action_rename = QAction(self.tr('重命名分组'), self)
+                action_rename.triggered.connect(lambda: self._rename_group(current_item))
+                self.ui.tree_menu.addAction(action_rename)
+
+                # "未分组"不允许删除和重命名
+                if current_item.text(0) != self.tr("未分组"):
+                    action_del_group = QAction(self.tr('删除分组'), self)
+                    action_del_group.triggered.connect(lambda: self._delete_group(current_item))
+                    self.ui.tree_menu.addAction(action_del_group)
+                else:
+                    action_rename.setVisible(False)
+
+            elif item_type == "device":
+                # 设备节点右键菜单
+                self.ui.action1 = QAction(QIcon(':addConfig.png'), self.tr('编辑配置'), self)
+                self.ui.action1.setIconVisibleInMenu(True)
+                self.ui.action2 = QAction(QIcon(':delConf.png'), self.tr('删除配置'), self)
+                self.ui.action2.setIconVisibleInMenu(True)
+                self.ui.tree_menu.addAction(self.ui.action1)
+                self.ui.tree_menu.addAction(self.ui.action2)
+                self.ui.action1.triggered.connect(self.editConfig)
+                self.ui.action2.triggered.connect(self.delConf)
+
+                # 添加"移到分组"子菜单
+                move_menu = QMenu(self.tr('移到分组'), self.ui.tree_menu)
+                groups_data = load_groups()
+                for g_name in groups_data.get("groups", []):
+                    action_move = QAction(g_name, self)
+                    action_move.triggered.connect(lambda checked, gn=g_name, item=current_item: self._move_device_to_group(item, gn))
+                    move_menu.addAction(action_move)
+                if groups_data.get("groups"):
+                    move_menu.addSeparator()
+                action_remove_from_group = QAction(self.tr('移出分组'), self)
+                action_remove_from_group.triggered.connect(lambda: self._remove_device_from_group(current_item))
+                move_menu.addAction(action_remove_from_group)
+                self.ui.tree_menu.addMenu(move_menu)
+
             else:
-                self.ui.action.setVisible(True)
-                self.ui.action1.setVisible(False)
-                self.ui.action2.setVisible(False)
+                # 空白区域或无选中项
+                self.ui.action = QAction(QIcon(':addConfig.png'), self.tr('添加配置'), self)
+                self.ui.action.setIconVisibleInMenu(True)
+                self.ui.action.triggered.connect(self.showAddConfig)
+                self.ui.tree_menu.addAction(self.ui.action)
 
-            self.ui.action1.triggered.connect(self.editConfig)
-            self.ui.action2.triggered.connect(self.delConf)
+                action_new_group = QAction(self.tr('新建分组'), self)
+                action_new_group.triggered.connect(self._create_new_group)
+                self.ui.tree_menu.addAction(action_new_group)
 
-            # 声明当鼠标在groupBox控件上右击时，在鼠标位置显示右键菜单   ,exec_,popup两个都可以，
             self.ui.tree_menu.popup(QCursor.pos())
         elif self.isConnected:
             self.ui.tree_menu = QMenu(self)
@@ -3101,9 +3148,27 @@ class MainDialog(QMainWindow):
                 self.ui.addconfwin.dial.ipEdit.setText(host.split(':')[0])
                 self.ui.addconfwin.dial.protEdit.setText(host.split(':')[1])
 
+        self._editing_device_old_name = name
         self.ui.addconfwin.show()
-        self.ui.addconfwin.dial.pushButton.clicked.connect(self.refreshConf)
+        self.ui.addconfwin.dial.pushButton.clicked.connect(self._on_edit_config_saved)
         self.ui.addconfwin.dial.pushButton_2.clicked.connect(self.ui.addconfwin.close)
+
+    def _on_edit_config_saved(self):
+        """编辑配置保存后的回调，处理可能的重命名"""
+        old_name = getattr(self, '_editing_device_old_name', None)
+        if old_name:
+            new_name = self.ui.addconfwin.dial.configName.text()
+            if new_name and new_name != old_name:
+                on_device_renamed(old_name, new_name)
+                # 同时需要删除旧配置键（addDev会写入新键但不会删旧键）
+                config = get_config_path('config.dat')
+                with open(config, 'rb') as c:
+                    conf = pickle.loads(c.read())
+                if old_name in conf and new_name in conf:
+                    del conf[old_name]
+                    with open(config, 'wb') as c:
+                        c.write(pickle.dumps(conf))
+        self.refreshConf()
 
     # 打开增加隧道界面
     def showAddSshTunnel(self):
@@ -3125,6 +3190,10 @@ class MainDialog(QMainWindow):
             os.makedirs(f'{directory}/config', exist_ok=True)
             # 复制文件
             shutil.copy2(str(src_path), f'{directory}/config/config.dat')
+            # 同时导出分组配置
+            groups_src = get_config_path('groups.json')
+            if os.path.exists(groups_src):
+                shutil.copy2(str(groups_src), f'{directory}/config/groups.json')
             self.success(self.tr("导出成功"))
 
     # 导入配置
@@ -3144,6 +3213,14 @@ class MainDialog(QMainWindow):
             # 复制文件
             shutil.copy2(str(file_name), str(config))
 
+            # 尝试导入分组配置（同目录下的 groups.json）
+            groups_file = os.path.join(os.path.dirname(file_name), 'groups.json')
+            if os.path.exists(groups_file):
+                groups_dest = get_config_path('groups.json')
+                if os.path.exists(groups_dest):
+                    os.remove(groups_dest)
+                shutil.copy2(str(groups_file), str(groups_dest))
+
         self.refreshConf()
 
     # 刷新设备列表
@@ -3152,43 +3229,132 @@ class MainDialog(QMainWindow):
         with open(config, 'rb') as c:
             dic = pickle.loads(c.read())
             c.close()
-        i = 0
         self.ui.treeWidget.clear()
-
+        self.ui.treeWidget.setRootIsDecorated(True)
+        self.ui.treeWidget.setIndentation(20)
+    
         self.ui.treeWidget.headerItem().setText(0, QCoreApplication.translate("MainWindow", "设备列表"))
-
-        # 将“本机”作为固定入口插入到设备列表顶部：
-        # - 用户无需新增配置即可打开本地终端与本地文件树
-        # - 本机入口不允许被“编辑配置/删除配置”等操作影响
-        local_label = self.tr("本机终端")
-        self.ui.treeWidget.addTopLevelItem(QTreeWidgetItem(0))
-        bold_font = QFont()
-        bold_font.setPointSize(14)
-        if platform.system() == 'Darwin':
-            bold_font.setPointSize(15)
-            bold_font.setBold(True)
-        self.ui.treeWidget.topLevelItem(i).setFont(0, bold_font)
-        self.ui.treeWidget.topLevelItem(i).setText(0, local_label)
-        try:
-            self.ui.treeWidget.topLevelItem(i).setIcon(0, QIcon(':Localhost.png'))
-        except Exception:
-            self.ui.treeWidget.topLevelItem(i).setIcon(0, QIcon(':icons8-linux-48.png'))
-        i += 1
-
-        for k in dic.keys():
-            self.ui.treeWidget.addTopLevelItem(QTreeWidgetItem(0))
-            # 设置字体为加粗
-            bold_font = QFont()
-            bold_font.setPointSize(14)  # 设置字体大小为16
-            # Mac 系统设置，其他系统不设置，否则会很大
+    
+        # 设备字体
+        def _make_device_font():
+            f = QFont()
+            f.setPointSize(14)
             if platform.system() == 'Darwin':
-                # 设置字体为加粗
-                bold_font.setPointSize(15)  # 设置字体大小为16
-                bold_font.setBold(True)
-            self.ui.treeWidget.topLevelItem(i).setFont(0, bold_font)
-            self.ui.treeWidget.topLevelItem(i).setText(0, k)
-            self.ui.treeWidget.topLevelItem(i).setIcon(0, QIcon(':icons8-ssh-48.png'))
-            i += 1
+                f.setPointSize(15)
+                f.setBold(True)
+            return f
+    
+        # 分组字体（稍大一号，粗体）
+        def _make_group_font():
+            f = QFont()
+            f.setPointSize(14)
+            if platform.system() == 'Darwin':
+                f.setPointSize(15)
+            f.setBold(True)
+            return f
+    
+        # 1. 添加"本机终端"顶层项
+        local_item = QTreeWidgetItem(self.ui.treeWidget)
+        local_item.setFont(0, _make_device_font())
+        local_item.setText(0, self.tr("本机终端"))
+        local_item.setData(0, Qt.UserRole, "localhost")
+        try:
+            local_item.setIcon(0, QIcon(':Localhost.png'))
+        except Exception:
+            local_item.setIcon(0, QIcon(':icons8-linux-48.png'))
+    
+        # 2. 获取分组结构
+        grouped = get_grouped_devices(list(dic.keys()))
+    
+        # 3. 遍历分组添加节点
+        for group_name, devices in grouped.items():
+            if group_name == "__ungrouped__":
+                continue  # 未分组设备最后处理
+    
+            # 添加分组节点
+            group_item = QTreeWidgetItem(self.ui.treeWidget)
+            group_item.setFont(0, _make_group_font())
+            group_item.setText(0, group_name)
+            group_item.setData(0, Qt.UserRole, "group")
+            group_item.setIcon(0, self.style().standardIcon(self.style().StandardPixmap.SP_DirIcon))
+    
+            # 添加分组下的设备子节点
+            for dev_name in devices:
+                dev_item = QTreeWidgetItem(group_item)
+                dev_item.setFont(0, _make_device_font())
+                dev_item.setText(0, dev_name)
+                dev_item.setData(0, Qt.UserRole, "device")
+                dev_item.setIcon(0, QIcon(':icons8-ssh-48.png'))
+    
+            # 默认展开分组
+            group_item.setExpanded(True)
+    
+        # 4. 处理未分组设备
+        ungrouped = grouped.get("__ungrouped__", [])
+        if ungrouped:
+            ungrouped_item = QTreeWidgetItem(self.ui.treeWidget)
+            ungrouped_item.setFont(0, _make_group_font())
+            ungrouped_item.setText(0, self.tr("未分组"))
+            ungrouped_item.setData(0, Qt.UserRole, "group")
+            ungrouped_item.setIcon(0, self.style().standardIcon(self.style().StandardPixmap.SP_DirIcon))
+    
+            for dev_name in ungrouped:
+                dev_item = QTreeWidgetItem(ungrouped_item)
+                dev_item.setFont(0, _make_device_font())
+                dev_item.setText(0, dev_name)
+                dev_item.setData(0, Qt.UserRole, "device")
+                dev_item.setIcon(0, QIcon(':icons8-ssh-48.png'))
+    
+            ungrouped_item.setExpanded(True)
+
+    def _create_new_group(self):
+        """创建新分组"""
+        name, ok = QInputDialog.getText(self, self.tr('新建分组'), self.tr('请输入分组名称'))
+        if ok and name.strip():
+            result = create_group(name.strip())
+            if not result:
+                QMessageBox.warning(self, self.tr('警告'), self.tr('分组已存在'))
+                return
+            self.refreshConf()
+
+    def _rename_group(self, item):
+        """重命名分组"""
+        old_name = item.text(0)
+        new_name, ok = QInputDialog.getText(self, self.tr('重命名分组'), self.tr('请输入分组名称'), text=old_name)
+        if ok and new_name.strip() and new_name.strip() != old_name:
+            result = rename_group(old_name, new_name.strip())
+            if not result:
+                QMessageBox.warning(self, self.tr('警告'), self.tr('分组已存在'))
+                return
+            self.refreshConf()
+
+    def _delete_group(self, item):
+        """删除分组"""
+        group_name = item.text(0)
+        reply = QMessageBox()
+        reply.setWindowTitle(self.tr('确认删除'))
+        reply.setText(self.tr('确定要删除分组吗？') + '\n' + self.tr('分组内的设备将移至未分组'))
+        reply.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        yes_button = reply.button(QMessageBox.Yes)
+        no_button = reply.button(QMessageBox.No)
+        yes_button.setText(self.tr("确定"))
+        no_button.setText(self.tr("取消"))
+        reply.exec()
+        if reply.clickedButton() == yes_button:
+            delete_group(group_name)
+            self.refreshConf()
+
+    def _move_device_to_group(self, item, group_name):
+        """将设备移到指定分组"""
+        device_name = item.text(0)
+        move_device_to_group(device_name, group_name)
+        self.refreshConf()
+
+    def _remove_device_from_group(self, item):
+        """将设备从分组移出"""
+        device_name = item.text(0)
+        remove_device_from_group(device_name)
+        self.refreshConf()
 
     def add_line_edit(self, q_str):
         if self.line_edits:
@@ -3321,6 +3487,8 @@ class MainDialog(QMainWindow):
             self.ui.treeWidget.setUpdatesEnabled(False)
             # 清除现有项
             self.ui.treeWidget.clear()
+            self.ui.treeWidget.setRootIsDecorated(False)
+            self.ui.treeWidget.setIndentation(0)
 
             self.dir_tree_now = files
             ssh_conn = self.ssh_clients[conn_id]
@@ -3676,6 +3844,7 @@ class MainDialog(QMainWindow):
                     with open(config, 'wb') as c:
                         del conf[name]
                         c.write(pickle.dumps(conf))
+                    on_device_deleted(name)
                 self.refreshConf()
 
     # 建议修改为
@@ -7501,10 +7670,6 @@ if __name__ == '__main__':
         os.environ['QT_SCALE_FACTOR_ROUNDING_POLICY'] = 'PassThrough'
 
     app = QApplication(sys.argv)
-
-    # ARM shiboken6 None 引用计数泄漏全局修复（必须在任何 widget 创建前执行）
-    from core.shiboken_heal import install_global_heal
-    install_global_heal(app)
 
     # Windows 下设置应用图标（用于任务栏）
     if platform.system() == 'Windows':

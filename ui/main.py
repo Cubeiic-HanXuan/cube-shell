@@ -49,8 +49,8 @@ class Ui_MainWindow(object):
         self.treeWidget.setFocusPolicy(QtCore.Qt.NoFocus)
         self.treeWidget.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.treeWidget.setObjectName(u"treeWidget")
-        self.treeWidget.setRootIsDecorated(False)
-        self.treeWidget.setIndentation(0)
+        self.treeWidget.setRootIsDecorated(True)
+        self.treeWidget.setIndentation(20)
 
         self.gridLayout.addWidget(self.treeWidget, 1, 0, 1, 1)
 
