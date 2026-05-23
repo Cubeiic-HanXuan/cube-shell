@@ -12,6 +12,7 @@ echo "3: Building the application..."
 nuitka \
   --macos-create-app-bundle \
   --standalone \
+  --static-libpython=no \
   --enable-plugin=pyside6 \
   --follow-imports \
   --macos-app-icon=icons/logo.icns \
