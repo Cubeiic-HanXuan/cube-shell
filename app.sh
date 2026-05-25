@@ -43,7 +43,11 @@ cp -r qtermwidget/kb-layouts cube-shell.app/Contents/MacOS
 cp -r qtermwidget/translations cube-shell.app/Contents/MacOS
 cp qtermwidget/default.keytab cube-shell.app/Contents/MacOS
 
-echo "5: create-dmg..."
+# Step 6: Register URL Scheme (jms://) into Info.plist
+echo "6: Registering URL schemes..."
+bash tools/register_url_scheme.sh cube-shell.app
+
+echo "7: create-dmg..."
 create-dmg --volname "Cube Shell" \
   --window-size 800 400 \
   --app-drop-link 400 200 \

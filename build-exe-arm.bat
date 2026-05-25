@@ -4,14 +4,18 @@ rem cube-shell windows exe.bat
 rem dos utf-8 encode
 chcp 65001
 
+REM Step 0: Load MSVC ARM64 environment
+call "C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Auxiliary\Build\vcvarsall.bat" arm64
+
 REM Step 1: Install Nuitka
 echo 1: Installing Nuitka...
-echo pip install nuitka
-pip install nuitka
+echo pip install nuitka --no-cache-dir
+pip install nuitka --no-cache-dir
 
 REM Step 2: Build the application
 echo 2: Building the application...
-nuitka --windows-console-mode=disable --windows-icon-from-ico=icons/logo.ico ^
+set VSLANG=1033
+nuitka --msvc=latest --windows-console-mode=disable --windows-icon-from-ico=icons/logo.ico ^
   --follow-imports ^
   --remove-output ^
   --jobs=4 ^

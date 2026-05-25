@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import pickle
+import tempfile
 import platform
 import re
 import shutil
@@ -37,8 +38,8 @@ if platform.system() == "Darwin":
     except Exception:
         pass
 
-from PySide6.QtCore import QTimer, Signal, Qt, QPoint, QRect, QRectF, QEvent, QObject, Slot, QUrl, QCoreApplication, \
-    QSize, QThread, QMetaObject, Q_ARG, QProcessEnvironment
+from PySide6.QtCore import QTimer, Signal, Qt, QPoint, QRect, QEvent, QObject, Slot, QUrl, QCoreApplication, \
+    QSize, QThread, QMetaObject, Q_ARG
 from PySide6.QtGui import QColor
 from PySide6.QtGui import QIcon, QAction, QCursor, QCloseEvent, QInputMethodEvent, QPixmap, QKeySequence, QShortcut, \
     QDragEnterEvent, QDropEvent, QFont, QFontDatabase, QDesktopServices, QGuiApplication
@@ -863,9 +864,10 @@ class MainDialog(QMainWindow):
     update_file_tree_signal = Signal(str, str, list)  # 连接ID, 当前目录, 文件列表
     update_process_list_signal = Signal(str, list)  # 连接ID, 进程列表
 
-    def __init__(self, qt_app):
+    def __init__(self, qt_app, connection_info=None):
         super().__init__()
         self.app = qt_app  # 将 app 传递并设置为类属性
+        self._connection_info = connection_info
         self.ui = main.Ui_MainWindow()
         self.ui.setupUi(self)
         self.setWindowIcon(QIcon(":logo.ico"))
@@ -991,6 +993,14 @@ class MainDialog(QMainWindow):
         ai_shortcut.activated.connect(self._toggle_ai_panel)
 
         self._move_monitor_and_process_to_bottom_tabs()
+
+        # 堡垒机连接客户端
+        from core.bastion.bastion_client import BastionClient
+        self.bastion_client = BastionClient(self)
+
+        # 如果有命令行传入的连接信息，延迟自动连接
+        if self._connection_info:
+            QTimer.singleShot(1500, self._auto_connect)
 
     def _move_monitor_and_process_to_bottom_tabs(self):
         try:
@@ -2374,6 +2384,14 @@ class MainDialog(QMainWindow):
         # 清理 pending 状态
         self._pending_terminal = None
 
+    def _auto_connect(self):
+        """启动时自动连接（委托给 BastionClient）"""
+        self.bastion_client.auto_connect(self._connection_info)
+
+    def handle_open_url(self, url):
+        """处理 URL Scheme 打开事件（委托给 BastionClient）"""
+        self.bastion_client.handle_url(url)
+
     @Slot(str, str)  # 将其标记为槽
     def warning(self, title, message):
         # 修复：确保在主线程中执行 UI 操作
@@ -3121,11 +3139,18 @@ class MainDialog(QMainWindow):
                 # 同时需要删除旧配置键（addDev会写入新键但不会删旧键）
                 config = get_config_path('config.dat')
                 with open(config, 'rb') as c:
-                    conf = pickle.loads(c.read())
+                    data = c.read()
+                if not data:
+                    conf = {}
+                else:
+                    try:
+                        conf = pickle.loads(data)
+                    except (EOFError, Exception) as e:
+                        util.logger.error(f"[Warning] Failed to load config.dat: {e}, using empty dict")
+                        conf = {}
                 if old_name in conf and new_name in conf:
                     del conf[old_name]
-                    with open(config, 'wb') as c:
-                        c.write(pickle.dumps(conf))
+                    save_config_dat(conf)
         self.refreshConf()
 
     # 打开增加隧道界面
@@ -3798,10 +3823,18 @@ class MainDialog(QMainWindow):
                     name = item.text(0)
                     config = get_config_path('config.dat')
                     with open(config, 'rb') as c:
-                        conf = pickle.loads(c.read())
-                    with open(config, 'wb') as c:
+                        data = c.read()
+                    if not data:
+                        conf = {}
+                    else:
+                        try:
+                            conf = pickle.loads(data)
+                        except (EOFError, Exception) as e:
+                            util.logger.error(f"[Warning] Failed to load config.dat: {e}, using empty dict")
+                            conf = {}
+                    if name in conf:
                         del conf[name]
-                        c.write(pickle.dumps(conf))
+                        save_config_dat(conf)
                     on_device_deleted(name)
                 self.refreshConf()
 
@@ -5243,12 +5276,17 @@ class AddConfigUi(QDialog):
         else:
             config = get_config_path('config.dat')
             with open(config, 'rb') as c:
-                conf = pickle.loads(c.read())
-                c.close()
-            with open(config, 'wb') as c:
-                conf[name] = [username, password, f"{ip}:{prot}", private_key_type, private_key_file]
-                c.write(pickle.dumps(conf))
-                c.close()
+                data = c.read()
+            if not data:
+                conf = {}
+            else:
+                try:
+                    conf = pickle.loads(data)
+                except (EOFError, Exception) as e:
+                    util.logger.error(f"[Warning] Failed to load config.dat: {e}, using empty dict")
+                    conf = {}
+            conf[name] = [username, password, f"{ip}:{prot}", private_key_type, private_key_file]
+            save_config_dat(conf)
             self.close()
 
     def addKeyFile(self):
@@ -6083,14 +6121,41 @@ def open_data(ssh):
         return conf[0], conf[1], conf[2], conf[3], conf[4]
 
 
+def save_config_dat(conf: dict) -> None:
+    """
+    原子写入 config.dat —— 根治"批量删除后文件变 0 字节"的问题。
+
+    原理：先写入同目录临时文件，再用 os.replace() 原子替换目标文件。
+    这样目标文件要么保持旧内容，要么是完整的新内容，永远不会出现 0 字节中间态。
+    即使 conf 为空字典 {}，也会正确写入 pickle.dumps({})（约 13 字节）。
+    """
+    config = get_config_path('config.dat')
+    config_dir = os.path.dirname(config)
+    data = pickle.dumps(conf)
+    # 写入同目录临时文件（确保同一文件系统，os.replace 才能原子生效）
+    fd, tmp_path = tempfile.mkstemp(dir=config_dir, prefix='.config_dat_', suffix='.tmp')
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+        os.close(fd)
+        fd = -1  # 标记已关闭
+        os.replace(tmp_path, config)  # POSIX 原子操作
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        # 清理临时文件，不影响原文件
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 # 初始化配置文件
 def init_config():
     config = get_config_path('config.dat')
     if not os.path.exists(config):
-        with open(config, 'wb') as c:
-            start_dic = {}
-            c.write(pickle.dumps(start_dic))
-            c.close()
+        save_config_dat({})
 
 
 def get_config_directory(app_name):
@@ -7615,8 +7680,61 @@ class TerminalThemeSelector(QDialog):
             self.accept()
 
 
+class CubeShellApp(QApplication):
+    """自定义 QApplication，处理 macOS URL Scheme 事件"""
+
+    def __init__(self, argv):
+        super().__init__(argv)
+        self.main_window = None
+        self.pending_url = None  # 缓存早期到达的 URL（窗口未就绪时）
+
+    def event(self, event):
+        """macOS URL Scheme 事件处理（作为 UrlEventFilter 的备用）"""
+        if event.type() == QEvent.FileOpen:
+            url = event.file() or event.url().toString()
+            if not url:
+                try:
+                    encoded = event.url().toEncoded()
+                    if encoded:
+                        url = bytes(encoded).decode('utf-8', errors='replace')
+                except Exception:
+                    pass
+            if url and (url.startswith('jms://') or url.startswith('ssh://')):
+                if self.main_window:
+                    self.main_window.handle_open_url(url)
+                else:
+                    self.pending_url = url
+            return True
+        return super().event(event)
+
+
 if __name__ == '__main__':
+    from core.bastion.url_handler import parse_arguments, resolve_connection_info
+    from core.bastion.bastion_client import create_url_event_filter, scan_argv_for_url, setup_deferred_url_check
+    from core.bastion.url_scheme_register import ensure_registered
+
+    # 首次启动时自动注册 jms:// URL Scheme（静默执行，不影响启动）
+    ensure_registered()
+
     print("PySide6 version:", PySide6.__version__)
+    print(f"[CubeShell] sys.argv = {sys.argv}")
+    print(f"[CubeShell] argv count = {len(sys.argv)}")
+
+    args, remaining = parse_arguments()
+    connection_info = resolve_connection_info(args)
+
+    # macOS 通过 URL Scheme 启动时，URL 可能在 remaining 中（argparse 未识别）
+    if not connection_info and remaining:
+        connection_info = scan_argv_for_url([remaining[0]] + remaining)
+        # 从 remaining 中移除已识别的 URL，避免传给 QApplication
+        if connection_info:
+            remaining = [r for r in remaining if not (r.startswith('jms://') or r.startswith('ssh://'))]
+
+    # 如果 argparse 和 remaining 都没解析到，尝试从 sys.argv 直接查找
+    if not connection_info:
+        connection_info = scan_argv_for_url(sys.argv)
+
+    print(f"[CubeShell] connection_info from args: {connection_info}")
 
     # Windows 高DPI支持 - 解决图标模糊问题
     if platform.system() == 'Windows':
@@ -7628,7 +7746,10 @@ if __name__ == '__main__':
         os.environ['QT_ENABLE_HIGHDPI_SCALING'] = '1'
         os.environ['QT_SCALE_FACTOR_ROUNDING_POLICY'] = 'PassThrough'
 
-    app = QApplication(sys.argv)
+    app = CubeShellApp([sys.argv[0]] + remaining)
+
+    # 注册事件过滤器（比 event() 覆盖更可靠，兼容 Nuitka 编译）
+    url_filter = create_url_event_filter(app)
 
     # Windows 下设置应用图标（用于任务栏）
     if platform.system() == 'Windows':
@@ -7653,8 +7774,13 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"Failed to load language settings: {e}")
 
-    window = MainDialog(app)
+    window = MainDialog(app, connection_info=connection_info)
+    app.main_window = window  # 设置引用，让 CubeShellApp/UrlEventFilter 能转发 URL 事件
 
     window.show()
     window.refreshConf()
+
+    # 处理启动时通过 URL Scheme 传入的待处理 URL
+    setup_deferred_url_check(app, window, connection_info)
+
     sys.exit(app.exec())
