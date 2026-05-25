@@ -854,6 +854,8 @@ class MainDialog(QMainWindow):
     finished = Signal(str, str)
     # 信号：错误 (命令, 错误信息)
     error = Signal(str, str)
+    # 信号：请求在主线程显示 MFA 对话框
+    _mfa_dialog_requested = Signal(str)
     # 新增：主题切换信号，参数：is_dark_theme
     themeChanged = Signal(bool)
 
@@ -949,15 +951,15 @@ class MainDialog(QMainWindow):
 
         # 创建SSH连接器
         self.ssh_connector = SSHConnector()
-        self.ssh_connector.connected.connect(self.on_ssh_connected)
-        self.ssh_connector.failed.connect(self.on_ssh_failed)
+        self.ssh_connector.connected.connect(self.on_ssh_connected, Qt.QueuedConnection)
+        self.ssh_connector.failed.connect(self.on_ssh_failed, Qt.QueuedConnection)
+        # MFA 对话框信号连接（跨线程安全）
+        self._mfa_dialog_requested.connect(self._on_mfa_dialog_requested, Qt.QueuedConnection)
 
         self.isConnected = False
 
         # 连接信号和槽
         self.initSftpSignal.connect(self.on_initSftpSignal)
-        # #  操作docker 成功,发射信号
-        # self.finished.connect(self.on_ssh_docker_finished)
 
         self.NAT = False
         self.NAT_lod()
@@ -970,6 +972,8 @@ class MainDialog(QMainWindow):
         self.is_connecting_lock = False
         self._last_connect_attempt_ts = 0
         self.is_closing = False
+
+        self._pending_terminal = None  # 等待认证完成后启动的终端
 
         # AI 面板 - 存储每个 Tab 的 SSHAIAgent 实例
         self._ai_agents = {}  # key: conn_id, value: SSHAIAgent
@@ -2175,8 +2179,8 @@ class MainDialog(QMainWindow):
             # 🔧 修正：分离主机地址和端口
             host_ip = host.split(':')[0]  # 纯IP地址
             host_port = int(host.split(':')[1])  # 端口号
-            return self._connect_with_qtermwidget(host_ip, host_port, username, password, key_type,
-                                                  key_file, terminal)
+            return self._connect_with_qterm_widget(host_ip, host_port, username, password, key_type,
+                                                   key_file, terminal)
 
         except Exception as e:
             util.logger.error(str(e))
@@ -2253,129 +2257,87 @@ class MainDialog(QMainWindow):
             pass
         return terminal.getIsRunning()
 
-    def _attach_ssh_auto_responder(self, terminal, password: str, timeout_ms: int = 5000) -> None:
-        if not terminal or not password:
+    def _get_mfa_code_from_user(self, prompt_text):
+        """线程安全的 MFA 回调 - 从后台线程调用，在主线程弹出对话框"""
+
+        # 需要弹出对话框获取验证码
+        self._mfa_result = None
+        self._mfa_event = threading.Event()
+        self._mfa_prompt_text = prompt_text
+
+        # 判断是否在主线程
+        if QThread.currentThread() == QCoreApplication.instance().thread():
+            self._on_mfa_dialog_requested(prompt_text)
+        else:
+            # 通过信号调度到主线程（Signal/Slot 跨线程安全）
+            self._mfa_dialog_requested.emit(prompt_text if prompt_text else self.tr("请输入验证码:"))
+            self._mfa_event.wait(timeout=120)  # 最多等 2 分钟
+
+        return self._mfa_result
+
+    @Slot(str)
+    def _on_mfa_dialog_requested(self, prompt_text):
+        """主线程槽函数 - 显示 MFA 验证码输入对话框"""
+        from PySide6.QtWidgets import QInputDialog, QLineEdit
+        code, ok = QInputDialog.getText(
+            self,
+            self.tr("MFA 验证"),
+            prompt_text if prompt_text else self.tr("请输入验证码:"),
+            QLineEdit.EchoMode.Password
+        )
+        if ok and code:
+            self._mfa_result = code
+        self._mfa_event.set()
+
+    def _start_terminal_paramiko_bridge(self, terminal):
+        """MFA 模式：使用已认证的 Paramiko transport 打开 shell channel 桥接到终端"""
+        conn_id = self.current_displayed_connection_id
+        ssh_client = self.ssh_clients.get(conn_id)
+        if not ssh_client or not ssh_client.conn:
+            util.logger.error("MFA 桥接模式：未找到已认证的 SSH 连接")
             return
-        if not hasattr(terminal, "receivedData") or not hasattr(terminal, "sendText"):
+
+        transport = ssh_client.conn.get_transport()
+        if not transport or not transport.is_active():
+            util.logger.error("MFA 桥接模式：SSH transport 不可用")
             return
-
-        state = {"done": False, "pw": False, "yes": False}
-        buf = {"text": ""}
-
-        def cleanup():
-            import warnings as _warnings
-            with _warnings.catch_warnings():
-                _warnings.simplefilter("ignore", RuntimeWarning)
-                try:
-                    terminal.receivedData.disconnect(on_chunk)
-                except Exception:
-                    pass
-
-        def on_chunk(chunk: str):
-            if state["done"]:
-                return
-            try:
-                buf["text"] = (buf["text"] + (chunk or ""))[-4096:]
-                text = buf["text"].lower()
-                if (not state["yes"]) and ("are you sure you want to continue connecting" in text):
-                    state["yes"] = True
-                    terminal.sendText("yes\n")
-                    return
-                if (not state["pw"]) and re.search(r"password[^\n]{0,80}:", text):
-                    state["pw"] = True
-                    state["done"] = True
-                    cleanup()
-                    terminal.sendText(password + "\n")
-            except Exception:
-                pass
 
         try:
-            terminal.receivedData.connect(on_chunk)
-            QTimer.singleShot(int(timeout_ms), cleanup)
-        except Exception:
-            pass
+            # 在同一个 transport 上打开 shell channel
+            channel = transport.open_session()
 
-    def _connect_with_qtermwidget(self, host, port, username, password, key_type, key_file, terminal) -> int:
-        """使用 QTermWidget 直接处理 SSH 连接"""
+            # 获取终端尺寸
+            cols = terminal.screenColumnsCount() if hasattr(terminal, 'screenColumnsCount') else 80
+            rows = terminal.screenLinesCount() if hasattr(terminal, 'screenLinesCount') else 24
+
+            # 请求 PTY
+            channel.get_pty(term='xterm-256color', width=cols, height=rows)
+            channel.invoke_shell()
+
+            # 使用桥接模式启动 QTermWidget
+            terminal.startParamikoBridge(channel)
+            util.logger.info("MFA 桥接模式：终端已通过 Paramiko bridge 启动")
+        except Exception as e:
+            util.logger.error(f"MFA 桥接模式启动失败: {e}")
+
+    def _connect_with_qterm_widget(self, host, port, username, password, key_type, key_file, terminal) -> int:
+        """使用 QTermWidget 处理 SSH 连接 - Paramiko 先认证，终端后启动"""
         try:
-            util.logger.info(f"Connecting to {host}:{port} via QTermWidget...")
+            util.logger.info(f"Connecting to {host}:{port} - Paramiko auth first...")
 
-            # 设置终端程序为bash
-            # terminal.setShellProgram("/bin/bash")
+            # 保存连接参数，供 on_ssh_connected 使用
+            self._pending_terminal = terminal
 
-            # 设置工作目录
-            if hasattr(terminal, 'setWorkingDirectory'):
-                terminal.setWorkingDirectory(os.path.expanduser("~"))
+            # Phase 1: Paramiko 先认证（后台线程，如需 MFA 会弹对话框）
+            self.ssh_connector.connect_ssh(
+                host, port, username, password, key_type, key_file,
+                mfa_callback=self._get_mfa_code_from_user
+            )
 
-            env = QProcessEnvironment.systemEnvironment()
-
-            # # Fix PATH for macOS
-            # current_path = env.value("PATH", "")
-            # extra_paths = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
-            # new_path = current_path
-            # for p in extra_paths:
-            #     if p not in new_path:
-            #         new_path += os.pathsep + p
-            # env.insert("PATH", new_path)
-            # print(f"Using PATH: {new_path}")
-
-            # # 核心颜色设置
-            # env.insert("TERM", "xterm-256color")
-            # env.insert("COLORTERM", "truecolor")
-            # env.insert("CLICOLOR", "1")
-            # env.insert("CLICOLOR_FORCE", "1")  # 强制颜色输出
-
-            # terminal.setEnvironment(env.toStringList())
-
-            # 使用sshpass
-            ssh_command = "ssh"
-            ssh_args = [
-                "-o", "ConnectTimeout=10",  # 连接超时设置
-                "-o", "ServerAliveInterval=30",
-                "-o", "ServerAliveCountMax=3",
-                "-o", "TCPKeepAlive=yes",
-                "-t"
-            ]
-            # 构建SSH命令
-            if port != 22:
-                ssh_args.extend(["-p", str(port)])
-            if key_type and key_file:
-                # 密钥认证：验证密钥文件并设置正确权限
-                key_file_path = os.path.expanduser(key_file)  # 展开~路径
-                if os.path.exists(key_file_path):
-                    # 设置密钥文件权限为600
-                    try:
-                        os.chmod(key_file_path, 0o600)
-                    except Exception as e:
-                        util.logger.error(f"设置密钥权限失败: {e}")
-
-                    ssh_args.extend(["-i", key_file_path])
-            else:
-                ssh_args.extend(["-o", "StrictHostKeyChecking=no",  # 跳过主机密钥检查
-                                 "-o", "PreferredAuthentications=password",
-                                 "-o", "PubkeyAuthentication=no",
-                                 "-o", "UserKnownHostsFile=/dev/null"  # 不保存主机密钥文件
-                                 ])
-
-            ssh_args.append(f"{username}@{host}")
-            terminal.setShellProgram(ssh_command)
-            terminal.setArgs(ssh_args)
-            if not key_type and not key_file and password:
-                self._attach_ssh_auto_responder(terminal, password, timeout_ms=5000)
-
-            terminal.startShellProgram()
-
-            if hasattr(terminal, "setSuppressProgramBackgroundColors"):
-                terminal.setSuppressProgramBackgroundColors(True)
-
-            # 为了支持 SFTP 等功能，建立后台 SSH 连接
-            util.logger.info("建立后台 SSH 连接用于 SFTP...")
-            self._establish_background_ssh(host, port, username, password, key_type, key_file)
-
-            return terminal.getIsRunning()
+            return True  # 返回 True 表示连接流程已启动
 
         except Exception as e2:
-            util.logger.error(f"QTermWidget SSH 连接失败: {e2}")
+            util.logger.error(f"连接启动失败: {e2}")
             return False
 
     def _establish_background_ssh(self, host, port, username, password, key_type, key_file):
@@ -2387,8 +2349,7 @@ class MainDialog(QMainWindow):
             util.logger.error(f"建立后台 SSH 连接失败: {e}")
 
     def on_ssh_connected(self, ssh_conn):
-        """SSH连接成功回调 - 区分 QTermWidget 模式和传统模式"""
-        # 由于现在是同步调用，一定在主线程，不需要 invokeMethod 检查
+        """认证成功回调 - 启动终端并初始化 SFTP"""
 
         current_index = self.ui.ShellTab.currentIndex()
         ssh_conn.Shell = self.Shell
@@ -2397,13 +2358,21 @@ class MainDialog(QMainWindow):
         # 将连接实例存储到本地字典，替代 mux
         self.ssh_clients[ssh_conn.id] = ssh_conn
 
-        # 修复：保存当前连接 ID，以便 refreshDirs 能通过安全检查
+        # 保存当前连接 ID，以便 refreshDirs 能通过安全检查
         self.current_displayed_connection_id = ssh_conn.id
 
-        # 初始化 SFTP
+        # Phase 2: 认证成功后启动终端
+        terminal = self._pending_terminal
+        self._start_terminal_paramiko_bridge(terminal)
+
+        # 初始化 SFTP / 文件树
         self.initSftpSignal.emit()
+
         # 释放连接锁
         self._release_connecting_state()
+
+        # 清理 pending 状态
+        self._pending_terminal = None
 
     @Slot(str, str)  # 将其标记为槽
     def warning(self, title, message):
@@ -2453,12 +2422,6 @@ class MainDialog(QMainWindow):
             util.logger.error(f"Failed to get data: {e}")
             return 'error'
 
-    #  操作docker 成功
-    def on_ssh_docker_finished(self, cmd, output):
-        print("")
-        # self.refreshDokerInfo()
-        # self.refresh_docker_common_containers()
-
     def on_tab_changed(self, index):
         """标签切换事件处理"""
         try:
@@ -2484,13 +2447,7 @@ class MainDialog(QMainWindow):
             self.ui.treeWidget.setEnabled(not connecting)
         except Exception:
             pass
-        try:
-            if connecting:
-                QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
-            else:
-                QApplication.restoreOverrideCursor()
-        except Exception:
-            pass
+        # 不再设置 BusyCursor - MFA 对话框需要鼠标可用
 
     def _release_connecting_state(self):
         self.is_connecting_lock = False
@@ -2848,7 +2805,8 @@ class MainDialog(QMainWindow):
                 groups_data = load_groups()
                 for g_name in groups_data.get("groups", []):
                     action_move = QAction(g_name, self)
-                    action_move.triggered.connect(lambda checked, gn=g_name, item=current_item: self._move_device_to_group(item, gn))
+                    action_move.triggered.connect(
+                        lambda checked, gn=g_name, item=current_item: self._move_device_to_group(item, gn))
                     move_menu.addAction(action_move)
                 if groups_data.get("groups"):
                     move_menu.addSeparator()
@@ -3232,9 +3190,9 @@ class MainDialog(QMainWindow):
         self.ui.treeWidget.clear()
         self.ui.treeWidget.setRootIsDecorated(True)
         self.ui.treeWidget.setIndentation(20)
-    
+
         self.ui.treeWidget.headerItem().setText(0, QCoreApplication.translate("MainWindow", "设备列表"))
-    
+
         # 设备字体
         def _make_device_font():
             f = QFont()
@@ -3243,7 +3201,7 @@ class MainDialog(QMainWindow):
                 f.setPointSize(15)
                 f.setBold(True)
             return f
-    
+
         # 分组字体（稍大一号，粗体）
         def _make_group_font():
             f = QFont()
@@ -3252,7 +3210,7 @@ class MainDialog(QMainWindow):
                 f.setPointSize(15)
             f.setBold(True)
             return f
-    
+
         # 1. 添加"本机终端"顶层项
         local_item = QTreeWidgetItem(self.ui.treeWidget)
         local_item.setFont(0, _make_device_font())
@@ -3262,22 +3220,22 @@ class MainDialog(QMainWindow):
             local_item.setIcon(0, QIcon(':Localhost.png'))
         except Exception:
             local_item.setIcon(0, QIcon(':icons8-linux-48.png'))
-    
+
         # 2. 获取分组结构
         grouped = get_grouped_devices(list(dic.keys()))
-    
+
         # 3. 遍历分组添加节点
         for group_name, devices in grouped.items():
             if group_name == "__ungrouped__":
                 continue  # 未分组设备最后处理
-    
+
             # 添加分组节点
             group_item = QTreeWidgetItem(self.ui.treeWidget)
             group_item.setFont(0, _make_group_font())
             group_item.setText(0, group_name)
             group_item.setData(0, Qt.UserRole, "group")
             group_item.setIcon(0, self.style().standardIcon(self.style().StandardPixmap.SP_DirIcon))
-    
+
             # 添加分组下的设备子节点
             for dev_name in devices:
                 dev_item = QTreeWidgetItem(group_item)
@@ -3285,10 +3243,10 @@ class MainDialog(QMainWindow):
                 dev_item.setText(0, dev_name)
                 dev_item.setData(0, Qt.UserRole, "device")
                 dev_item.setIcon(0, QIcon(':icons8-ssh-48.png'))
-    
+
             # 默认展开分组
             group_item.setExpanded(True)
-    
+
         # 4. 处理未分组设备
         ungrouped = grouped.get("__ungrouped__", [])
         if ungrouped:
@@ -3297,14 +3255,14 @@ class MainDialog(QMainWindow):
             ungrouped_item.setText(0, self.tr("未分组"))
             ungrouped_item.setData(0, Qt.UserRole, "group")
             ungrouped_item.setIcon(0, self.style().standardIcon(self.style().StandardPixmap.SP_DirIcon))
-    
+
             for dev_name in ungrouped:
                 dev_item = QTreeWidgetItem(ungrouped_item)
                 dev_item.setFont(0, _make_device_font())
                 dev_item.setText(0, dev_name)
                 dev_item.setData(0, Qt.UserRole, "device")
                 dev_item.setIcon(0, QIcon(':icons8-ssh-48.png'))
-    
+
             ungrouped_item.setExpanded(True)
 
     def _create_new_group(self):
@@ -4152,7 +4110,7 @@ class MainDialog(QMainWindow):
             container_layout = QVBoxLayout()
             container_widget.setLayout(container_layout)
             container_layout.setContentsMargins(0, 0, 0, 0)  # 去掉布局的内边距
-            #container_widget.setStyleSheet("background-color: rgb(187, 232, 221);")
+            # container_widget.setStyleSheet("background-color: rgb(187, 232, 221);")
 
             text_browser = QTextBrowser(container_widget)
             text_browser.append("\n")
@@ -4814,8 +4772,6 @@ class MainDialog(QMainWindow):
             terminal = self.get_text_browser_from_tab(index)
             if not terminal or not hasattr(terminal, 'setColorScheme'):
                 continue
-            # if hasattr(terminal, '_schedule_reapply_color_scheme'):
-            #     terminal._schedule_reapply_color_scheme()
             elif hasattr(terminal, 'current_theme_name'):
                 terminal.setColorScheme(terminal.current_theme_name)
             else:
@@ -4853,15 +4809,18 @@ class MainDialog(QMainWindow):
 
     def on_ssh_failed(self, error_msg):
         """SSH连接失败回调"""
+
         # 确保 UI 操作在主线程
         if QThread.currentThread() != QCoreApplication.instance().thread():
             QMetaObject.invokeMethod(self, "on_ssh_failed", Qt.QueuedConnection, Q_ARG(str, error_msg))
             return
 
         self._release_connecting_state()
+        self._pending_terminal = None
+
         try:
-            QMessageBox.warning(self, self.tr("后台连接失败"),
-                                self.tr("后台SSH连接失败，文件管理/监控功能不可用，但终端仍可用。"))
+            QMessageBox.warning(self, self.tr("连接失败"),
+                                self.tr("SSH连接失败，请检查网络或认证信息。\n\n错误: ") + error_msg)
         except Exception:
             pass
 
@@ -4983,7 +4942,7 @@ class MainDialog(QMainWindow):
         - SAFE/LOW 风险命令：自动执行，不弹窗
         - MEDIUM/HIGH/CRITICAL 命令：弹窗让用户确认
         """
-        auto_commands = []   # 安全命令，自动执行
+        auto_commands = []  # 安全命令，自动执行
         risky_commands = []  # 危险命令，需要确认
 
         for cmd_info in commands:
@@ -5164,19 +5123,19 @@ class SSHConnector(QObject):
     def __init__(self):
         super().__init__()
 
-    def connect_ssh(self, host, port, username, password, key_type, key_file):
+    def connect_ssh(self, host, port, username, password, key_type, key_file, mfa_callback=None):
         # 内部启动线程，对外非阻塞，保持调用方代码整洁
         threading.Thread(
             target=self._do_connect,
-            args=(host, port, username, password, key_type, key_file),
+            args=(host, port, username, password, key_type, key_file, mfa_callback),
             daemon=True
         ).start()
 
-    def _do_connect(self, host, port, username, password, key_type, key_file):
+    def _do_connect(self, host, port, username, password, key_type, key_file, mfa_callback=None):
         """实际执行连接的线程函数"""
         try:
             ssh_conn = SshClient(host, port, username, password, key_type, key_file)
-            ssh_conn.connect()
+            ssh_conn.connect(mfa_callback=mfa_callback)
             self.connected.emit(ssh_conn)
         except Exception as e:
             self.failed.emit(str(e))
@@ -6189,7 +6148,7 @@ class _SuggestionDelegate(QStyledItemDelegate):
     # 类型 -> (圆点颜色, 右侧标注文字)
     _KIND_INFO = {
         "history": ("#4fc1ff", "history"),
-        "token":   ("#c586c0", "cmd"),
+        "token": ("#c586c0", "cmd"),
         "command": ("#c586c0", "cmd"),
     }
 
@@ -7674,6 +7633,7 @@ if __name__ == '__main__':
     # Windows 下设置应用图标（用于任务栏）
     if platform.system() == 'Windows':
         import ctypes
+
         # 设置AppUserModelID让Windows正确显示任务栏图标
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('hanxuan.cubeshell.app.1')
 

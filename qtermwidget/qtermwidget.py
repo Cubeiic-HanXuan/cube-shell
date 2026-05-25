@@ -386,6 +386,13 @@ class QTermWidget(QWidget, QTermWidgetInterface):
         这将安全地终止会话和进程，避免在析构时出现警告。
         建议在父窗口的closeEvent中显式调用此方法。
         """
+        # 清理 Paramiko 桥接（防止线程和信号泄漏）
+        if hasattr(self, '_paramiko_bridge') and self._paramiko_bridge:
+            try:
+                self._paramiko_bridge.stop()
+            except Exception:
+                pass
+            self._paramiko_bridge = None
         try:
             if hasattr(self, 'm_impl') and self.m_impl and hasattr(self.m_impl, 'm_session') and self.m_impl.m_session:
                 # 先关闭会话，这会处理进程终止
@@ -424,6 +431,14 @@ class QTermWidget(QWidget, QTermWidgetInterface):
                 return
             self._is_destroying = True
             
+            # 防御性清理 Paramiko 桥接
+            if hasattr(self, '_paramiko_bridge') and self._paramiko_bridge:
+                try:
+                    self._paramiko_bridge.stop()
+                except Exception:
+                    pass
+                self._paramiko_bridge = None
+
             # 停止和销毁会话
             if hasattr(self, 'm_impl') and self.m_impl and hasattr(self.m_impl, 'm_session') and self.m_impl.m_session:
                 try:
@@ -1233,12 +1248,48 @@ class QTermWidget(QWidget, QTermWidgetInterface):
         else:
             raise ValueError("Invalid arguments for getHotSpotAt")
 
+    def startParamikoBridge(self, paramiko_channel):
+        """使用 Paramiko shell channel 启动终端（不 fork 子进程）"""
+        from core.paramiko_bridge import ParamikoBridge
+
+        session = self.m_impl.m_session
+
+        # Emulation 已在 Session 构造函数中初始化，无需额外处理
+
+        # 创建桥接
+        self._paramiko_bridge = ParamikoBridge(session, paramiko_channel)
+        self._paramiko_bridge.channelClosed.connect(
+            self._onParamikoClosed, Qt.ConnectionType.QueuedConnection
+        )
+        self._paramiko_bridge.start()
+
+        # 桥接活跃状态通过 self._paramiko_bridge is not None 判断，无需设置 session._running
+        if hasattr(session, 'started'):
+            session.started.emit()
+
+    def _onParamikoClosed(self):
+        """Paramiko channel 关闭时的处理"""
+        # 清理桥接引用
+        self._paramiko_bridge = None
+        session = self.m_impl.m_session
+        if hasattr(session, 'finished'):
+            session.finished.emit()
+        self.finished.emit()
+
     def _force_close_session(self):
         """
         强制关闭会话，用于析构函数和closeEvent
         
         这个方法会立即终止shell进程，不等待优雅关闭。
         """
+        # 清理 Paramiko 桥接
+        if hasattr(self, '_paramiko_bridge') and self._paramiko_bridge:
+            try:
+                self._paramiko_bridge.stop()
+            except Exception:
+                pass
+            self._paramiko_bridge = None
+
         if not (hasattr(self, 'm_impl') and self.m_impl and self.m_impl.m_session):
             return
             

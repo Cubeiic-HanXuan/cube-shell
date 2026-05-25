@@ -11,10 +11,24 @@ import uuid
 from function import parse_data, util
 
 
+def _is_mfa_prompt(prompt_lower):
+    """判断提示是否为 MFA/OTP 验证码输入"""
+    mfa_keywords = [
+        'verification code', 'verify code', 'auth code',
+        'otp', 'totp', 'one-time', 'one time',
+        '验证码', '二次验证', '动态口令', '动态密码',
+        'token', 'passcode', '6-digit', '6 digit',
+        'google auth', 'authenticator',
+        'challenge', 'response',
+    ]
+    return any(kw in prompt_lower for kw in mfa_keywords)
+
+
 class SshClient(object):
 
     def __init__(self, host, port, username, password, key_type, key_file, on_connect_success=None,
                  callback_param=None):
+        self.transport = None
         self.id = str(uuid.uuid4())
         self.host, self.port, self.username, self.password, self.key_type, self.key_file = host, port, username, \
             password, key_type, key_file
@@ -102,11 +116,14 @@ class SshClient(object):
             util.logger.debug(f"连接检查失败: {str(e)}")
             return False
 
-    def connect(self, on_connect_success=None, callback_param=None):
+    def connect(self, on_connect_success=None, callback_param=None, mfa_callback=None):
         """
         建立 SSH 连接的方法。
         参数:
         - on_connect_success: 可选的连接成功回调函数，会覆盖初始化时设置的回调
+        - callback_param: 可选的回调参数
+        - mfa_callback: 可选的 MFA 回调函数，签名为 mfa_callback(prompt_text: str) -> str
+                        当密码认证失败时，若提供此回调，将尝试 keyboard-interactive 认证
         """
         # 如果提供了新的回调函数，则覆盖初始化时设置的回调
         if on_connect_success is not None:
@@ -116,22 +133,28 @@ class SshClient(object):
         if callback_param is not None:
             self.callback_param = callback_param
 
-        # 移除循环重试逻辑，因为这会阻塞线程并可能导致递归调用
-        # 如果连接失败，抛出异常，由调用者（如 ConnectRunnable）处理重试或报错
         try:
             if self.private_key:
+                # 密钥认证走常规流程
                 self.conn.connect(hostname=self.host, port=self.port, username=self.username, pkey=self.private_key,
                                   timeout=5, banner_timeout=15, auth_timeout=10, allow_agent=False,
                                   look_for_keys=False)
+            elif mfa_callback is not None:
+                # 当提供了 mfa_callback 时，直接使用 keyboard-interactive 认证。
+                # 原因：Paramiko 的 connect(password=...) 内部会用 password 回答所有
+                # keyboard-interactive 提示（包括 TOTP），导致 MFA 认证失败，
+                # 且抛出的异常类型不确定（可能不是 AuthenticationException）。
+                # 直接走 keyboard-interactive 可以由我们的 handler 正确分发密码和 OTP。
+                self._connect_interactive(mfa_callback)
             else:
                 self.conn.connect(hostname=self.host, port=self.port, username=self.username,
                                   password=self.password, timeout=5, banner_timeout=15, auth_timeout=10,
                                   allow_agent=False, look_for_keys=False)
 
             # 连接成功后初始化
-            self.transport = self.conn.get_transport()
+            if not self.transport:
+                self.transport = self.conn.get_transport()
             self.transport.set_keepalive(self.heartbeat_interval)
-            # self._setup_channel()
             self._start_heartbeat()
             self.reconnect_attempts = 0  # 重置重试计数器
 
@@ -151,6 +174,51 @@ class SshClient(object):
             util.logger.error(f"Connection error: {e}")
             self.active = False
             raise
+
+    def _connect_interactive(self, mfa_callback):
+        """
+        使用 keyboard-interactive 认证建立连接（用于 MFA/OTP 场景）。
+        直接建立 TCP 连接并进行 keyboard-interactive 认证，
+        绕过 Paramiko SSHClient.connect() 内部用 password 回答所有提示的问题。
+        如果服务器不支持 keyboard-interactive，则回退到普通密码认证。
+        """
+        try:
+            sock = socket.create_connection((self.host, self.port), timeout=5)
+            transport = paramiko.Transport(sock)
+            transport.start_client()
+            # 使用我们的 handler 进行 keyboard-interactive 认证
+            # handler 会对 password 提示自动填充密码，对 OTP 提示调用 mfa_callback
+            transport.auth_interactive(self.username, self._make_interactive_handler(mfa_callback))
+            # 认证成功，设置 transport
+            self.conn._transport = transport
+            self.transport = transport
+        except paramiko.ssh_exception.BadAuthenticationType:
+            # 服务器不支持 keyboard-interactive，回退到普通密码认证
+            util.logger.info("Server does not support keyboard-interactive, falling back to password auth.")
+            self._init_ssh_client()
+            self.conn.connect(hostname=self.host, port=self.port, username=self.username,
+                              password=self.password, timeout=5, banner_timeout=15, auth_timeout=10,
+                              allow_agent=False, look_for_keys=False)
+
+    def _make_interactive_handler(self, mfa_callback):
+        """创建 keyboard-interactive 认证的交互处理器"""
+        def handler(title, instructions, prompt_list):
+            responses = []
+            for prompt, echo in prompt_list:
+                prompt_lower = prompt.lower().strip()
+                # 匹配密码提示 → 自动填入密码
+                if 'password' in prompt_lower:
+                    responses.append(self.password)
+                # 匹配 MFA/OTP 提示 → 调用回调获取验证码
+                elif _is_mfa_prompt(prompt_lower):
+                    code = mfa_callback(prompt)
+                    responses.append(code if code else '')
+                else:
+                    # 未知提示，尝试用 mfa_callback 询问用户
+                    code = mfa_callback(prompt)
+                    responses.append(code if code else '')
+            return responses
+        return handler
 
     def _setup_channel(self):
         """设置会话通道"""
