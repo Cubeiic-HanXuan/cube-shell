@@ -975,6 +975,7 @@ class MainDialog(QMainWindow):
         # follow_folder 复选框逻辑
         if hasattr(self.ui, 'follow_folder'):
             self.ui.follow_folder.stateChanged.connect(self._on_follow_folder_changed)
+            self.ui.follow_folder.hide()  # 无连接时隐藏
         # 设置选择模式为多选模式
         self.ui.treeWidget.setSelectionMode(QTreeWidget.ExtendedSelection)
         # 优化左侧图标显示间距
@@ -1164,6 +1165,22 @@ class MainDialog(QMainWindow):
         """当 'Follow terminal folder' 状态改变时触发。"""
         if state and self.isConnected:
             self.refreshDirs()
+
+    def _on_cwd_changed(self, ssh_conn, new_pwd):
+        """Shell 通过 OSC 7 报告工作目录变更 → 联动文件树。"""
+        if not (hasattr(self.ui, 'follow_folder') and self.ui.follow_folder.isChecked()):
+            return
+        if not ssh_conn or not self.isConnected:
+            return
+        # 路径没变则不刷新
+        new_pwd = new_pwd.rstrip('/')
+        if not new_pwd:
+            new_pwd = '/'
+        if new_pwd == (ssh_conn.pwd or '').rstrip('/'):
+            return
+        # 更新路径并刷新文件树
+        ssh_conn.pwd = new_pwd
+        self.refreshDirs()
 
     # ──────────────────────────────────────────────────────────────
     # 工具对话框懒加载方法
@@ -2480,6 +2497,16 @@ class MainDialog(QMainWindow):
 
             # 使用桥接模式启动 QTermWidget
             terminal.startParamikoBridge(channel)
+
+            # 连接 OSC 7 目录变更信号 → 文件树联动
+            bridge = terminal.paramiko_bridge
+            if bridge:
+                bridge.cwdChanged.connect(
+                    lambda path, sc=ssh_client: self._on_cwd_changed(sc, path)
+                )
+                # 注入 Shell 集成钩子（命令会在 shell 就绪后自动执行）
+                bridge.inject_shell_integration()
+
             util.logger.info("MFA 桥接模式：终端已通过 Paramiko bridge 启动")
         except Exception as e:
             util.logger.error(f"MFA 桥接模式启动失败: {e}")
@@ -2541,6 +2568,8 @@ class MainDialog(QMainWindow):
         # 更新状态栏主机名和用户名，并确保状态栏可见
         try:
             self.statusBar().show()
+            if hasattr(self.ui, 'follow_folder'):
+                self.ui.follow_folder.show()
             if hasattr(self, '_status_hostname'):
                 host = getattr(ssh_conn, 'host', '') or getattr(ssh_conn, 'hostname', '')
                 self._status_hostname.setText(host or '—')
@@ -2787,6 +2816,8 @@ class MainDialog(QMainWindow):
         # 无活跃连接时隐藏状态栏
         if not self.ssh_clients:
             self.statusBar().hide()
+            if hasattr(self.ui, 'follow_folder'):
+                self.ui.follow_folder.hide()
 
         # 重置左侧路径栏
 

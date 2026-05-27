@@ -2,6 +2,7 @@
 Paramiko SSH shell channel 到 QTermWidget 的桥接适配器。
 将 Paramiko channel 的 I/O 桥接到 QTermWidget Session 的内部数据流。
 """
+import re
 import threading
 
 from PySide6.QtCore import QObject, Signal, Qt
@@ -12,6 +13,10 @@ class ParamikoBridge(QObject):
 
     channelClosed = Signal()
     dataReceived = Signal(bytes, int)
+    cwdChanged = Signal(str)  # Shell 报告工作目录变更（通过 OSC 7）
+
+    # OSC 7 正则：\x1b]7;file://hostname/path\x07  或  \x1b]7;file://hostname/path\x1b\\
+    _OSC7_PATTERN = re.compile(rb'\x1b\]7;file://[^/]*(.*?)(?:\x07|\x1b\\)')
 
     def __init__(self, session, channel, parent=None):
         """
@@ -69,7 +74,10 @@ class ParamikoBridge(QObject):
                 pass
 
     def _read_loop(self):
-        """后台线程：Paramiko channel → Session.onReceiveBlock → 终端渲染"""
+        """后台线程：Paramiko channel → Session.onReceiveBlock → 终端渲染
+        
+        同时检测 OSC 7 序列并提取工作目录变更。
+        """
         while self._running:
             try:
                 if self._channel.closed:
@@ -77,7 +85,27 @@ class ParamikoBridge(QObject):
                 data = self._channel.recv(4096)
                 if not data:
                     break
-                self.dataReceived.emit(data, len(data))
+
+                # 检测 OSC 7 序列并提取路径
+                for m in self._OSC7_PATTERN.finditer(data):
+                    try:
+                        path = m.group(1).decode('utf-8', errors='ignore')
+                        if path:
+                            self.cwdChanged.emit(path)
+                    except Exception:
+                        pass
+
+                # 从数据中剥离 OSC 7 序列（避免终端渲染乱码）
+                clean_data = self._OSC7_PATTERN.sub(b'', data)
+
+                # 过滤掉 Shell 集成注入命令的回显（包含 __cs_osc7 的行）
+                if b'__cs_osc7' in clean_data:
+                    lines = clean_data.split(b'\r\n')
+                    lines = [l for l in lines if b'__cs_osc7' not in l]
+                    clean_data = b'\r\n'.join(lines)
+
+                if clean_data:
+                    self.dataReceived.emit(clean_data, len(clean_data))
             except Exception:
                 break
         self._running = False
@@ -90,6 +118,28 @@ class ParamikoBridge(QObject):
                 self._channel.resize_pty(width=cols, height=rows)
             except Exception:
                 pass
+
+    def inject_shell_integration(self):
+        """向远程 Shell 注入 OSC 7 目录报告钩子（兼容 bash/zsh）。
+        
+        注入的命令会让 Shell 在每次显示提示符前自动输出 OSC 7 序列，
+        编码当前工作目录，由 _read_loop 解析。
+        回显通过 _read_loop 中的 __cs_osc7 关键字过滤，对用户无感。
+        """
+        if not self._running or not self._channel or self._channel.closed:
+            return
+        # 命令前加空格：bash 默认不记录以空格开头的命令到 history（需 HISTCONTROL=ignorespace）
+        # printf '\e]7;file://%s%s\e\\' 输出：ESC]7;file://hostname/pathESC\（即 OSC 7 + ST）
+        hook_cmd = (
+            " __cs_osc7(){ printf '\\e]7;file://%s%s\\e\\\\' \"$(hostname)\" \"$(pwd)\"; };"
+            "if [ -n \"$ZSH_VERSION\" ];then precmd(){ __cs_osc7; };"
+            "elif [ -n \"$BASH_VERSION\" ];then "
+            "PROMPT_COMMAND=\"${PROMPT_COMMAND:+$PROMPT_COMMAND;} __cs_osc7\";fi\n"
+        )
+        try:
+            self._channel.send(hook_cmd.encode('utf-8'))
+        except Exception:
+            pass
 
     def stop(self):
         """停止桥接并关闭 channel"""

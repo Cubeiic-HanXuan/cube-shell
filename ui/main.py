@@ -74,6 +74,7 @@ class Ui_MainWindow(object):
         # 行 3：跟随终端文件夹复选框
         self.follow_folder = QCheckBox(self.gridLayoutWidget)
         self.follow_folder.setObjectName("follow_folder")
+        self.follow_folder.setCursor(QCursor(Qt.ArrowCursor))
         self.follow_folder.setText("Follow terminal folder")
         self.follow_folder.setChecked(False)
 
