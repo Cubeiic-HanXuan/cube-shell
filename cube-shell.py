@@ -2430,9 +2430,9 @@ class MainDialog(QMainWindow):
         terminal.setShellProgram(shell_program)
         terminal.setArgs(shell_args)
         terminal.startShellProgram()
-
+        
         # 将本地后端对象注册进 ssh_clients：
-        # - 复用 self.ssh() 取“当前 Tab 后端”的机制
+        # - 复用 self.ssh() 取"当前 Tab 后端"的机制
         # - 复用 initSftp() / refreshDirs() 的目录刷新逻辑
         # - 通过 tabWhatsThis 绑定 tab 与后端连接 id
         current_index = self.ui.ShellTab.currentIndex()
@@ -2442,6 +2442,12 @@ class MainDialog(QMainWindow):
         self.ssh_clients[local_conn.id] = local_conn
         self.current_displayed_connection_id = local_conn.id
         self.initSftpSignal.emit()
+        
+        # 连接 finished 信号 → 用户输入 exit 时自动关闭 tab
+        tab_name = self.ui.ShellTab.tabText(current_index)
+        terminal.finished.connect(
+            lambda name=tab_name: self._on_channel_closed(name)
+        )
         try:
             self._release_connecting_state()
         except Exception:
