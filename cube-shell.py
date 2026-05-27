@@ -1182,6 +1182,16 @@ class MainDialog(QMainWindow):
         ssh_conn.pwd = new_pwd
         self.refreshDirs()
 
+    def _on_channel_closed(self, tab_name):
+        """SSH channel 关闭（用户输入 exit）→ 自动关闭对应 tab。"""
+        try:
+            for i in range(self.ui.ShellTab.count()):
+                if self.ui.ShellTab.tabText(i) == tab_name:
+                    self.off(i, tab_name)
+                    return
+        except Exception as e:
+            util.logger.error(f"channel closed handler error: {e}")
+
     # ──────────────────────────────────────────────────────────────
     # 工具对话框懒加载方法
     # ──────────────────────────────────────────────────────────────
@@ -2506,6 +2516,13 @@ class MainDialog(QMainWindow):
                 )
                 # 注入 Shell 集成钩子（命令会在 shell 就绪后自动执行）
                 bridge.inject_shell_integration()
+
+                # 连接 channelClosed 信号 → 用户输入 exit、logout、Ctrl+D 时自动关闭 tab
+                tab_index = self.ui.ShellTab.currentIndex()
+                tab_name = self.ui.ShellTab.tabText(tab_index)
+                bridge.channelClosed.connect(
+                    lambda name=tab_name: self._on_channel_closed(name)
+                )
 
             util.logger.info("MFA 桥接模式：终端已通过 Paramiko bridge 启动")
         except Exception as e:
