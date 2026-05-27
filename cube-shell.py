@@ -46,7 +46,7 @@ from PySide6.QtGui import QIcon, QAction, QCursor, QCloseEvent, QInputMethodEven
 from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QDialog, QMessageBox, QTreeWidgetItem, \
     QInputDialog, QFileDialog, QTreeWidget, QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QTableWidgetItem, \
     QHeaderView, QTabBar, QTextBrowser, QLineEdit, QScrollArea, QGridLayout, QProgressBar, QProgressDialog, \
-    QDockWidget, QCheckBox, QFrame, QListWidget, QListWidgetItem, QStyledItemDelegate
+    QDockWidget, QCheckBox, QFrame, QListWidget, QListWidgetItem, QStyledItemDelegate, QSizePolicy
 from deepdiff import DeepDiff
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
@@ -56,8 +56,6 @@ from core.docker.docker_compose_editor import DockerComposeEditor
 from core.forwarder import ForwarderManager
 from core.frequently_used_commands import TreeSearchApp
 from core.uploader.progress_adapter import ProgressAdapter
-from core.widgets.sparkline import SparklineWidget
-from core.widgets.ring_gauge import RingGauge
 from core.uploader.sftp_uploader_core import SFTPUploaderCore
 from core.vars import ICONS, CONF_FILE, CMDS, KEYS
 from function import util, about, theme, traversal
@@ -723,6 +721,56 @@ class FRPConnectThread(QThread):
         self.finished_signal.emit(True, "", False)
 
 
+# ──────────────────────────────────────────────────────────
+# MobaXterm 风格状态栏小方块组件
+# ──────────────────────────────────────────────────────────
+class StatusBoxItem(QFrame):
+    """MobaXterm 风格的状态栏小方块组件：彩色图标 + 文字，带边框。"""
+
+    def __init__(self, icon_color: str, icon_char: str, text: str = "—", parent=None):
+        super().__init__(parent)
+        self.setObjectName("statusBoxItem")
+        self.setFrameShape(QFrame.NoFrame)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+
+        _layout = QHBoxLayout(self)
+        _layout.setContentsMargins(4, 1, 6, 1)
+        _layout.setSpacing(4)
+
+        # 彩色图标标签（固定尺寸的彩色小方块，白色字符）
+        self._icon_lbl = QLabel(icon_char)
+        self._icon_lbl.setFixedSize(18, 16)
+        self._icon_lbl.setAlignment(Qt.AlignCenter)
+        self._icon_lbl.setStyleSheet(
+            f"background-color: {icon_color}; color: white; "
+            f"border-radius: 2px; font-size: 9px; font-weight: bold; "
+            f"border: none; padding: 0px;"
+        )
+        _layout.addWidget(self._icon_lbl)
+
+        # 文字标签
+        self._text_lbl = QLabel(text)
+        self._text_lbl.setStyleSheet(
+            "color: #cccccc; background: transparent; border: none; "
+            "font-size: 11px; padding: 0px;"
+        )
+        _layout.addWidget(self._text_lbl)
+
+    def setText(self, text: str):
+        """更新显示文字（兼容 QLabel 的 setText API）。"""
+        self._text_lbl.setText(text)
+
+    def text(self) -> str:
+        return self._text_lbl.text()
+
+    def setTextColor(self, color: str):
+        """动态改变文字颜色（用于数值高亮）。"""
+        self._text_lbl.setStyleSheet(
+            f"color: {color}; background: transparent; border: none; "
+            f"font-size: 11px; padding: 0px;"
+        )
+
+
 # 主界面逻辑
 class TabCloseButton(QWidget):
     """
@@ -871,6 +919,7 @@ class MainDialog(QMainWindow):
         self.ui = main.Ui_MainWindow()
         self.ui.setupUi(self)
         self.setWindowIcon(QIcon(":logo.ico"))
+        self._setup_compat_stubs()  # 确保存根在任何业务代码前就绪
 
         # 连接异步信号
         self.update_file_tree_signal.connect(self.handle_file_tree_updated)
@@ -918,15 +967,14 @@ class MainDialog(QMainWindow):
         self.fileEvent = ''
         self.active_upload_threads = []
 
-        self.ui.discButton.clicked.connect(self.disc_off)
-        self.ui.theme.clicked.connect(self.theme)
         # 🔧 连接主题切换信号
         self.themeChanged.connect(self.on_system_theme_changed)
         self.ui.treeWidget.customContextMenuRequested.connect(self.treeRight)
         self.ui.treeWidget.doubleClicked.connect(self.cd)
         self.ui.ShellTab.currentChanged.connect(self.shell_tab_current_changed)
-        # 连接信号
-        self.ui.tabWidget.currentChanged.connect(self.on_tab_changed)
+        # follow_folder 复选框逻辑
+        if hasattr(self.ui, 'follow_folder'):
+            self.ui.follow_folder.stateChanged.connect(self._on_follow_folder_changed)
         # 设置选择模式为多选模式
         self.ui.treeWidget.setSelectionMode(QTreeWidget.ExtendedSelection)
         # 优化左侧图标显示间距
@@ -949,8 +997,6 @@ class MainDialog(QMainWindow):
         # 用于存储拖动开始时的标签索引
         self.originalIndex = -1
 
-        self.ui.treeWidgetDocker.customContextMenuRequested.connect(self.treeDocker)
-
         # 创建SSH连接器
         self.ssh_connector = SSHConnector()
         self.ssh_connector.connected.connect(self.on_ssh_connected, Qt.QueuedConnection)
@@ -964,8 +1010,10 @@ class MainDialog(QMainWindow):
         self.initSftpSignal.connect(self.on_initSftpSignal)
 
         self.NAT = False
-        self.NAT_lod()
-        self.ui.pushButton.clicked.connect(self.on_NAT_traversal)
+        try:
+            self.NAT_lod()
+        except Exception:
+            pass
 
         # 记录当前文件树显示的连接ID
         self.current_displayed_connection_id = None
@@ -992,7 +1040,9 @@ class MainDialog(QMainWindow):
         ai_shortcut = QShortcut(QKeySequence("Ctrl+Shift+K"), self)
         ai_shortcut.activated.connect(self._toggle_ai_panel)
 
-        self._move_monitor_and_process_to_bottom_tabs()
+        self.setupLeftToolbar()
+        self.setupStatusBar()
+        self.setupToolDialogs()
 
         # 堡垒机连接客户端
         from core.bastion.bastion_client import BastionClient
@@ -1002,292 +1052,368 @@ class MainDialog(QMainWindow):
         if self._connection_info:
             QTimer.singleShot(1500, self._auto_connect)
 
-    def _move_monitor_and_process_to_bottom_tabs(self):
+    def _setup_compat_stubs(self):
+        """创建向后兼容的 widget 存根，替代已从 ui/main.py 移除的组件。
+        这些 stub widget 不会显示在 UI 中，仅作为数据持有者供现有代码引用。
+        """
+        from PySide6.QtWidgets import QProgressBar, QLabel as _QLabel, QPushButton, QGridLayout
+        # 进度条存根（监控数据载体，连接到 RingGauge 等）
+        for name in ('cpuRate', 'memRate', 'diskRate'):
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setValue(0)
+            bar.hide()
+            setattr(self.ui, name, bar)
+        # 文本标签存根
+        for name in ('networkUpload', 'networkDownload', 'operatingSystem', 'kernelVersion', 'kernel'):
+            lbl = _QLabel()
+            lbl.hide()
+            setattr(self.ui, name, lbl)
+        # 按鈕存根（discButton / theme）
+        for name in ('discButton', 'theme'):
+            btn = QPushButton()
+            btn.hide()
+            setattr(self.ui, name, btn)
+        # gridLayout_7 存根（常用容器展示）
+        _stub_widget = __import__('PySide6.QtWidgets', fromlist=['QWidget']).QWidget()
+        _stub_widget.hide()
+        self.ui._grid7_stub_widget = _stub_widget  # 保留引用防止 GC 回收
+        _grid7 = QGridLayout(_stub_widget)
+        _grid7.setObjectName('gridLayout_7')
+        setattr(self.ui, 'gridLayout_7', _grid7)
+        # gridLayout_tunnel_tabs 存根（Tunnel 回调容器）
+        from PySide6.QtWidgets import QWidget as _QWidget, QGridLayout as _QGridLayout
+        _tunnel_stub_widget = _QWidget()
+        _tunnel_stub_widget.hide()
+        self.ui._tunnel_stub_widget = _tunnel_stub_widget
+        self.ui.gridLayout_tunnel_tabs = _QGridLayout(_tunnel_stub_widget)
+        # gridLayout_kill_all 存根（Tunnel kill-all 容器）
+        _kill_stub_widget = _QWidget()
+        _kill_stub_widget.hide()
+        self.ui._kill_stub_widget = _kill_stub_widget
+        self.ui.gridLayout_kill_all = _QGridLayout(_kill_stub_widget)
+
+    def setupLeftToolbar(self):
+        """创建左侧竖向图标工具栏，风格参考 MobaXterm。"""
+        from PySide6.QtWidgets import QToolBar
+        from PySide6.QtGui import QAction
+        from PySide6.QtCore import QSize
+
+        toolbar = QToolBar(self.tr("工具栏"), self)
+        toolbar.setObjectName("leftIconToolbar")
+        toolbar.setOrientation(Qt.Vertical)
+        toolbar.setMovable(False)
+        toolbar.setIconSize(QSize(24, 24))
+        toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.addToolBar(Qt.LeftToolBarArea, toolbar)
+
+        def _add_action(icon_res, label, tooltip, slot):
+            act = QAction(QIcon(icon_res), label, self)
+            act.setToolTip(tooltip)
+            act.triggered.connect(slot)
+            toolbar.addAction(act)
+            return act
+
+        _add_action(":icons8-docker-48.png", self.tr("Docker 管理"), self.tr("Docker 容器管理"),
+                    self.showDockerManagerDialog)
+        _add_action(":icons8-container-48.png", self.tr("常用容器"), self.tr("常用容器安装"), self.showDockerSoftDialog)
+        _add_action(":tunnel-diode.png", self.tr("SSH 隊道"), self.tr("SSH 隊道管理"), self.showSSHTunnelDialog)
+        _add_action(":icons8-nat-48.png", self.tr("内网穿透"), self.tr("内网穿透设置"), self.showNATDialog)
+        _add_action(":icons8-processor-48.png", self.tr("进程管理"), self.tr("远程进程管理"),
+                    self.showProcessManagerDialog)
+        # toolbar.addSeparator()
+        # _add_action(":Settings-4.png", self.tr("切换主题"), self.tr("切换亮色/暗色主题"), self.theme)
+
+    def setupStatusBar(self):
+        """创建底部状态栏，MobaXterm 风格小方块布局。"""
+        sb = self.statusBar()
+        sb.setObjectName("bottomStatusBar")
+        sb.setSizeGripEnabled(False)
+
+        # 参数: (图标背景色, 图标字符, 初始文字, objectName)
+        _items = [
+            ("#c0392b", "IP", "\u2014", "status_hostname"),
+            ("#27ae60", "C", "CPU: \u2014", "status_cpu"),
+            ("#e67e22", "M", "MEM: \u2014", "status_mem"),
+            ("#16a085", "\u2191", "\u2014 Mb/s", "status_upload"),
+            ("#2980b9", "\u2193", "\u2014 Mb/s", "status_download"),
+            ("#8e44ad", "T", "\u2014", "status_uptime"),
+            ("#2980b9", "U", "\u2014", "status_user"),
+            ("#636e72", "D", "/: \u2014%", "status_disk"),
+        ]
+
+        for icon_color, icon_char, init_text, obj_name in _items:
+            item = StatusBoxItem(icon_color, icon_char, init_text)
+            item.setObjectName(obj_name)
+            setattr(self, f"_status_{obj_name[7:]}", item)  # _status_hostname, _status_cpu, ...
+            sb.addPermanentWidget(item)
+
+        # 未连接时隐藏状态栏，连接后再显示
+        sb.hide()
+
+    def setupToolDialogs(self):
+        """初始化所有工具对话框（延迟创建，首次打开时实例化）。"""
+        self._docker_manager_dialog = None
+        self._docker_soft_dialog = None
+        self._ssh_tunnel_dialog = None
+        self._nat_dialog = None
+        self._remote_monitor_dialog = None
+        self._process_manager_dialog = None
+
+    def _on_follow_folder_changed(self, state):
+        """当 'Follow terminal folder' 状态改变时触发。"""
+        if state and self.isConnected:
+            self.refreshDirs()
+
+    # ──────────────────────────────────────────────────────────────
+    # 工具对话框懒加载方法
+    # ──────────────────────────────────────────────────────────────
+
+    def _ensure_docker_manager_dialog(self):
+        """懒加载 Docker 管理对话框。"""
+        if self._docker_manager_dialog is None:
+            from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                           QPushButton, QTreeWidget)
+            dlg = QDialog(self)
+            dlg.setWindowTitle(self.tr("Docker 容器管理"))
+            dlg.setMinimumSize(900, 500)
+            dlg.setModal(False)
+            layout = QVBoxLayout(dlg)
+
+            tree = QTreeWidget(dlg)
+            tree.setObjectName("treeWidgetDocker")
+            tree.setColumnCount(7)
+            tree.setHeaderLabels([self.tr("#"), self.tr("容器ID"), self.tr("容器"),
+                                  self.tr("镜像"), self.tr("状态"), self.tr("创建时间"), self.tr("端口")])
+            tree.setContextMenuPolicy(Qt.CustomContextMenu)
+            tree.customContextMenuRequested.connect(self.treeDocker)
+            layout.addWidget(tree)
+
+            btn_layout = QHBoxLayout()
+            refresh_btn = QPushButton(self.tr("刷新"), dlg)
+            refresh_btn.clicked.connect(self.refreshDokerInfo)
+            btn_layout.addStretch()
+            btn_layout.addWidget(refresh_btn)
+            layout.addLayout(btn_layout)
+
+            self.ui.treeWidgetDocker = tree
+            self._docker_manager_dialog = dlg
+
+        return self._docker_manager_dialog
+
+    def showDockerManagerDialog(self):
+        dlg = self._ensure_docker_manager_dialog()
+        if self.isConnected:
+            self.refreshDokerInfo()
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _ensure_docker_soft_dialog(self):
+        """懒加载常用容器安装对话框。"""
+        if self._docker_soft_dialog is None:
+            from PySide6.QtWidgets import (QDialog, QVBoxLayout, QWidget,
+                                           QGridLayout)
+            dlg = QDialog(self)
+            dlg.setWindowTitle(self.tr("常用容器安装"))
+            dlg.setMinimumSize(800, 550)
+            dlg.setModal(False)
+
+            layout = QVBoxLayout(dlg)
+            content_widget = QWidget(dlg)
+            grid_layout = QGridLayout(content_widget)
+            grid_layout.setContentsMargins(4, 4, 4, 4)
+            layout.addWidget(content_widget)
+
+            # 将布局引用赋给 self.ui，使 refresh_docker_common_containers 可以找到
+            self.ui.gridLayout_7 = grid_layout
+
+            self._docker_soft_dialog = dlg
+        return self._docker_soft_dialog
+
+    def showDockerSoftDialog(self):
+        dlg = self._ensure_docker_soft_dialog()
         try:
-            tab_widget = getattr(self.ui, "tabWidget", None)
-            if not tab_widget:
-                return
-
-            monitor_tab = QWidget()
-            monitor_tab.setObjectName("tab_remote_monitor")
-            monitor_layout = QHBoxLayout(monitor_tab)
-            monitor_layout.setContentsMargins(12, 10, 12, 10)
-            monitor_layout.setSpacing(20)
-
-            try:
-                appearance = str(getattr(util, "THEME", {}) or {}).lower()
-            except Exception:
-                appearance = "dark"
-            is_light = "appearance" in appearance and "light" in appearance
-            if not is_light:
-                try:
-                    is_light = str((getattr(util, "THEME", {}) or {}).get("appearance") or "").lower() == "light"
-                except Exception:
-                    is_light = False
-
-            # High-Tech Styling
-            monitor_tab.setStyleSheet(
-                """
-                QWidget#tab_remote_monitor {
-                    background: transparent;
-                }
-                QFrame#monitorPanel {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(40, 44, 52, 240), stop:1 rgba(33, 37, 43, 255));
-                    border: 1px solid rgba(255, 255, 255, 0.1);
-                    border-radius: 12px;
-                }
-                QLabel {
-                    color: #AAB2C0;
-                    font-family: "Segoe UI", sans-serif;
-                }
-                QLabel#sectionTitle {
-                    color: #E1E4E8;
-                    font-weight: 700;
-                    font-size: 12px;
-                    background: transparent;
-                }
-                QLabel#valueText {
-                    color: #FFFFFF;
-                    font-weight: 600;
-                    font-size: 13px;
-                }
-                """ if not is_light else
-                """
-                QWidget#tab_remote_monitor {
-                    background: transparent;
-                }
-                QFrame#monitorPanel {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(245, 247, 250, 240), stop:1 rgba(255, 255, 255, 255));
-                    border: 1px solid rgba(0, 0, 0, 0.08);
-                    border-radius: 12px;
-                }
-                QLabel {
-                    color: #4A5568;
-                    font-family: "Segoe UI", sans-serif;
-                }
-                QLabel#sectionTitle {
-                    color: #2D3748;
-                    font-weight: 700;
-                    font-size: 12px;
-                    background: transparent;
-                }
-                QLabel#valueText {
-                    color: #1A202C;
-                    font-weight: 600;
-                    font-size: 13px;
-                }
-                """
-            )
-
-            # --- Ring Gauges Section (CPU, RAM, Disk) ---
-            def create_ring_section(layout, label_name, bar_name, color, title):
-                # Hide original widgets but keep them updated
-                orig_label = getattr(self.ui, label_name, None)
-                orig_bar = getattr(self.ui, bar_name, None)
-                if orig_bar:
-                    orig_bar.setVisible(False)
-                    orig_bar.setParent(monitor_tab)  # Reparent to keep alive
-                if orig_label:
-                    orig_label.setVisible(False)
-                    orig_label.setParent(monitor_tab)
-
-                container = QFrame()
-                # container.setFixedWidth(80)
-                vbox = QVBoxLayout(container)
-                vbox.setContentsMargins(0, 0, 0, 0)
-                vbox.setSpacing(4)
-
-                # Ring Gauge
-                ring = RingGauge(container, color=color, label=title)
-                # ring.setFixedSize(80, 80)
-
-                # Sparkline (Miniature below ring)
-                spark = SparklineWidget(container)
-                # spark.setFixedHeight(20)
-                spark.setLineColor(QColor(color))
-
-                vbox.addWidget(ring, 0, Qt.AlignCenter)
-                vbox.addWidget(spark)
-
-                layout.addWidget(container)
-
-                # Store references and connect signals
-                setattr(self.ui, bar_name.replace("Rate", "Ring"), ring)
-                setattr(self.ui, bar_name.replace("Rate", "Sparkline"), spark)
-
-                if orig_bar:
-                    try:
-                        orig_bar.valueChanged.connect(ring.setValue)
-                        orig_bar.valueChanged.connect(spark.addPoint)
-                    except:
-                        pass
-
-            # --- Network Section ---
-            def create_network_section(layout):
-                container = QFrame()
-                container.setObjectName("monitorPanel")
-                container.setFrameShape(QFrame.StyledPanel)
-                vbox = QVBoxLayout(container)
-                vbox.setContentsMargins(12, 10, 12, 10)
-                vbox.setSpacing(8)
-
-                title = QLabel(self.tr("NETWORK I/O"), container)
-                title.setObjectName("sectionTitle")
-                vbox.addWidget(title)
-
-                # Up
-                up_layout = QHBoxLayout()
-                up_icon = QLabel("▲", container)
-                up_icon.setStyleSheet("color: #E05B00;" if is_light else "color: #FF9F43;")
-                up_val = getattr(self.ui, "networkUpload", None)
-                if up_val:
-                    up_val.setParent(container)
-                    up_val.setFrame(False)
-                    up_val.setAttribute(Qt.WA_TransparentForMouseEvents)
-                    up_val.setStyleSheet("background: transparent; color: " + (
-                        "#2D3748" if is_light else "#E1E4E8") + "; font-weight: bold; border: none; font-family: 'Consolas', 'Courier New', monospace;")
-                    # up_val.setFixedWidth(120)
-                    # up_val.setFixedHeight(24)
-                    up_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-
-                up_spark = SparklineWidget(container)
-                # up_spark.setFixedHeight(24)
-                up_spark.setLineColor(QColor("#E05B00") if is_light else QColor("#FF9F43"))
-                setattr(self.ui, "networkUploadSparkline", up_spark)
-
-                up_layout.addWidget(up_icon)
-                up_layout.addWidget(up_spark, 1)
-                if up_val: up_layout.addWidget(up_val)
-                vbox.addLayout(up_layout)
-
-                # Down
-                down_layout = QHBoxLayout()
-                down_icon = QLabel("▼", container)
-                down_icon.setStyleSheet("color: #00A1FF;" if is_light else "color: #48DBFB;")
-                down_val = getattr(self.ui, "networkDownload", None)
-                if down_val:
-                    down_val.setParent(container)
-                    down_val.setFrame(False)
-                    down_val.setAttribute(Qt.WA_TransparentForMouseEvents)
-                    down_val.setStyleSheet("background: transparent; color: " + (
-                        "#2D3748" if is_light else "#E1E4E8") + "; font-weight: bold; border: none; font-family: 'Consolas', 'Courier New', monospace;")
-                    # down_val.setFixedWidth(120)
-                    # down_val.setFixedHeight(24)
-                    down_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-
-                down_spark = SparklineWidget(container)
-                down_spark.setFixedHeight(24)
-                down_spark.setLineColor(QColor("#00A1FF") if is_light else QColor("#48DBFB"))
-                setattr(self.ui, "networkDownloadSparkline", down_spark)
-
-                down_layout.addWidget(down_icon)
-                down_layout.addWidget(down_spark, 1)
-                if down_val: down_layout.addWidget(down_val)
-                vbox.addLayout(down_layout)
-
-                layout.addWidget(container, 2)  # Stretch factor equal to system section
-
-            # --- System Info Section ---
-            def create_sys_section(layout):
-                container = QFrame()
-                container.setObjectName("monitorPanel")
-                container.setFrameShape(QFrame.StyledPanel)
-                # Ensure minimum width for full info display
-                container.setMinimumWidth(260)
-
-                vbox = QVBoxLayout(container)
-                vbox.setContentsMargins(12, 10, 12, 10)
-                vbox.setSpacing(4)
-
-                title = QLabel(self.tr("SYSTEM INFO"), container)
-                title.setObjectName("sectionTitle")
-                vbox.addWidget(title)
-
-                info_grid = QGridLayout()
-                info_grid.setHorizontalSpacing(10)
-                info_grid.setVerticalSpacing(2)
-
-                def add_info_row(row, label_widget_name, val_widget_name, icon_char):
-                    lbl = getattr(self.ui, label_widget_name, None)
-                    val = getattr(self.ui, val_widget_name, None)
-                    if lbl and val:
-                        lbl.setParent(container)
-                        val.setParent(container)
-                        lbl.setVisible(False)  # Hide original label text, use icon
-
-                        icon = QLabel(icon_char, container)
-                        icon.setStyleSheet("color: #A0AEC0; font-size: 14px;")
-
-                        val.setFrame(False)
-                        val.setAttribute(Qt.WA_TransparentForMouseEvents)
-                        # Monospace font for values for better alignment and tech feel
-                        val.setStyleSheet("background: transparent; color: " + (
-                            "#4A5568" if is_light else "#CBD5E0") + "; border: none; font-family: 'Consolas', 'Courier New', monospace;")
-                        val.setFixedHeight(20)
-
-                        info_grid.addWidget(icon, row, 0)
-                        info_grid.addWidget(val, row, 1)
-
-                add_info_row(0, "label_4", "operatingSystem", "🖥")
-                add_info_row(1, "label_8", "kernel", "⚙")
-                add_info_row(2, "label_10", "kernelVersion", "#")
-
-                vbox.addLayout(info_grid)
-                layout.addWidget(container, 2)  # Higher stretch factor
-
-            # Build Layout
-            # Left: Rings
-            rings_layout = QHBoxLayout()
-            rings_layout.setSpacing(15)
-            create_ring_section(rings_layout, "label", "cpuRate", "#FF6B6B" if not is_light else "#E05B00", "CPU")
-            create_ring_section(rings_layout, "label_2", "memRate", "#54A0FF" if not is_light else "#00A1FF", "MEM")
-            create_ring_section(rings_layout, "label_3", "diskRate", "#2ECC71", "DISK")
-
-            # Combine
-            monitor_layout.addLayout(rings_layout)
-            create_network_section(monitor_layout)
-            create_sys_section(monitor_layout)
-
-            # Process Tab (unchanged logic, just reparenting)
-            process_tab = QWidget()
-            process_tab.setObjectName("tab_process_manager")
-            process_layout = QVBoxLayout(process_tab)
-            process_layout.setContentsMargins(6, 6, 6, 6)
-            process_layout.setSpacing(6)
-            for w in (getattr(self.ui, "search_box", None), getattr(self.ui, "result", None)):
-                if w:
-                    w.setParent(process_tab)
-                    process_layout.addWidget(w)
-
-            tab_widget.addTab(monitor_tab, self.tr("远程监控"))
-            tab_widget.addTab(process_tab, self.tr("进程管理"))
-
-            # Default select Remote Monitor tab
-            tab_widget.setCurrentWidget(monitor_tab)
-
-            # Hide original middle area
-            middle = getattr(self.ui, "gridLayoutWidget_2", None)
-            if middle: middle.setVisible(False)
-
-            # Adjust splitters
-            splitter = getattr(self.ui, "splitter_255", None)
-            if splitter and splitter.count() >= 2:
-                sizes = splitter.sizes()
-                if sizes:
-                    sizes[0] = 0
-                    sizes[1] = max(1, sizes[1])
-                    splitter.setSizes(sizes)
-
-            main_splitter = getattr(self.ui, "splitter", None)
-            if main_splitter and main_splitter.count() >= 2:
-                sizes = main_splitter.sizes()
-                if sizes and sizes[1] > 180:  # Compact height
-                    sizes[0] = sizes[0] + (sizes[1] - 180)
-                    sizes[1] = 180
-                    main_splitter.setSizes(sizes)
-
+            self.refresh_docker_common_containers()
         except Exception as e:
-            print(f"Error in UI setup: {e}")
+            util.logger.error(f"Failed to refresh docker soft: {e}")
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _ensure_ssh_tunnel_dialog(self):
+        """懒加载 SSH 隧道管理对话框。"""
+        if self._ssh_tunnel_dialog is None:
+            from PySide6.QtWidgets import (QDialog, QVBoxLayout, QScrollArea,
+                                           QWidget, QGridLayout, QPushButton,
+                                           QHBoxLayout)
+            dlg = QDialog(self)
+            dlg.setWindowTitle(self.tr("SSH 隧道管理"))
+            dlg.setMinimumSize(750, 500)
+            dlg.setModal(False)
+
+            main_layout = QVBoxLayout(dlg)
+
+            # 顶部按钮行：添加隧道
+            top_bar = QHBoxLayout()
+            add_btn = QPushButton(self.tr("添加隧道"), dlg)
+            add_btn.clicked.connect(self._on_add_tunnel_from_dialog)
+            top_bar.addWidget(add_btn)
+            top_bar.addStretch()
+            main_layout.addLayout(top_bar)
+
+            # 隧道列表滚动区域
+            scroll = QScrollArea(dlg)
+            scroll.setWidgetResizable(True)
+            scroll_content = QWidget()
+            tunnel_grid = QGridLayout(scroll_content)
+            tunnel_grid.setAlignment(Qt.AlignTop)
+            scroll.setWidget(scroll_content)
+            main_layout.addWidget(scroll, stretch=1)
+
+            # kill-all 区域（放在底部）
+            kill_widget = QWidget(dlg)
+            kill_grid = QGridLayout(kill_widget)
+            kill_widget.setLayout(kill_grid)
+            main_layout.addWidget(kill_widget)
+
+            # 将对话框内的可见布局赋值给 self.ui，替换原存根
+            self.ui.gridLayout_tunnel_tabs = tunnel_grid
+            self.ui.gridLayout_kill_all = kill_grid
+
+            self._ssh_tunnel_dialog = dlg
+        return self._ssh_tunnel_dialog
+
+    def showSSHTunnelDialog(self):
+        dlg = self._ensure_ssh_tunnel_dialog()
+        # 每次打开都重新刷新（清空旧 widget 再重建）
+        try:
+            util.clear_grid_layout(self.ui.gridLayout_tunnel_tabs)
+            util.clear_grid_layout(self.ui.gridLayout_kill_all)
+            self.tunnel_refresh()
+        except Exception as e:
+            util.logger.error(f"Failed to refresh tunnels: {e}")
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _on_add_tunnel_from_dialog(self):
+        """从对话框中打开添加隧道配置窗口。"""
+        try:
+            self.showAddSshTunnel()
+            self.tunnel_refresh()
+        except Exception as e:
+            util.logger.error(f"Failed to open add tunnel dialog: {e}")
+
+    def _ensure_nat_dialog(self):
+        """懒加载内网穿透对话框，复用原 NAT_traversal tab 的逻辑。"""
+        if self._nat_dialog is None:
+            from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                           QLabel, QLineEdit, QComboBox,
+                                           QPushButton, QFormLayout)
+            dlg = QDialog(self)
+            dlg.setWindowTitle(self.tr("内网穿透"))
+            dlg.setMinimumSize(500, 300)
+            dlg.setModal(False)
+            layout = QVBoxLayout(dlg)
+            form = QFormLayout()
+
+            combo = QComboBox(dlg)
+            line1 = QLineEdit(dlg)
+            line2 = QLineEdit(dlg)
+            line3 = QLineEdit(dlg)
+            combo3 = QComboBox(dlg)
+            combo3.addItems(["TCP", "UDP", "HTTP", "HTTPS", "STCP", "SUDP", "XTCP"])
+            combo3.setMinimumWidth(160)
+            combo3.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+            btn = QPushButton(self.tr("连接 / 停止"), dlg)
+
+            form.addRow(self.tr("设备："), combo)
+            form.addRow(self.tr("Token："), line1)
+            form.addRow(self.tr("本地端口："), line2)
+            form.addRow(self.tr("服务端口："), line3)
+            form.addRow(self.tr("协议类型："), combo3)
+            layout.addLayout(form)
+            layout.addWidget(btn)
+
+            self.ui.comboBox = combo
+            self.ui.lineEdit = line1
+            self.ui.lineEdit_2 = line2
+            self.ui.lineEdit_3 = line3
+            self.ui.comboBox_3 = combo3
+            self.ui.pushButton = btn
+
+            btn.clicked.connect(self.on_NAT_traversal)
+            self._nat_dialog = dlg
+
+            # 先填充设备列表，再加载已保存的配置
+            try:
+                self.nat_traversal()  # 填充 comboBox 设备列表
+            except Exception as e:
+                util.logger.warning(f"nat_traversal failed: {e}")
+            try:
+                self.NAT_lod()  # 加载上次保存的 frpc 配置
+            except Exception as e:
+                util.logger.warning(f"NAT_lod failed: {e}")
+        return self._nat_dialog
+
+    def showNATDialog(self):
+        dlg = self._ensure_nat_dialog()
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _ensure_process_manager_dialog(self):
+        """懒加载进程管理对话框。"""
+        if self._process_manager_dialog is None:
+            from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                           QLineEdit, QTableWidget, QPushButton)
+            dlg = QDialog(self)
+            dlg.setWindowTitle(self.tr("远程进程管理"))
+            dlg.setMinimumSize(800, 500)
+            dlg.setModal(False)
+            layout = QVBoxLayout(dlg)
+
+            search_box = QLineEdit(dlg)
+            search_box.setPlaceholderText(self.tr("搜索进程..."))
+            layout.addWidget(search_box)
+
+            result_table = QTableWidget(dlg)
+            layout.addWidget(result_table)
+
+            btn_layout = QHBoxLayout()
+            refresh_btn = QPushButton(self.tr("刷新进程列表"), dlg)
+            refresh_btn.clicked.connect(self.update_process_list)
+            btn_layout.addStretch()
+            btn_layout.addWidget(refresh_btn)
+            layout.addLayout(btn_layout)
+
+            self.ui.search_box = search_box
+            self.ui.result = result_table
+
+            self._process_manager_dialog = dlg
+            try:
+                self.processInitUI()
+            except Exception:
+                pass
+        return self._process_manager_dialog
+
+    def showProcessManagerDialog(self):
+        dlg = self._ensure_process_manager_dialog()
+        if self.isConnected:
+            try:
+                self.update_process_list()
+            except Exception:
+                pass
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _move_monitor_and_process_to_bottom_tabs(self):
+        """已废弃。原用于将监控和进程管理组件迁移到底部标签页。
+        现在由 setupLeftToolbar/setupToolDialogs 代替。
+        """
+        return  # 底部 tabWidget 已移除，此方法不再执行
 
     def on_NAT_traversal(self):
         device = self.ui.comboBox.currentText()
@@ -1366,17 +1492,25 @@ class MainDialog(QMainWindow):
             # 启动成功
             icon1 = QIcon()
             icon1.addFile(u":off.png", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
-            self.ui.pushButton.setIcon(icon1)
+            if hasattr(self.ui, 'pushButton'):
+                self.ui.pushButton.setIcon(icon1)
             self.NAT = True
-            self.NAT_lod()
+            try:
+                self.NAT_lod()
+            except Exception:
+                pass
             QMessageBox.information(self, self.tr("完成"), self.tr("FRP 内网穿透已成功启动！"))
         else:
             # 停止成功
             icon1 = QIcon()
             icon1.addFile(u":open.png", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
-            self.ui.pushButton.setIcon(icon1)
+            if hasattr(self.ui, 'pushButton'):
+                self.ui.pushButton.setIcon(icon1)
             self.NAT = False
-            self.NAT_lod()
+            try:
+                self.NAT_lod()
+            except Exception:
+                pass
 
     # 刷新内网穿透页面
     def NAT_lod(self):
@@ -1556,12 +1690,15 @@ class MainDialog(QMainWindow):
                     self.remove_last_line_edit()
                     self.ui.treeWidget.clear()
                     self.refreshConf()
+                    self.statusBar().hide()
+
                 else:
                     if self.ssh_clients:
                         ssh_conn.close_sig = 1
                         self.isConnected = True
                         self.refreshDirs()
                         self.processInitUI()
+                        self.statusBar().show()
             else:
                 if current_text == self.tr("首页"):
                     self.isConnected = False
@@ -1570,10 +1707,16 @@ class MainDialog(QMainWindow):
                     self.remove_last_line_edit()
                     self.ui.treeWidget.clear()
                     self.refreshConf()
+                    self.statusBar().hide()
 
         # 切换 Tab 时始终同步 AI 面板的终端绑定（不论 AI 面板是否可见），
         # 避免 AI 面板在隐藏后重新显示时 agent 仍指向旧 Tab 的终端。
         self._connect_ai_to_current_tab()
+
+        # 如果启用了跟随终端文件夹，切换 tab 时自动刷新
+        if hasattr(self.ui, 'follow_folder') and self.ui.follow_folder.isChecked():
+            if self.isConnected:
+                self.refreshDirs()
 
     def zoom_in(self):
         """增大字体 - 支持 QTermWidget"""
@@ -1625,6 +1768,9 @@ class MainDialog(QMainWindow):
 
     # 进程列表初始化
     def processInitUI(self):
+        # 如果进程管理对话框尚未初始化，跳过
+        if not hasattr(self.ui, 'result') or not hasattr(self.ui, 'search_box'):
+            return
         # 创建表格部件
         self.ui.result.setColumnCount(6)
         # 展示表头标签
@@ -1663,6 +1809,8 @@ class MainDialog(QMainWindow):
 
     def update_process_list(self):
         """更新进程列表 - 异步优化版"""
+        if not hasattr(self.ui, 'result') or not hasattr(self.ui, 'search_box'):
+            return
         ssh_conn = self.ssh()
         if not ssh_conn: return
 
@@ -1712,9 +1860,13 @@ class MainDialog(QMainWindow):
 
         self.all_processes = processes
         # 重新应用过滤并显示
+        if not hasattr(self.ui, 'search_box'):
+            return
         self.apply_filter(self.ui.search_box.text())
 
     def display_processes(self):
+        if not hasattr(self.ui, 'result'):
+            return
         # 设置列头
         headers = ["PID", self.tr("用户"), self.tr("内存"), "CPU", self.tr("端口"), self.tr("命令行")]
         if self.ui.result.columnCount() != len(headers):
@@ -1915,6 +2067,8 @@ class MainDialog(QMainWindow):
 
     # NAT穿透
     def nat_traversal(self):
+        if not hasattr(self.ui, 'comboBox'):
+            return
         icon_ssh = QIcon()
         icon_ssh.addFile(u":icons8-ssh-48.png", QSize(), QIcon.Mode.Selected, QIcon.State.On)
         with open(get_config_path('config.dat'), 'rb') as c:
@@ -2384,6 +2538,18 @@ class MainDialog(QMainWindow):
         # 清理 pending 状态
         self._pending_terminal = None
 
+        # 更新状态栏主机名和用户名，并确保状态栏可见
+        try:
+            self.statusBar().show()
+            if hasattr(self, '_status_hostname'):
+                host = getattr(ssh_conn, 'host', '') or getattr(ssh_conn, 'hostname', '')
+                self._status_hostname.setText(host or '—')
+            if hasattr(self, '_status_user'):
+                user = getattr(ssh_conn, 'username', '') or getattr(ssh_conn, 'user', '')
+                self._status_user.setText(user or '—')
+        except Exception:
+            pass
+
     def _auto_connect(self):
         """启动时自动连接（委托给 BastionClient）"""
         self.bastion_client.auto_connect(self._connection_info)
@@ -2407,9 +2573,12 @@ class MainDialog(QMainWindow):
             return
 
         self.isConnected = True
-        self.ui.discButton.setEnabled(True)
-        self.ui.result.setEnabled(True)
-        self.ui.theme.setEnabled(True)
+        if hasattr(self.ui, 'discButton'):
+            self.ui.discButton.setEnabled(True)
+        if hasattr(self.ui, 'result'):
+            self.ui.result.setEnabled(True)
+        if hasattr(self.ui, 'theme'):
+            self.ui.theme.setEnabled(True)
 
         self.refreshDirs()
         if getattr(ssh_conn, "is_local", False):
@@ -2597,17 +2766,29 @@ class MainDialog(QMainWindow):
         self.ui.treeWidget.setHeaderLabels([self.tr("设备列表")])
         self.remove_last_line_edit()
 
-        self.ui.treeWidgetDocker.clear()
-        self.ui.result.clear()
-        # 隐藏顶部的列头
-        self.ui.result.horizontalHeader().setVisible(False)
-        self.ui.result.setRowCount(0)  # 设置行数为零
+        if hasattr(self.ui, 'treeWidgetDocker'):
+            self.ui.treeWidgetDocker.clear()
+        if hasattr(self.ui, 'result'):
+            self.ui.result.clear()
+            # 隐藏顶部的列头
+            self.ui.result.horizontalHeader().setVisible(False)
+            self.ui.result.setRowCount(0)  # 设置行数为零
 
-        util.clear_grid_layout(self.ui.gridLayout_7)
+        try:
+            if hasattr(self.ui, 'gridLayout_7'):
+                util.clear_grid_layout(self.ui.gridLayout_7)
+        except RuntimeError:
+            pass  # C++ 对象已被回收，忽略
 
         self.ui.cpuRate.setValue(0)
         self.ui.diskRate.setValue(0)
         self.ui.memRate.setValue(0)
+
+        # 无活跃连接时隐藏状态栏
+        if not self.ssh_clients:
+            self.statusBar().hide()
+
+        # 重置左侧路径栏
 
         self.refreshConf()
 
@@ -2615,14 +2796,6 @@ class MainDialog(QMainWindow):
     def off(self, index, name):
         self._off(name)
         self._remove_tab_by_name(name)
-
-    # 关闭当前连接
-    def disc_off(self):
-        current_index = self.ui.ShellTab.currentIndex()
-        name = self.ui.ShellTab.tabText(current_index)
-        if name != self.tr("首页"):
-            self._off(name)
-            self._remove_tab_by_name(name)
 
     def send(self, data):
         """发送数据到终端 - 支持 QTermWidget"""
@@ -3904,6 +4077,54 @@ class MainDialog(QMainWindow):
                 else:
                     self.ui.kernel.setText(self.tr("无"))
 
+                # 更新底部状态栏
+                try:
+                    if hasattr(self, '_status_cpu'):
+                        self._status_cpu.setText(f"CPU: {cpu_use:.2f}%")
+                    if hasattr(self, '_status_mem'):
+                        mem_used_gb = getattr(ssh_conn, 'mem_used_gb', 0)
+                        mem_total_gb = getattr(ssh_conn, 'mem_total_gb', 0)
+                        if mem_total_gb:
+                            self._status_mem.setText(f"MEM: {mem_used_gb:.2f}/{mem_total_gb:.2f}GB")
+                        else:
+                            self._status_mem.setText(f"MEM: {mem_use:.2f}%")
+                    if hasattr(self, '_status_upload'):
+                        self._status_upload.setText(util.format_speed(transmit_speed))
+                    if hasattr(self, '_status_download'):
+                        self._status_download.setText(util.format_speed(receive_speed))
+                    if hasattr(self, '_status_uptime'):
+                        uptime_str = getattr(ssh_conn, 'uptime_str', '')
+                        if uptime_str:
+                            self._status_uptime.setText(uptime_str)
+                    if hasattr(self, '_status_disk'):
+                        partitions = getattr(ssh_conn, 'disk_partitions', [])
+                        # 优先显示真实物理分区，过滤 tmpfs/run等临时文件系统
+                        key_mounts = {'/', '/data', '/boot', '/home', '/var', '/tmp', '/opt'}
+                        real_parts = [
+                            p for p in partitions
+                            if p.get('mount_point') in key_mounts
+                               and not p.get('filesystem', '').startswith('tmpfs')
+                        ]
+                        if real_parts:
+                            disk_text = '  '.join(
+                                f"{p['mount_point']}: {int(p['usage_percent'])}%"
+                                for p in real_parts[:4]
+                            )
+                            self._status_disk.setText(disk_text)
+                        else:
+                            self._status_disk.setText(f"/: {dissk_use}%")
+                    os_text = system_info_dict.get('Operating System', '')
+                    if os_text and hasattr(self, '_status_hostname'):
+                        host = getattr(ssh_conn, 'host', '') or getattr(ssh_conn, 'hostname', '')
+                        if host and self._status_hostname.text() in ('\u2014', ''):
+                            self._status_hostname.setText(host)
+                    if hasattr(self, '_status_user'):
+                        user = getattr(ssh_conn, 'username', '') or getattr(ssh_conn, 'user', '')
+                        if user:
+                            self._status_user.setText(user)
+                except Exception:
+                    pass
+
         else:
             self.ui.cpuRate.setValue(0)
             self.ui.memRate.setValue(0)
@@ -3918,6 +4139,16 @@ class MainDialog(QMainWindow):
                     self.ui.networkDownloadSparkline.addPoint(0)
                 except Exception:
                     pass
+            # 重置底部状态栏
+            try:
+                if hasattr(self, '_status_cpu'):        self._status_cpu.setText("CPU: \u2014")
+                if hasattr(self, '_status_mem'):        self._status_mem.setText("MEM: \u2014")
+                if hasattr(self, '_status_upload'):     self._status_upload.setText("\u2014 Mb/s")
+                if hasattr(self, '_status_download'):   self._status_download.setText("\u2014 Mb/s")
+                if hasattr(self, '_status_uptime'):     self._status_uptime.setText("—")
+                if hasattr(self, '_status_disk'):       self._status_disk.setText("/: —%")
+            except Exception:
+                pass
 
     # 获取容器列表
     def compose_container_list(self):
@@ -4076,7 +4307,10 @@ class MainDialog(QMainWindow):
     # 刷新docker常用容器信息
     def refresh_docker_common_containers(self):
         if self.isConnected:
-            util.clear_grid_layout(self.ui.gridLayout_7)
+            try:
+                util.clear_grid_layout(self.ui.gridLayout_7)
+            except RuntimeError:
+                pass
 
             # 显示加载状态
             loading_label = QLabel("正在加载常用容器信息...")
@@ -4096,7 +4330,10 @@ class MainDialog(QMainWindow):
     def update_common_containers_ui(self, services_config, has_docker):
         """更新常用容器 UI"""
         ssh_conn = self.ssh()  # CustomWidget 需要 ssh_conn
-        util.clear_grid_layout(self.ui.gridLayout_7)
+        try:
+            util.clear_grid_layout(self.ui.gridLayout_7)
+        except RuntimeError:
+            pass
 
         if has_docker:
             # 每行最多四个小块 (原文是8，注释写每行最多四个但变量是8，保留原逻辑)

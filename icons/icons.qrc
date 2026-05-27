@@ -87,6 +87,9 @@
     <file>icons8-editorconfig-48.png</file>
     <file>icons8-eslintrc-48.png</file>
     <file>icons8-exec-48.png</file>
+    <file>icons8-container-48.png</file>
+    <file>icons8-nat-48.png</file>
+    <file>icons8-processor-48.png</file>
     <file>nginx_128.png</file>
     <file>postgresql_128.png</file>
     <file>nacos_128.png</file>

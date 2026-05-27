@@ -757,6 +757,23 @@ class SshClient(object):
                 # 磁盘监控
                 disk_stats = conn.get_disk_stats()
                 conn.disk_use = disk_stats['root_usage']
+                conn.disk_partitions = disk_stats.get('partitions', [])
+
+                # 运行时长
+                try:
+                    uptime_raw = conn.exec(cmd='cat /proc/uptime')
+                    secs = float(uptime_raw.split()[0])
+                    days = int(secs // 86400)
+                    hours = int((secs % 86400) // 3600)
+                    mins = int((secs % 3600) // 60)
+                    if days > 0:
+                        conn.uptime_str = f"{days}d {hours}h"
+                    elif hours > 0:
+                        conn.uptime_str = f"{hours}h {mins}m"
+                    else:
+                        conn.uptime_str = f"{mins}m"
+                except Exception:
+                    conn.uptime_str = ''
 
                 # 网络监控
                 network_stats = conn.get_network_stats()
