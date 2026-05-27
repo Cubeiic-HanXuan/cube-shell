@@ -34,8 +34,8 @@ nuitka --windows-console-mode=disable --windows-icon-from-ico=icons/logo.ico ^
   --include-data-dir=conf=conf ^
   --company-name=HanXuan ^
   --product-name="cubeShell" ^
-  --file-version=2.5.0.0 ^
-  --product-version=2.5.0 ^
+  --file-version=2.6.0.0 ^
+  --product-version=2.6.0 ^
   --file-description="A powerful shell application" ^
   cube-shell.py
 
@@ -53,8 +53,19 @@ robocopy "qtermwidget\kb-layouts" "deploy\cube-shell.dist\qtermwidget\kb-layouts
 robocopy "qtermwidget\translations" "deploy\cube-shell.dist\qtermwidget\translations" /E /NFL /NDL /NJH /NJS
 copy "qtermwidget\default.keytab" "deploy\cube-shell.dist\qtermwidget\"
 
-REM Step 5: Deploy using Inno Setup
-echo 5: Deploying using Inno Setup...
+REM Step 5: Self-signed code signing
+echo 5: Self-signed code signing...
+powershell -Command "if (-not (Get-ChildItem Cert:\CurrentUser\My | Where-Object {$_.Subject -eq 'CN=CubeShell'})) { New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=CubeShell' -CertStoreLocation Cert:\CurrentUser\My }"
+for /f "tokens=*" %%i in ('powershell -Command "(Get-ChildItem Cert:\CurrentUser\My | Where-Object {$_.Subject -eq 'CN=CubeShell'}).Thumbprint"') do set THUMBPRINT=%%i
+if defined THUMBPRINT (
+    signtool sign /fd SHA256 /sha1 %THUMBPRINT% /t http://timestamp.digicert.com "deploy\cube-shell.dist\cube-shell.exe"
+    echo    Signed successfully.
+) else (
+    echo    [Warning] Certificate not found, skipping signing.
+)
+
+REM Step 6: Deploy using Inno Setup
+echo 6: Deploying using Inno Setup...
 iscc installer.iss
 
 echo Done!

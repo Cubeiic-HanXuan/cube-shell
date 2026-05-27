@@ -47,7 +47,11 @@ cp qtermwidget/default.keytab cube-shell.app/Contents/MacOS
 echo "6: Registering URL schemes..."
 bash tools/register_url_scheme.sh cube-shell.app
 
-echo "7: create-dmg..."
+# Step 7: Ad-hoc codesign
+echo "7: Ad-hoc signing..."
+codesign -s - --force --deep cube-shell.app
+
+echo "8: create-dmg..."
 create-dmg --volname "Cube Shell" \
   --window-size 800 400 \
   --app-drop-link 400 200 \
