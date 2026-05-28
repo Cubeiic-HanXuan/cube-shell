@@ -78,7 +78,7 @@ def _register_windows(exe_path: str) -> bool:
 
         # 创建 jms 协议根键
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base_path) as key:
-            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "URL:JMS Protocol")
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "URL:CubeShell Protocol")
             winreg.SetValueEx(key, "URL Protocol", 0, winreg.REG_SZ, "")
 
         # 创建 DefaultIcon

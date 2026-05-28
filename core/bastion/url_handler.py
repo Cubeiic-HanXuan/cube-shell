@@ -132,7 +132,7 @@ def parse_jms_url(url):
         return None
 
     try:
-        without_scheme = url[6:]  # 去掉 'jms://'
+        without_scheme = url[6:].rstrip('/')  # 去掉 'jms://' 及浏览器自动追加的尾部斜线
 
         # 尝试 Base64 JSON 格式（v2）：payload 中不含 '?' 或 '/' 等 URL 特征字符
         if '?' not in without_scheme and '/' not in without_scheme:

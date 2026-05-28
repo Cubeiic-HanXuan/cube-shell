@@ -84,7 +84,7 @@ class SshClient(object):
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = 3
         self.reconnect_delay = 1  # 初始重连延迟（秒）
-        self.heartbeat_interval = 30  # 心跳间隔
+        self.heartbeat_interval = 10  # 心跳间隔
         self.lock = threading.RLock()  # 线程锁
         self.active = True  # 连接状态标志
         self._reconnecting = False  # 防抑制并发重连
@@ -95,6 +95,14 @@ class SshClient(object):
 
         # 是否已经加载过常用容器列表
         self.refresh_docker_common_containers_has_executed = False
+
+    @property
+    def is_jumpserver_proxy(self):
+        """判断是否为 JumpServer KoKo 代理连接。
+        KoKo 代理连接的 username 格式为 'JMS-{token}'，
+        此类连接不支持 exec_command()，只支持交互式 shell channel。
+        """
+        return bool(self.username and self.username.startswith('JMS-'))
 
     def _init_ssh_client(self):
         """初始化 SSH 客户端"""

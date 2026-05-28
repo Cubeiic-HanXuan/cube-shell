@@ -160,7 +160,7 @@ class DockerInfoThread(QThread):
 
                 # 获取该项目的容器列表
                 ps_cmd = f"docker compose --file {config} ps -a --format json 2>/dev/null"
-                conn_exec = self.ssh_conn.sudo_exec(ps_cmd)
+                conn_exec = self.ssh_conn.exec(ps_cmd)
 
                 if conn_exec and conn_exec.strip():
                     for line in conn_exec.strip().splitlines():
@@ -193,7 +193,7 @@ class DockerInfoThread(QThread):
 
         try:
             # 获取 compose 项目列表（使用 JSON 格式，更可靠）
-            ls = self.ssh_conn.sudo_exec("docker compose ls -a --format json 2>/dev/null")
+            ls = self.ssh_conn.exec("docker compose ls -a --format json 2>/dev/null")
             if ls and ls.strip():
                 try:
                     # docker compose ls --format json 输出是 JSON 数组
@@ -206,7 +206,7 @@ class DockerInfoThread(QThread):
 
                         # 获取该项目的容器列表（使用 JSON 格式）
                         ps_cmd = f"docker compose --file {config} ps -a --format json 2>/dev/null"
-                        conn_exec = self.ssh_conn.sudo_exec(ps_cmd)
+                        conn_exec = self.ssh_conn.exec(ps_cmd)
 
                         if conn_exec and conn_exec.strip():
                             # docker compose ps --format json 输出可能是每行一个 JSON 或 JSON 数组
@@ -239,7 +239,7 @@ class DockerInfoThread(QThread):
 
             # 1. 获取运行中的容器
             running_cmd = f"docker ps --format '{self.DOCKER_PS_FORMAT}' 2>/dev/null"
-            conn_exec = self.ssh_conn.sudo_exec(running_cmd)
+            conn_exec = self.ssh_conn.exec(running_cmd)
             if conn_exec:
                 for ps in conn_exec.strip().splitlines():
                     if ps.strip():
@@ -249,7 +249,7 @@ class DockerInfoThread(QThread):
 
             # 2. 获取已停止的容器
             exited_cmd = f"docker ps -f 'status=exited' -f 'status=created' -f 'status=dead' --format '{self.DOCKER_PS_FORMAT}' 2>/dev/null"
-            conn_exec = self.ssh_conn.sudo_exec(exited_cmd)
+            conn_exec = self.ssh_conn.exec(exited_cmd)
             if conn_exec:
                 for ps in conn_exec.strip().splitlines():
                     if ps.strip():
@@ -283,14 +283,15 @@ class CommonContainersThread(QThread):
             return
 
         try:
-            data_ = self.ssh_conn.sudo_exec('docker --version')
+            data_ = self.ssh_conn.exec('docker --version')
+
             if not data_:
                 self.data_ready.emit({}, False)
                 return
 
             # 优化：只获取容器名称，不需要全部 JSON 信息
             # 这样在容器数量多时也能快速返回
-            conn_exec = self.ssh_conn.sudo_exec("docker ps -a --format '{{.Names}}' 2>/dev/null")
+            conn_exec = self.ssh_conn.exec("docker ps -a --format '{{.Names}}' 2>/dev/null")
             container_names = []
             if conn_exec and conn_exec.strip():
                 container_names = [name.strip() for name in conn_exec.strip().splitlines() if name.strip()]
@@ -332,14 +333,14 @@ class DockerOperationThread(QThread):
             for container_id in self.container_ids:
                 cmd = f"docker {self.operation} {container_id}"
                 # 使用 sudo_exec 并等待命令完成
-                self.ssh_conn.sudo_exec(cmd)
+                self.ssh_conn.exec(cmd)
 
             # 操作完成后，获取被操作容器的最新状态和端口信息
             container_info = {}
             if self.operation != 'rm':
                 for container_id in self.container_ids:
                     # 查询容器最新状态和端口（使用 docker ps 格式，与列表一致）
-                    result = self.ssh_conn.sudo_exec(
+                    result = self.ssh_conn.exec(
                         f"docker ps -a --filter 'id={container_id}' --format '{{{{.State}}}}|||{{{{.Ports}}}}' 2>/dev/null"
                     )
                     state = ''
@@ -2430,7 +2431,7 @@ class MainDialog(QMainWindow):
         terminal.setShellProgram(shell_program)
         terminal.setArgs(shell_args)
         terminal.startShellProgram()
-        
+
         # 将本地后端对象注册进 ssh_clients：
         # - 复用 self.ssh() 取"当前 Tab 后端"的机制
         # - 复用 initSftp() / refreshDirs() 的目录刷新逻辑
@@ -2442,7 +2443,7 @@ class MainDialog(QMainWindow):
         self.ssh_clients[local_conn.id] = local_conn
         self.current_displayed_connection_id = local_conn.id
         self.initSftpSignal.emit()
-        
+
         # 连接 finished 信号 → 用户输入 exit 时自动关闭 tab
         tab_name = self.ui.ShellTab.tabText(current_index)
         terminal.finished.connect(
@@ -2566,6 +2567,11 @@ class MainDialog(QMainWindow):
         """认证成功回调 - 启动终端并初始化 SFTP"""
 
         current_index = self.ui.ShellTab.currentIndex()
+        if current_index < 0:
+            util.logger.error("on_ssh_connected: currentIndex < 0, cannot bindconnection")
+            self._release_connecting_state()
+            return
+
         ssh_conn.Shell = self.Shell
         self.ui.ShellTab.setTabWhatsThis(current_index, ssh_conn.id)
 
@@ -2636,7 +2642,17 @@ class MainDialog(QMainWindow):
         if getattr(ssh_conn, "is_local", False):
             return
 
-        self.processInitUI()
+        # self.processInitUI()
+
+        # JumpServer 代理连接不启动服务器监控（频繁 exec 会导致连接不稳定）
+        if getattr(ssh_conn, 'is_jumpserver_proxy', False):
+            # 隐藏底部状态栏中的监控项
+            for attr in ('_status_cpu', '_status_mem', '_status_upload',
+                         '_status_download', '_status_uptime', '_status_disk'):
+                widget = getattr(self, attr, None)
+                if widget:
+                    widget.hide()
+            return
 
         if not hasattr(ssh_conn, 'flush_sys_info_thread') or not ssh_conn.flush_sys_info_thread.is_alive():
             ssh_conn.flush_sys_info_thread = threading.Thread(target=ssh_conn.get_datas, args=(ssh_conn,), daemon=True)
@@ -2705,7 +2721,7 @@ class MainDialog(QMainWindow):
             focus = self.ui.treeWidget.currentIndex().row()
             if not getattr(ssh_conn, "_dir_tree_ready", False):
                 return
-            if not isinstance(getattr(self, "dir_tree_now", None), list):
+            if not isinstance(getattr(self, "dir_tree_now", []), list):
                 return
             if focus < 0 or focus >= len(self.dir_tree_now):
                 return
@@ -3596,10 +3612,6 @@ class MainDialog(QMainWindow):
         ssh_conn = self.ssh()
         if not ssh_conn:
             return
-        try:
-            ssh_conn._dir_tree_ready = False
-        except Exception:
-            pass
 
         # 1. 如果有缓存数据，且与当前目录一致，立即显示
         # 关键修正：只有当缓存的路径与当前连接的路径一致时才使用缓存，否则说明切换了目录，不应显示旧数据
@@ -3614,7 +3626,6 @@ class MainDialog(QMainWindow):
             pass
 
         # 2. 启动后台线程获取最新数据
-        # 检查线程是否存在并运行
         if not hasattr(ssh_conn, 'refresh_thread') or not ssh_conn.refresh_thread.is_alive():
             ssh_conn.refresh_thread = threading.Thread(target=self.refreshDirs_thread, args=(ssh_conn,), daemon=True)
             ssh_conn.refresh_thread.start()
@@ -4195,12 +4206,18 @@ class MainDialog(QMainWindow):
                     pass
             # 重置底部状态栏
             try:
-                if hasattr(self, '_status_cpu'):        self._status_cpu.setText("CPU: \u2014")
-                if hasattr(self, '_status_mem'):        self._status_mem.setText("MEM: \u2014")
-                if hasattr(self, '_status_upload'):     self._status_upload.setText("\u2014 Mb/s")
-                if hasattr(self, '_status_download'):   self._status_download.setText("\u2014 Mb/s")
-                if hasattr(self, '_status_uptime'):     self._status_uptime.setText("—")
-                if hasattr(self, '_status_disk'):       self._status_disk.setText("/: —%")
+                if hasattr(self, '_status_cpu'):
+                    self._status_cpu.setText("CPU: \u2014")
+                if hasattr(self, '_status_mem'):
+                    self._status_mem.setText("MEM: \u2014")
+                if hasattr(self, '_status_upload'):
+                    self._status_upload.setText("\u2014 Mb/s")
+                if hasattr(self, '_status_download'):
+                    self._status_download.setText("\u2014 Mb/s")
+                if hasattr(self, '_status_uptime'):
+                    self._status_uptime.setText("—")
+                if hasattr(self, '_status_disk'):
+                    self._status_disk.setText("/: —%")
             except Exception:
                 pass
 
@@ -4209,7 +4226,7 @@ class MainDialog(QMainWindow):
         ssh_conn = self.ssh()
         groups = defaultdict(list)
         # 获取 compose 项目和配置文件列表
-        ls = ssh_conn.sudo_exec("docker compose ls -a")
+        ls = ssh_conn.exec("docker compose ls -a")
         lines = ls.strip().splitlines()
 
         # 获取compose 项目下的所有容器
@@ -4220,7 +4237,7 @@ class MainDialog(QMainWindow):
             config = parts[-1]
             ps_cmd = f"docker compose --file {config} ps -a --format '{{{{json .}}}}'"
             # 执行docker compose ps
-            conn_exec = ssh_conn.sudo_exec(ps_cmd)
+            conn_exec = ssh_conn.exec(ps_cmd)
             container_list = []
             for ps in conn_exec.strip().splitlines():
                 if ps.strip():
@@ -4248,47 +4265,59 @@ class MainDialog(QMainWindow):
         return container_list
 
     def refreshDokerInfo(self):
-        if self.isConnected:
-            current_index = self.ui.ShellTab.currentIndex()
-            this = self.ui.ShellTab.tabWhatsThis(current_index)
-            if this:
-                self.ui.treeWidgetDocker.clear()
-                self.ui.treeWidgetDocker.headerItem().setText(0, self.tr("docker容器管理") + '：')
-                self.ui.treeWidgetDocker.setHeaderLabels(
-                    [self.tr("#"), self.tr("容器ID"), self.tr("容器"), self.tr("镜像"), self.tr("状态"),
-                     self.tr("创建时间"), self.tr("端口")
-                     ])
+        # 如果 Docker 对话框尚未创建，直接返回
+        if not hasattr(self.ui, 'treeWidgetDocker') or self.ui.treeWidgetDocker is None:
+            return
 
-                # 设置表头居中
-                header = self.ui.treeWidgetDocker.header()
-                header.setDefaultAlignment(Qt.AlignCenter)
-                # 允许表头拖动
-                header.setSectionsMovable(True)
-                # 允许调整列宽
-                header.setSectionResizeMode(QHeaderView.Interactive)
-
-                # 显示加载状态
-                loading_item = QTreeWidgetItem()
-                loading_item.setText(0, "正在加载 Docker 信息...")
-                self.ui.treeWidgetDocker.addTopLevelItem(loading_item)
-
-                # 启动后台线程
-                # 如果已有线程正在运行，先停止它（可选，或者忽略新请求）
-                # 这里选择忽略新请求如果正在加载
-                if hasattr(self, 'docker_thread') and self.docker_thread.isRunning():
-                    return
-
-                self.docker_thread = DockerInfoThread(self.ssh())
-                self.docker_thread.data_ready.connect(self.update_docker_ui)
-                # 关键修复：不要在 finished 信号中调用 deleteLater，因为线程可能还在处理事件循环
-                # 使用 cleanup_thread 仅解除引用，让 Python GC 处理（或者手动安全管理）
-                # self.docker_thread.finished.connect(lambda: self.cleanup_thread('docker_thread'))
-                self.docker_thread.start()
-
-        else:
+        if not self.isConnected:
             self.ui.treeWidgetDocker.clear()
             self.ui.treeWidgetDocker.addTopLevelItem(QTreeWidgetItem(0))
             self.ui.treeWidgetDocker.topLevelItem(0).setText(0, self.tr('没有可用的docker容器'))
+            return
+
+        ssh_conn = self.ssh()
+        if ssh_conn is None:
+            util.logger.warning("refreshDokerInfo: ssh() returned None, skip")
+            return
+
+        current_index = self.ui.ShellTab.currentIndex()
+        this = self.ui.ShellTab.tabWhatsThis(current_index)
+        if this:
+            self.ui.treeWidgetDocker.clear()
+            self.ui.treeWidgetDocker.headerItem().setText(0, self.tr("docker容器管理") + '：')
+            self.ui.treeWidgetDocker.setHeaderLabels(
+                [self.tr("#"), self.tr("容器ID"), self.tr("容器"), self.tr("镜像"), self.tr("状态"),
+                 self.tr("创建时间"), self.tr("端口")
+                 ])
+
+            # 设置表头居中
+            header = self.ui.treeWidgetDocker.header()
+            if header is None:
+                util.logger.warning("refreshDokerInfo: header() returned None, skip")
+                return
+            header.setDefaultAlignment(Qt.AlignCenter)
+            # 允许表头拖动
+            header.setSectionsMovable(True)
+            # 允许调整列宽
+            header.setSectionResizeMode(QHeaderView.Interactive)
+
+            # 显示加载状态
+            loading_item = QTreeWidgetItem()
+            loading_item.setText(0, "正在加载 Docker 信息...")
+            self.ui.treeWidgetDocker.addTopLevelItem(loading_item)
+
+            # 启动后台线程
+            # 如果已有线程正在运行，忽略新请求
+            try:
+                if hasattr(self, 'docker_thread') and self.docker_thread is not None and self.docker_thread.isRunning():
+                    return
+            except RuntimeError:
+                # C++ 对象已销毁，忽略旧线程引用
+                self.docker_thread = None
+
+            self.docker_thread = DockerInfoThread(ssh_conn)
+            self.docker_thread.data_ready.connect(self.update_docker_ui)
+            self.docker_thread.start()
 
     @Slot(dict, list)
     def update_docker_ui(self, groups, container_list):
@@ -4360,30 +4389,45 @@ class MainDialog(QMainWindow):
 
     # 刷新docker常用容器信息
     def refresh_docker_common_containers(self):
-        if self.isConnected:
-            try:
-                util.clear_grid_layout(self.ui.gridLayout_7)
-            except RuntimeError:
-                pass
+        if not self.isConnected:
+            return
 
-            # 显示加载状态
-            loading_label = QLabel("正在加载常用容器信息...")
-            loading_label.setAlignment(Qt.AlignCenter)
-            loading_label.setStyleSheet("font-size: 16px; color: #666;")
-            self.ui.gridLayout_7.addWidget(loading_label)
+        ssh_conn = self.ssh()
+        if ssh_conn is None:
+            util.logger.warning("refresh_docker_common_containers: ssh() returned None, skip")
+            return
 
-            if hasattr(self, 'common_docker_thread') and self.common_docker_thread.isRunning():
+        try:
+            util.clear_grid_layout(self.ui.gridLayout_7)
+        except RuntimeError:
+            pass
+
+        # 显示加载状态
+        loading_label = QLabel("正在加载常用容器信息...")
+        loading_label.setAlignment(Qt.AlignCenter)
+        loading_label.setStyleSheet("font-size: 16px; color: #666;")
+        self.ui.gridLayout_7.addWidget(loading_label)
+
+        try:
+            if hasattr(self,
+                       'common_docker_thread') and self.common_docker_thread is not None and self.common_docker_thread.isRunning():
                 return
+        except RuntimeError:
+            # C++ 对象已销毁，忽略旧线程引用
+            self.common_docker_thread = None
 
-            config_path = abspath('docker-compose-full.yml')
-            self.common_docker_thread = CommonContainersThread(self.ssh(), config_path)
-            self.common_docker_thread.data_ready.connect(self.update_common_containers_ui)
-            self.common_docker_thread.start()
+        config_path = abspath('docker-compose-full.yml')
+        self.common_docker_thread = CommonContainersThread(ssh_conn, config_path)
+        self.common_docker_thread.data_ready.connect(self.update_common_containers_ui)
+        self.common_docker_thread.start()
 
     @Slot(dict, bool)
     def update_common_containers_ui(self, services_config, has_docker):
         """更新常用容器 UI"""
         ssh_conn = self.ssh()  # CustomWidget 需要 ssh_conn
+        if ssh_conn is None:
+            util.logger.warning("update_common_containers_ui: ssh() returned None, skip UI update")
+            return
         try:
             util.clear_grid_layout(self.ui.gridLayout_7)
         except RuntimeError:
@@ -8038,6 +8082,13 @@ if __name__ == '__main__':
         os.environ['QT_SCALE_FACTOR_ROUNDING_POLICY'] = 'PassThrough'
 
     app = CubeShellApp([sys.argv[0]] + remaining)
+
+    # ARM 平台 shiboken6 None 引用计数保护（防止 SIGSEGV 崩溃）
+    # try:
+    #     from core.shiboken_heal import install_global_heal
+    #     install_global_heal(app)
+    # except Exception as _heal_err:
+    #     print(f"[shiboken_heal] Failed to install: {_heal_err}")
 
     # 注册事件过滤器（比 event() 覆盖更可靠，兼容 Nuitka 编译）
     url_filter = create_url_event_filter(app)
