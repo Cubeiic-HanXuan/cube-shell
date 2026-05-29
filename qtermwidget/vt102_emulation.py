@@ -1166,6 +1166,8 @@ class Vt102Emulation(Emulation):
             target_mode = MODE_Mouse1015
         elif mode_num == 1047:
             target_mode = MODE_AppScreen
+        elif mode_num == 2004:
+            target_mode = MODE_BracketedPaste
 
         # 特殊处理
         if mode_num == 1048:

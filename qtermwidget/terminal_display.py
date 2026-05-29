@@ -3058,7 +3058,7 @@ class TerminalDisplay(QWidget):
             if not self._multiline_confirmation(text):
                 return
 
-        self._bracket_text(text)
+        text = self._bracket_text(text)
 
         if append_return:
             text += '\r'
