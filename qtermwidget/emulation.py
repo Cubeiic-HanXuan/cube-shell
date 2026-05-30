@@ -508,13 +508,20 @@ class Emulation(QObject, ABC, metaclass=QABCMeta):
         return QSize(self._currentScreen.getColumns(), self._currentScreen.getLines())
 
     @Slot(KeyboardCursorShape, bool)
-    def _onCursorChanged(self, cursorShape: KeyboardCursorShape, blinkingEnabled: bool):
+    def _onCursorChanged(self, cursorShape, blinkingEnabled: bool):
         """
         处理光标变化事件
         对应C++中的connect lambda
         """
+        # 兼容处理：支持 KeyboardCursorShape 枚举或 int 类型
+        if isinstance(cursorShape, KeyboardCursorShape):
+            shape_value = cursorShape.value
+        else:
+            # 如果传入的是 int，直接使用
+            shape_value = cursorShape
+        
         # 发射带有光标信息的标题变化信号
-        titleText = f"CursorShape={cursorShape.value};BlinkingCursorEnabled={blinkingEnabled}"
+        titleText = f"CursorShape={shape_value};BlinkingCursorEnabled={blinkingEnabled}"
         self.titleChanged.emit(50, titleText)
 
     # 抽象方法，子类必须实现 - 对应C++的纯虚函数

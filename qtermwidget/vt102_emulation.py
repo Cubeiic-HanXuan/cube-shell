@@ -16,7 +16,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QKeyEvent
 
-from qtermwidget.emulation import Emulation
+from qtermwidget.emulation import Emulation, KeyboardCursorShape
 from qtermwidget.keyboard_translator import CTRL_MOD
 from qtermwidget.screen import MODES_SCREEN, MODE_NewLine, MODE_Insert, MODE_Cursor
 
@@ -1219,7 +1219,7 @@ class Vt102Emulation(Emulation):
                 shape = 2
                 blinking = False
 
-            self.cursorChanged.emit(shape, blinking)
+            self.cursorChanged.emit(KeyboardCursorShape(shape), blinking)
 
     def _process_vt52(self, ch: int, p: int, q: int):
         """处理 VT52 序列"""
