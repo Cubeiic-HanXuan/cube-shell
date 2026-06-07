@@ -143,45 +143,6 @@ class DockerInfoThread(QThread):
             }
         return None
 
-    def _parse_compose_table_format(self, ls_output, groups, compose_container_ids):
-        """回退方案：解析 docker compose ls 的表格输出"""
-        lines = ls_output.strip().splitlines()
-        for compose_ls in lines[1:]:  # 跳过表头
-            # 解析格式: NAME  STATUS  CONFIG FILES
-            # 使用正则分割多个空格
-            parts = compose_ls.split()
-            if len(parts) >= 3:
-                # 最后一个部分是配置文件路径
-                config = parts[-1]
-                project_name = parts[0]
-
-                if not config.endswith('.yml') and not config.endswith('.yaml'):
-                    continue
-
-                # 获取该项目的容器列表
-                ps_cmd = f"docker compose --file {config} ps -a --format json 2>/dev/null"
-                conn_exec = self.ssh_conn.exec(ps_cmd)
-
-                if conn_exec and conn_exec.strip():
-                    for line in conn_exec.strip().splitlines():
-                        if line.strip():
-                            try:
-                                container = json.loads(line)
-                                data = {
-                                    'ID': container.get('ID', ''),
-                                    'Name': container.get('Name', ''),
-                                    'Image': container.get('Image', ''),
-                                    'State': container.get('State', ''),
-                                    'CreatedAt': container.get('CreatedAt', ''),
-                                    'Ports': container.get('Ports', ''),
-                                    'Project': container.get('Project', project_name)
-                                }
-                                if data['ID']:
-                                    compose_container_ids.add(data['ID'])
-                                    groups[data['Project']].append(data)
-                            except json.JSONDecodeError:
-                                pass
-
     def run(self):
         if not self.ssh_conn or not self.ssh_conn.active:
             self.data_ready.emit({}, [])
@@ -231,7 +192,6 @@ class DockerInfoThread(QThread):
                 except json.JSONDecodeError:
                     # JSON 解析失败，可能是旧版 docker compose，回退到表格解析
                     util.logger.warning("docker compose ls JSON parse failed, falling back to table parsing")
-                    self._parse_compose_table_format(ls, groups, compose_container_ids)
 
             # 获取所有独立容器（使用表格格式提升性能）
             # 分两次获取：运行中 + 已停止，比直接 -a 更快
@@ -1123,6 +1083,7 @@ class MainDialog(QMainWindow):
         _add_action(":icons8-nat-48.png", self.tr("内网穿透"), self.tr("内网穿透设置"), self.showNATDialog)
         _add_action(":icons8-processor-48.png", self.tr("进程管理"), self.tr("远程进程管理"),
                     self.showProcessManagerDialog)
+        _add_action(":icons8-hermes-48.png", self.tr("hermes"), self.tr("hermes"), self.showHermesPanel)
         # toolbar.addSeparator()
         # _add_action(":Settings-4.png", self.tr("切换主题"), self.tr("切换亮色/暗色主题"), self.theme)
 
@@ -1384,6 +1345,62 @@ class MainDialog(QMainWindow):
             except Exception as e:
                 util.logger.warning(f"NAT_lod failed: {e}")
         return self._nat_dialog
+
+    def showHermesPanel(self):
+        """在 ShellTab 中打开 Hermes Agent 管理面板"""
+        # 检查是否已有 Hermes tab 打开，如果有则切换到它
+        for i in range(self.ui.ShellTab.count()):
+            if self.ui.ShellTab.tabText(i) == "Hermes Agent":
+                self.ui.ShellTab.setCurrentIndex(i)
+                return
+
+        # 创建新的 Hermes 面板 Tab
+        from core.hermes.hermes_panel import HermesPanel
+        panel = HermesPanel(main_dialog=self)
+
+        tab_name = "Hermes Agent"
+        tab_index = self.ui.ShellTab.addTab(panel, tab_name)
+        self.ui.ShellTab.setCurrentIndex(tab_index)
+
+        # 添加关闭按钮
+        if tab_index > 0:
+            from PySide6.QtWidgets import QTabBar
+            tab_bar = self.ui.ShellTab.tabBar()
+            close_button = TabCloseButton(self, tab_bar=tab_bar)
+            close_button.clicked.connect(lambda: self._close_hermes_tab(tab_index, tab_name))
+            tab_bar.setTabButton(tab_index, QTabBar.LeftSide, close_button)
+
+    def _close_hermes_tab(self, index, name):
+        """关闭 Hermes 管理面板 Tab"""
+        # 通过名称查找真实 index（因为其他 tab 可能被关闭导致 index 变化）
+        for i in range(self.ui.ShellTab.count()):
+            if self.ui.ShellTab.tabText(i) == name:
+                widget = self.ui.ShellTab.widget(i)
+                self.ui.ShellTab.removeTab(i)
+                if widget:
+                    widget.deleteLater()
+                return
+
+    def open_agent_terminal(self, profile_name):
+        """从 Agent 管理界面打开关联的终端，自动切换到指定 Profile"""
+        try:
+            # 创建新终端 Tab
+            tab_index, terminal = self.add_new_tab(name=f"hermes:{profile_name}")
+            if tab_index == -1:
+                return None
+
+            # 启动本机终端连接
+            self._connect_local_with_qtermwidget(terminal, f"hermes:{profile_name}")
+
+            # 终端启动后发送 Profile 切换命令
+            # 使用 QTimer 延迟发送，确保 shell 已就绪
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(500, lambda: terminal.sendText(f"hermes -p {profile_name} chat\n"))
+
+            return tab_index
+        except Exception as e:
+            logger.error(f"打开 Agent 终端失败: {e}")
+            return None
 
     def showNATDialog(self):
         dlg = self._ensure_nat_dialog()
