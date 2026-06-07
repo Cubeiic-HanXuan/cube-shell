@@ -1007,7 +1007,7 @@ class MainDialog(QMainWindow):
         self.setupToolDialogs()
 
         # 堡垒机连接客户端
-        from core.bastion.bastion_client import BastionClient
+        from core.url_dispatch.bastion_client import BastionClient
         self.bastion_client = BastionClient(self)
 
         # 如果有命令行传入的连接信息，延迟自动连接
@@ -2179,6 +2179,14 @@ class MainDialog(QMainWindow):
         language_action.setStatusTip(self.tr("设置应用程序语言"))
         setting_menu.addAction(language_action)
         language_action.triggered.connect(self.show_language_settings)
+
+        # Finder 右键菜单集成（仅 macOS）
+        import platform
+        if platform.system() == 'Darwin':
+            finder_action = QAction(self.tr("Finder 右键菜单集成"), self)
+            finder_action.setStatusTip(self.tr("安装或卸载 Finder 右键菜单快速操作"))
+            setting_menu.addAction(finder_action)
+            finder_action.triggered.connect(self.show_finder_integration)
         #
         # 创建"重做"动作
         # docker_action = QAction(QIcon(":redo.png"), "&容器编排", self)
@@ -2253,6 +2261,118 @@ class MainDialog(QMainWindow):
                 except Exception as e:
                     util.logger.error(f"保存语言设置失败: {e}")
                     QMessageBox.warning(self, self.tr("错误"), f"保存语言设置失败: {e}")
+
+    def show_finder_integration(self):
+        """显示 Finder 右键菜单集成设置对话框"""
+        from core.finder_integration import is_supported, is_installed
+
+        if not is_supported():
+            return
+
+        installed = is_installed()
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self.tr("Finder 右键菜单集成"))
+        dialog.setModal(True)
+        dialog.setFixedWidth(450)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+
+        # 标题
+        title = QLabel(self.tr("Finder 右键菜单集成"))
+        title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        layout.addWidget(title)
+
+        # 说明
+        desc = QLabel(self.tr("安装后，你可以在 Finder 中右键点击文件夹，\n选择「快速操作 → 在 CubeShell 中打开终端」\n即可在当前窗口新建该目录的本地终端 Tab。"))
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        # 当前状态
+        status_label = QLabel()
+        if installed:
+            status_label.setText(self.tr("● 当前状态：已安装"))
+            status_label.setStyleSheet("color: green; font-weight: bold;")
+        else:
+            status_label.setText(self.tr("● 当前状态：未安装"))
+            status_label.setStyleSheet("color: gray; font-weight: bold;")
+        layout.addWidget(status_label)
+
+        # 按钮区域
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        if installed:
+            uninstall_btn = QPushButton(self.tr("卸载"))
+            uninstall_btn.clicked.connect(lambda: self._uninstall_finder_action(dialog))
+            btn_layout.addWidget(uninstall_btn)
+        else:
+            install_btn = QPushButton(self.tr("安装"))
+            install_btn.setDefault(True)
+            install_btn.clicked.connect(lambda: self._install_finder_action(dialog))
+            btn_layout.addWidget(install_btn)
+
+        close_btn = QPushButton(self.tr("关闭"))
+        close_btn.clicked.connect(dialog.accept)
+        btn_layout.addWidget(close_btn)
+
+        layout.addStretch()
+        layout.addLayout(btn_layout)
+
+        dialog.exec()
+
+    def _install_finder_action(self, dialog):
+        """安装 Finder 快速操作 workflow"""
+        from core.finder_integration import install
+
+        success, error = install()
+        if success:
+            QMessageBox.information(
+                dialog,
+                self.tr("安装成功"),
+                self.tr("Finder 右键菜单已安装！\n\n"
+                        "现在你可以在 Finder 中右键点击文件夹，\n"
+                        "选择「快速操作 → 在 CubeShell 中打开终端」。\n\n"
+                        "提示：如果右键菜单中未显示，请在\n"
+                        "「系统设置 → 键盘 → 快捷键 → 服务」中确认已启用。")
+            )
+            dialog.accept()
+        else:
+            QMessageBox.critical(
+                dialog,
+                self.tr("安装失败"),
+                self.tr("安装过程中出现错误：") + f"\n{error}"
+            )
+
+    def _uninstall_finder_action(self, dialog):
+        """卸载 Finder 快速操作 workflow"""
+        from core.finder_integration import uninstall
+
+        reply = QMessageBox.question(
+            dialog,
+            self.tr("确认卸载"),
+            self.tr("确定要卸载 Finder 右键菜单集成吗？"),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            success, error = uninstall()
+            if success:
+                QMessageBox.information(
+                    dialog,
+                    self.tr("卸载成功"),
+                    self.tr("Finder 右键菜单已卸载。")
+                )
+                dialog.accept()
+            else:
+                QMessageBox.critical(
+                    dialog,
+                    self.tr("卸载失败"),
+                    self.tr("卸载过程中出现错误：") + f"\n{error}"
+                )
 
     # linux 常用命令
     def linux(self):
@@ -2630,7 +2750,13 @@ class MainDialog(QMainWindow):
         self.bastion_client.auto_connect(self._connection_info)
 
     def handle_open_url(self, url):
-        """处理 URL Scheme 打开事件（委托给 BastionClient）"""
+        """处理 URL Scheme 打开事件（委托给 BastionClient 或处理 cubeshell:// 协议）"""
+        if url.startswith('cubeshell://'):
+            from core.url_dispatch.url_handler import parse_cubeshell_url
+            connection_info = parse_cubeshell_url(url)
+            if connection_info and connection_info.get('scheme') == 'cubeshell' and connection_info.get('action') == 'open-local':
+                self.open_local_terminal_at_path(connection_info['path'])
+            return
         self.bastion_client.handle_url(url)
 
     @Slot(str, str)  # 将其标记为槽
@@ -3236,6 +3362,22 @@ class MainDialog(QMainWindow):
             self.processInitUI()
         except Exception as e:
             util.logger.error(f"新建本机终端失败: {e}")
+
+    def open_local_terminal_at_path(self, path):
+        """通过 cubeshell://open-local URL Scheme 打开指定目录的本地终端"""
+        import os
+        if not os.path.isdir(path):
+            logger.warning(f"open_local_terminal_at_path: 目录不存在: {path}")
+            return
+        base = os.path.basename(path) or path
+        tab_name = f"{self.tr('本机终端')} - {base}"
+        tab_index, terminal = self.add_new_tab(tab_name)
+        if tab_index < 0 or not terminal:
+            return
+        try:
+            self._connect_local_with_qtermwidget(terminal, tab_name, start_dir=path)
+        except Exception as e:
+            util.logger.error(f"open_local_terminal_at_path 失败: {e}")
 
     def show_file_in_explorer(self):
         """在文件资源管理器中显示选中的文件或目录"""
@@ -8061,9 +8203,9 @@ class CubeShellApp(QApplication):
 
 
 if __name__ == '__main__':
-    from core.bastion.url_handler import parse_arguments, resolve_connection_info
-    from core.bastion.bastion_client import create_url_event_filter, scan_argv_for_url, setup_deferred_url_check
-    from core.bastion.url_scheme_register import ensure_registered
+    from core.url_dispatch.url_handler import parse_arguments, resolve_connection_info
+    from core.url_dispatch.bastion_client import create_url_event_filter, scan_argv_for_url, setup_deferred_url_check
+    from core.url_dispatch.url_scheme_register import ensure_registered
 
     # 首次启动时自动注册 jms:// URL Scheme（静默执行，不影响启动）
     ensure_registered()
@@ -8080,7 +8222,7 @@ if __name__ == '__main__':
         connection_info = scan_argv_for_url([remaining[0]] + remaining)
         # 从 remaining 中移除已识别的 URL，避免传给 QApplication
         if connection_info:
-            remaining = [r for r in remaining if not (r.startswith('jms://') or r.startswith('ssh://'))]
+            remaining = [r for r in remaining if not (r.startswith('jms://') or r.startswith('ssh://') or r.startswith('cubeshell://'))]
 
     # 如果 argparse 和 remaining 都没解析到，尝试从 sys.argv 直接查找
     if not connection_info:
@@ -8140,6 +8282,11 @@ if __name__ == '__main__':
     window.refreshConf()
 
     # 处理启动时通过 URL Scheme 传入的待处理 URL
-    setup_deferred_url_check(app, window, connection_info)
+    if isinstance(connection_info, dict) and connection_info.get('scheme') == 'cubeshell' and connection_info.get('action') == 'open-local':
+        # cubeshell://open-local 延迟到窗口完全加载后再打开终端 Tab
+        _cubeshell_path = connection_info['path']
+        QTimer.singleShot(0, lambda: window.open_local_terminal_at_path(_cubeshell_path))
+    else:
+        setup_deferred_url_check(app, window, connection_info)
 
     sys.exit(app.exec())

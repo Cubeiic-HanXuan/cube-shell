@@ -13,7 +13,7 @@ import time
 
 from PySide6.QtCore import QTimer, QObject, QEvent
 
-from core.bastion.url_handler import parse_jms_url, parse_ssh_url
+from core.url_dispatch.url_handler import parse_jms_url, parse_ssh_url, parse_cubeshell_url
 from function import util
 
 
@@ -45,7 +45,7 @@ class UrlEventFilter(QObject):
 
             print(f"[UrlEventFilter] FileOpen intercepted, URL: {url[:80] if url else 'EMPTY'}...")
 
-            if url and (url.startswith('jms://') or url.startswith('ssh://')):
+            if url and (url.startswith('jms://') or url.startswith('ssh://') or url.startswith('cubeshell://')):
                 if hasattr(self._app, 'main_window') and self._app.main_window:
                     print(f"[UrlEventFilter] Dispatching to handle_open_url")
                     self._app.main_window.handle_open_url(url)
@@ -72,21 +72,25 @@ def scan_argv_for_url(argv):
     3. macOS .app 传递的 -url 参数
     """
     for i, arg in enumerate(argv[1:], start=1):
-        if arg.startswith('jms://') or arg.startswith('ssh://'):
+        if arg.startswith('jms://') or arg.startswith('ssh://') or arg.startswith('cubeshell://'):
             print(f"[BastionClient] Found URL in argv: {arg[:50]}...")
             if arg.startswith('jms://'):
                 return parse_jms_url(arg)
             elif arg.startswith('ssh://'):
                 return parse_ssh_url(arg)
+            elif arg.startswith('cubeshell://'):
+                return parse_cubeshell_url(arg)
         # 处理 -url flag 格式
         if arg == '-url' and i + 1 < len(argv):
             url_val = argv[i + 1]
-            if url_val.startswith('jms://') or url_val.startswith('ssh://'):
+            if url_val.startswith('jms://') or url_val.startswith('ssh://') or url_val.startswith('cubeshell://'):
                 print(f"[BastionClient] Found URL via -url flag: {url_val[:50]}...")
                 if url_val.startswith('jms://'):
                     return parse_jms_url(url_val)
                 elif url_val.startswith('ssh://'):
                     return parse_ssh_url(url_val)
+                elif url_val.startswith('cubeshell://'):
+                    return parse_cubeshell_url(url_val)
     return None
 
 

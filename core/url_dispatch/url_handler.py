@@ -5,6 +5,7 @@ JumpServer URL Scheme 处理模块
 import argparse
 import base64
 import json
+import os
 import urllib.parse
 import logging
 
@@ -208,6 +209,63 @@ def parse_ssh_url(url):
         return None
 
 
+def parse_cubeshell_url(url_string):
+    """
+    解析 cubeshell:// 协议 URL
+
+    格式示例：
+      cubeshell://open-local?path=/path/to/folder
+
+    返回字典：
+    {
+        'scheme': 'cubeshell',
+        'action': str,       # e.g. 'open-local'
+        'path': str,         # URL decoded 路径
+    }
+
+    如果 path 参数缺失、路径不存在或不是目录，返回 None。
+    """
+    if not url_string or not url_string.startswith('cubeshell://'):
+        return None
+
+    try:
+        parsed = urllib.parse.urlparse(url_string)
+        action = parsed.netloc  # e.g. 'open-local'
+
+        # 解析 query string 获取 path 参数
+        params = urllib.parse.parse_qs(parsed.query)
+        path_list = params.get('path')
+
+        if not path_list or not path_list[0]:
+            logger.warning(f"Missing 'path' parameter in cubeshell URL: {url_string}")
+            return None
+
+        path = urllib.parse.unquote(path_list[0])
+
+        # 验证路径存在且为目录
+        if not os.path.exists(path):
+            logger.warning(f"Path does not exist: {path}")
+            return None
+
+        if not os.path.isdir(path):
+            logger.warning(f"Path is not a directory: {path}")
+            return None
+
+        result = {
+            'scheme': 'cubeshell',
+            'action': action,
+            'path': path,
+        }
+
+        logger.info(f"Parsed cubeshell URL: action={action}, path={path}")
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Failed to parse cubeshell URL '{url_string}': {e}")
+        return None
+
+
 def resolve_connection_info(args):
     """
     从命令行参数中解析出最终的 connection_info
@@ -223,6 +281,8 @@ def resolve_connection_info(args):
             return parse_jms_url(url)
         elif url.startswith('ssh://'):
             return parse_ssh_url(url)
+        elif url.startswith('cubeshell://'):
+            return parse_cubeshell_url(url)
         else:
             logger.warning(f"Unsupported URL scheme: {url}")
             return None

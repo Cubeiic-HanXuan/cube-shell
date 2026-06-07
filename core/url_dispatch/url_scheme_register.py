@@ -1,9 +1,9 @@
 """
 URL Scheme 自动注册模块
 
-首次启动时自动注册 jms:// URL Scheme，让浏览器点击 jms:// 链接能唤起 CubeShell。
+首次启动时自动注册 jms:// 和 cubeshell:// URL Scheme，让浏览器点击链接能唤起 CubeShell。
 - macOS: 由 Info.plist 处理，此模块不做额外操作
-- Windows: 写入 HKCU\\Software\\Classes\\jms 注册表
+- Windows: 写入 HKCU\\Software\\Classes\\jms 和 HKCU\\Software\\Classes\\cubeshell 注册表
 - Linux: 创建 .desktop 文件 + xdg-mime 注册
 """
 
@@ -23,21 +23,24 @@ def _get_exe_path() -> str:
 
 
 def _is_registered_windows() -> bool:
-    """检查 Windows 下 jms:// URL Scheme 是否已正确注册"""
+    """检查 Windows 下 jms:// 和 cubeshell:// URL Scheme 是否已正确注册"""
     try:
         import winreg
-        key_path = r"Software\Classes\jms\shell\open\command"
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
-            value, _ = winreg.QueryValueEx(key, "")
-            exe_path = _get_exe_path()
-            # 注册表中的命令格式为 "exe_path" "%1"
-            return exe_path.lower() in value.lower()
+        exe_path = _get_exe_path()
+        for scheme in ("jms", "cubeshell"):
+            key_path = rf"Software\Classes\{scheme}\shell\open\command"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+                value, _ = winreg.QueryValueEx(key, "")
+                # 注册表中的命令格式为 "exe_path" "%1"
+                if exe_path.lower() not in value.lower():
+                    return False
+        return True
     except (FileNotFoundError, OSError, ImportError):
         return False
 
 
 def _is_registered_linux() -> bool:
-    """检查 Linux 下 jms:// URL Scheme 是否已正确注册"""
+    """检查 Linux 下 jms:// 和 cubeshell:// URL Scheme 是否已正确注册"""
     desktop_path = os.path.expanduser(
         "~/.local/share/applications/cube-shell-url-handler.desktop"
     )
@@ -47,7 +50,8 @@ def _is_registered_linux() -> bool:
         with open(desktop_path, "r", encoding="utf-8") as f:
             content = f.read()
         exe_path = _get_exe_path()
-        return exe_path in content
+        # 同时检查 exe 路径和 cubeshell scheme 是否已注册
+        return exe_path in content and "x-scheme-handler/cubeshell" in content
     except (IOError, OSError):
         return False
 
@@ -69,16 +73,16 @@ def is_registered() -> bool:
     return False
 
 
-def _register_windows(exe_path: str) -> bool:
-    """Windows 平台注册 jms:// URL Scheme 到当前用户注册表"""
+def _register_windows_scheme(exe_path: str, scheme: str, description: str) -> bool:
+    """Windows 平台注册单个 URL Scheme 到当前用户注册表"""
     try:
         import winreg
 
-        base_path = r"Software\Classes\jms"
+        base_path = rf"Software\Classes\{scheme}"
 
-        # 创建 jms 协议根键
+        # 创建协议根键
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base_path) as key:
-            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "URL:CubeShell Protocol")
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f"URL:{description}")
             winreg.SetValueEx(key, "URL Protocol", 0, winreg.REG_SZ, "")
 
         # 创建 DefaultIcon
@@ -94,8 +98,15 @@ def _register_windows(exe_path: str) -> bool:
         return False
 
 
+def _register_windows(exe_path: str) -> bool:
+    """Windows 平台注册 jms:// 和 cubeshell:// URL Scheme 到当前用户注册表"""
+    success_jms = _register_windows_scheme(exe_path, "jms", "CubeShell JMS Protocol")
+    success_cubeshell = _register_windows_scheme(exe_path, "cubeshell", "CubeShell Local Terminal")
+    return success_jms and success_cubeshell
+
+
 def _register_linux(exe_path: str) -> bool:
-    """Linux 平台注册 jms:// URL Scheme 通过 .desktop 文件"""
+    """Linux 平台注册 jms:// 和 cubeshell:// URL Scheme 通过 .desktop 文件"""
     try:
         applications_dir = os.path.expanduser("~/.local/share/applications")
         os.makedirs(applications_dir, exist_ok=True)
@@ -104,12 +115,12 @@ def _register_linux(exe_path: str) -> bool:
 
         desktop_content = f"""[Desktop Entry]
 Name=CubeShell URL Handler
-Comment=Handle jms:// URLs for CubeShell
+Comment=Handle jms:// and cubeshell:// URLs for CubeShell
 Exec={exe_path} %u
 Terminal=false
 Type=Application
 NoDisplay=true
-MimeType=x-scheme-handler/jms;
+MimeType=x-scheme-handler/jms;x-scheme-handler/cubeshell;
 Categories=Network;
 """
 
@@ -119,6 +130,14 @@ Categories=Network;
         # 注册为 jms:// 协议的默认处理程序
         subprocess.run(
             ["xdg-mime", "default", "cube-shell-url-handler.desktop", "x-scheme-handler/jms"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        # 注册为 cubeshell:// 协议的默认处理程序
+        subprocess.run(
+            ["xdg-mime", "default", "cube-shell-url-handler.desktop", "x-scheme-handler/cubeshell"],
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -139,7 +158,7 @@ Categories=Network;
 
 def register(exe_path: str = None) -> bool:
     """
-    注册 jms:// URL Scheme。
+    注册 jms:// 和 cubeshell:// URL Scheme。
 
     Args:
         exe_path: 可执行文件路径，为 None 时自动获取
@@ -164,7 +183,7 @@ def ensure_registered() -> None:
     """
     主入口函数，应用启动时调用。
 
-    检查 jms:// URL Scheme 是否已注册，未注册则自动注册。
+    检查 jms:// 和 cubeshell:// URL Scheme 是否已注册，未注册则自动注册。
     整个过程静默执行，绝不影响应用正常启动。
     """
     try:
@@ -172,8 +191,8 @@ def ensure_registered() -> None:
             return
         success = register()
         if success:
-            print("[CubeShell] jms:// URL Scheme registered successfully.")
+            print("[CubeShell] URL Schemes (jms://, cubeshell://) registered successfully.")
         else:
-            print("[CubeShell] Warning: Failed to register jms:// URL Scheme.")
+            print("[CubeShell] Warning: Failed to register URL Schemes.")
     except Exception as e:
         print(f"[CubeShell] Warning: URL Scheme registration skipped: {e}")
