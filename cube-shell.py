@@ -2187,6 +2187,13 @@ class MainDialog(QMainWindow):
             finder_action.setStatusTip(self.tr("安装或卸载 Finder 右键菜单快速操作"))
             setting_menu.addAction(finder_action)
             finder_action.triggered.connect(self.show_finder_integration)
+
+        # Windows 右键菜单集成（仅 Windows）
+        if platform.system() == 'Windows':
+            windows_action = QAction(self.tr("Windows 右键菜单集成"), self)
+            windows_action.setStatusTip(self.tr("安装或卸载 Windows 右键菜单"))
+            setting_menu.addAction(windows_action)
+            windows_action.triggered.connect(self.show_windows_integration)
         #
         # 创建"重做"动作
         # docker_action = QAction(QIcon(":redo.png"), "&容器编排", self)
@@ -2264,15 +2271,53 @@ class MainDialog(QMainWindow):
 
     def show_finder_integration(self):
         """显示 Finder 右键菜单集成设置对话框"""
-        from core.finder_integration import is_supported, is_installed
+        self._show_context_menu_integration(
+            module_name='core.finder_integration',
+            title=self.tr("Finder 右键菜单集成"),
+            description=self.tr(
+                "安装后，你可以在 Finder 中右键点击文件夹，\n"
+                "选择「快速操作 → 在 CubeShell 中打开终端」\n"
+                "即可在当前窗口新建该目录的本地终端 Tab。"),
+            success_msg=self.tr(
+                "Finder 右键菜单已安装！\n\n"
+                "现在你可以在 Finder 中右键点击文件夹，\n"
+                "选择「快速操作 → 在 CubeShell 中打开终端」。\n\n"
+                "提示：如果右键菜单中未显示，请在\n"
+                "「系统设置 → 键盘 → 快捷键 → 服务」中确认已启用。"),
+            uninstall_confirm=self.tr("确定要卸载 Finder 右键菜单集成吗？"),
+            uninstall_done=self.tr("Finder 右键菜单已卸载。")
+        )
 
-        if not is_supported():
+    def show_windows_integration(self):
+        """显示 Windows 右键菜单集成设置对话框"""
+        self._show_context_menu_integration(
+            module_name='core.windows_integration',
+            title=self.tr("Windows 右键菜单集成"),
+            description=self.tr(
+                "安装后，你可以在资源管理器中右键点击文件夹，\n"
+                "选择「在 CubeShell 中打开终端」\n"
+                "即可在当前窗口新建该目录的本地终端 Tab。"),
+            success_msg=self.tr(
+                "Windows 右键菜单已安装！\n\n"
+                "现在你可以在资源管理器中右键点击文件夹，\n"
+                "选择「在 CubeShell 中打开终端」。\n\n"),
+            uninstall_confirm=self.tr("确定要卸载 Windows 右键菜单集成吗？"),
+            uninstall_done=self.tr("Windows 右键菜单已卸载。")
+        )
+
+    def _show_context_menu_integration(self, module_name, title, description,
+                                       success_msg, uninstall_confirm, uninstall_done):
+        """通用的右键菜单集成设置对话框（macOS / Windows 共用）"""
+        import importlib
+        mod = importlib.import_module(module_name)
+
+        if not mod.is_supported():
             return
 
-        installed = is_installed()
+        installed = mod.is_installed()
 
         dialog = QDialog(self)
-        dialog.setWindowTitle(self.tr("Finder 右键菜单集成"))
+        dialog.setWindowTitle(title)
         dialog.setModal(True)
         dialog.setFixedWidth(450)
 
@@ -2281,12 +2326,12 @@ class MainDialog(QMainWindow):
         layout.setSpacing(15)
 
         # 标题
-        title = QLabel(self.tr("Finder 右键菜单集成"))
-        title.setStyleSheet("font-size: 16px; font-weight: bold;")
-        layout.addWidget(title)
+        title_label = QLabel(title)
+        title_label.setStyleSheet("font-size: 16px; font-weight: bold;")
+        layout.addWidget(title_label)
 
         # 说明
-        desc = QLabel(self.tr("安装后，你可以在 Finder 中右键点击文件夹，\n选择「快速操作 → 在 CubeShell 中打开终端」\n即可在当前窗口新建该目录的本地终端 Tab。"))
+        desc = QLabel(description)
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
@@ -2306,12 +2351,14 @@ class MainDialog(QMainWindow):
 
         if installed:
             uninstall_btn = QPushButton(self.tr("卸载"))
-            uninstall_btn.clicked.connect(lambda: self._uninstall_finder_action(dialog))
+            uninstall_btn.clicked.connect(
+                lambda: self._uninstall_integration(dialog, mod, uninstall_confirm, uninstall_done))
             btn_layout.addWidget(uninstall_btn)
         else:
             install_btn = QPushButton(self.tr("安装"))
             install_btn.setDefault(True)
-            install_btn.clicked.connect(lambda: self._install_finder_action(dialog))
+            install_btn.clicked.connect(
+                lambda: self._install_integration(dialog, mod, success_msg))
             btn_layout.addWidget(install_btn)
 
         close_btn = QPushButton(self.tr("关闭"))
@@ -2323,56 +2370,33 @@ class MainDialog(QMainWindow):
 
         dialog.exec()
 
-    def _install_finder_action(self, dialog):
-        """安装 Finder 快速操作 workflow"""
-        from core.finder_integration import install
-
-        success, error = install()
+    def _install_integration(self, dialog, mod, success_msg):
+        """安装右键菜单集成（通用）"""
+        success, msg = mod.install()
         if success:
-            QMessageBox.information(
-                dialog,
-                self.tr("安装成功"),
-                self.tr("Finder 右键菜单已安装！\n\n"
-                        "现在你可以在 Finder 中右键点击文件夹，\n"
-                        "选择「快速操作 → 在 CubeShell 中打开终端」。\n\n"
-                        "提示：如果右键菜单中未显示，请在\n"
-                        "「系统设置 → 键盘 → 快捷键 → 服务」中确认已启用。")
-            )
+            full_msg = success_msg + (msg or "")
+            QMessageBox.information(dialog, self.tr("安装成功"), full_msg)
             dialog.accept()
         else:
             QMessageBox.critical(
-                dialog,
-                self.tr("安装失败"),
-                self.tr("安装过程中出现错误：") + f"\n{error}"
-            )
+                dialog, self.tr("安装失败"),
+                self.tr("安装过程中出现错误：") + f"\n{msg}")
 
-    def _uninstall_finder_action(self, dialog):
-        """卸载 Finder 快速操作 workflow"""
-        from core.finder_integration import uninstall
-
+    def _uninstall_integration(self, dialog, mod, confirm_text, done_text):
+        """卸载右键菜单集成（通用）"""
         reply = QMessageBox.question(
-            dialog,
-            self.tr("确认卸载"),
-            self.tr("确定要卸载 Finder 右键菜单集成吗？"),
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
+            dialog, self.tr("确认卸载"), confirm_text,
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
 
         if reply == QMessageBox.Yes:
-            success, error = uninstall()
+            success, error = mod.uninstall()
             if success:
-                QMessageBox.information(
-                    dialog,
-                    self.tr("卸载成功"),
-                    self.tr("Finder 右键菜单已卸载。")
-                )
+                QMessageBox.information(dialog, self.tr("卸载成功"), done_text)
                 dialog.accept()
             else:
                 QMessageBox.critical(
-                    dialog,
-                    self.tr("卸载失败"),
-                    self.tr("卸载过程中出现错误：") + f"\n{error}"
-                )
+                    dialog, self.tr("卸载失败"),
+                    self.tr("卸载过程中出现错误：") + f"\n{error}")
 
     # linux 常用命令
     def linux(self):
@@ -5307,7 +5331,7 @@ class MainDialog(QMainWindow):
     def sync_terminal_theme(self, theme_name, exclude_terminal=None):
         """
         同步终端主题到所有打开的终端
-        
+
         :param theme_name: 要应用的主题名称
         :param exclude_terminal: 要排除的终端实例（通常是触发切换的终端，已经应用了主题）
         """
@@ -8228,7 +8252,14 @@ if __name__ == '__main__':
     if not connection_info:
         connection_info = scan_argv_for_url(sys.argv)
 
-    print(f"[CubeShell] connection_info from args: {connection_info}")
+    # Windows: 如果参数是本地目录路径（非 URL），转换为 cubeshell connection_info
+    if not connection_info and hasattr(args, 'url') and args.url and not args.url.startswith(('jms://', 'ssh://', 'cubeshell://')):
+        if os.path.isdir(args.url):
+            connection_info = {
+                'scheme': 'cubeshell',
+                'action': 'open-local',
+                'path': args.url,
+            }
 
     # Windows 高DPI支持 - 解决图标模糊问题
     if platform.system() == 'Windows':
@@ -8241,13 +8272,6 @@ if __name__ == '__main__':
         os.environ['QT_SCALE_FACTOR_ROUNDING_POLICY'] = 'PassThrough'
 
     app = CubeShellApp([sys.argv[0]] + remaining)
-
-    # ARM 平台 shiboken6 None 引用计数保护（防止 SIGSEGV 崩溃）
-    # try:
-    #     from core.shiboken_heal import install_global_heal
-    #     install_global_heal(app)
-    # except Exception as _heal_err:
-    #     print(f"[shiboken_heal] Failed to install: {_heal_err}")
 
     # 注册事件过滤器（比 event() 覆盖更可靠，兼容 Nuitka 编译）
     url_filter = create_url_event_filter(app)

@@ -248,7 +248,6 @@ class KPtyProcess(KProcess):
 
         # 如果已经在运行，先停止
         if self.state() != QProcess.ProcessState.NotRunning:
-            print("⚠️ 进程已在运行，先停止")
             self.kill()
 
         # 获取程序和参数
@@ -266,12 +265,10 @@ class KPtyProcess(KProcess):
                 program = None
 
         if not program:
-            print("❌ 没有指定要运行的程序")
+            # 没有指定要运行的程序"
             self.setProcessState(QProcess.ProcessState.NotRunning)
             self.errorOccurred.emit(QProcess.ProcessError.FailedToStart)
             return
-
-        print(f"🚀 使用修复的KPtyProcess启动: {program} {arguments}")
 
         # Windows平台特殊处理
         if IS_WINDOWS:
@@ -280,7 +277,6 @@ class KPtyProcess(KProcess):
         try:
             # 创建PTY
             self._masterFd, self._slaveFd = pty.openpty()
-            print(f"✅ PTY创建成功: master={self._masterFd}, slave={self._slaveFd}")
 
             # 设置PTY属性
             self._setup_pty_attributes()
@@ -315,10 +311,6 @@ class KPtyProcess(KProcess):
             env_dict['LANG'] = env_dict.get('LANG', 'en_US.UTF-8')  # 确保语言环境设置
             env_dict['LC_ALL'] = env_dict.get('LC_ALL', 'en_US.UTF-8')  # 完整的语言环境
 
-            # SSH会话需要的终端尺寸
-            # env_dict['LINES'] = '24'
-            # env_dict['COLUMNS'] = '80'
-
             # 强制shell识别为交互式终端 - SSH关键设置
             if 'SSH_TTY' not in env_dict:
                 env_dict['SSH_TTY'] = f'/dev/pts/{os.getpid()}'  # 模拟SSH TTY
@@ -347,17 +339,11 @@ class KPtyProcess(KProcess):
             for problematic_var in ['TMUX', 'TMUX_PANE', 'TERM_SESSION_ID']:
                 env_dict.pop(problematic_var, None)
 
-            print(f"🌍 设置环境变量: TERM={env_dict.get('TERM')}, PS1={env_dict.get('PS1')}")
-
-            # 准备命令行
-            cmd = [program] + (arguments if arguments else [])
-
             # 启动子进程
             self._start_child_process(program, arguments, env_dict)
 
             # 设置读取通知器
             self._setup_notifier()
-
 
             # 发出started信号
             self.setProcessState(QProcess.ProcessState.Running)
@@ -404,7 +390,6 @@ class KPtyProcess(KProcess):
             # 这与C++版本一致，C++版本没有修改c_lflag
 
             termios.tcsetattr(self._slaveFd, termios.TCSANOW, attrs)
-            print("✅ PTY属性设置成功（raw模式）")
 
         except Exception as e:
             print(f"⚠️ 设置PTY属性失败: {e}")
@@ -517,21 +502,19 @@ class KPtyProcess(KProcess):
                     sys.stderr.flush()
                     os._exit(1)
             else:
-                # 父进程
+                # 父进程(直接fork子进程成功)
                 self._childPid = pid
-                print(f"✅ 直接fork子进程成功，PID: {self._childPid}")
 
                 # 父进程关闭slave端，只保留master端
                 if self._slaveFd >= 0:
                     os.close(self._slaveFd)
+                    # 父进程已关闭slave fd，只保留master fd用于通信
                     self._slaveFd = -1
-                    print("🔒 父进程已关闭slave fd，只保留master fd用于通信")
 
                 # 设置master fd为非阻塞模式
                 import fcntl
                 flags = fcntl.fcntl(self._masterFd, fcntl.F_GETFL)
                 fcntl.fcntl(self._masterFd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-                print("🔧 设置master fd为非阻塞模式")
 
         except Exception as e:
             raise Exception(f"启动子进程失败: {e}")
@@ -723,11 +706,7 @@ class KPtyProcess(KProcess):
 
                 # 如果有子进程，发送SIGWINCH信号通知尺寸变化
                 if self._childPid > 0:
-                    try:
-                        os.kill(self._childPid, signal.SIGWINCH)
-                        print("📡 已发送SIGWINCH信号通知进程窗口尺寸变化")
-                    except:
-                        pass
+                    os.kill(self._childPid, signal.SIGWINCH)
 
             except Exception as e:
                 print(f"⚠️ 设置PTY窗口大小失败: {e}")
@@ -736,8 +715,8 @@ class KPtyProcess(KProcess):
         if self._pty:
             try:
                 self._pty.setWinSize(lines, cols)
-            except:
-                pass
+            except Exception as e:
+                print(f"⚠️ 更新pty对象失败: {e}")
 
     def setErase(self, erase_char):
         """设置擦除字符"""
@@ -911,8 +890,13 @@ class KPtyProcess(KProcess):
             # 准备命令行
             cmd_args = [program] + (arguments if arguments else [])
 
+            # 获取工作目录
+            cwd = self.workingDirectory() if self.workingDirectory() and os.path.isdir(
+                self.workingDirectory()) else None
+
             self._winpty_process = WinPtyProcess.spawn(
                 cmd_args,
+                cwd=cwd,
                 env=env_dict,
                 dimensions=(24, 80)  # 初始大小
             )
