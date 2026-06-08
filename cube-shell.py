@@ -7000,7 +7000,9 @@ class SSHQTermWidget(QTermWidget):
 
         # 记录当前主题 - 从配置文件读取持久化的主题，如果没有则使用默认值 "Ubuntu"
         self.current_theme_name = (util.THEME or {}).get("terminal_theme", "Ubuntu")
-        self._theme_reapply_pending = False
+        # Windows 下 qdarktheme 全局样式会在 widget show/resize 时反复覆盖 palette，
+        # 通过事件过滤器监听 PaletteChange 事件，每次被覆盖就立即重新应用主题
+        self._applying_theme = False  # 防止递归的哨兵标志
 
         self._prompt_index = {"commands": [], "options": {}}
         self._prompt_commands = []
@@ -7068,11 +7070,24 @@ class SSHQTermWidget(QTermWidget):
             self._shortcut_paste.setContext(Qt.WidgetWithChildrenShortcut)
             self._shortcut_paste.activated.connect(self._on_paste_shortcut)
 
+
     def eventFilter(self, obj, event):
-        """事件过滤：处理 Ctrl+滚轮 缩放等终端显示层事件"""
+        """事件过滤：处理 Ctrl+滚轮 缩放、Windows 主题保护等终端显示层事件"""
         # Check if the event is from the internal terminal display
         if hasattr(self, 'm_impl') and hasattr(self.m_impl,
                                                'm_terminalDisplay') and obj == self.m_impl.m_terminalDisplay:
+            # Windows: 监听 PaletteChange 事件，当 qdarktheme 覆盖了终端背景色时立即修复
+            if event.type() == QEvent.PaletteChange and platform.system() == "Windows":
+                if not self._applying_theme:
+                    from qtermwidget.character_color import DEFAULT_BACK_COLOR
+                    td = self.m_impl.m_terminalDisplay
+                    # 对比期望背景色与实际 palette 背景色，不一致则说明被外部覆盖
+                    expected_bg = td._color_table[DEFAULT_BACK_COLOR].color
+                    actual_bg = td.palette().window().color()
+                    if expected_bg != actual_bg:
+                        self._applying_theme = True
+                        self.setColorScheme(self.current_theme_name)
+                        self._applying_theme = False
             if event.type() == QEvent.Wheel:
                 if event.modifiers() & Qt.ControlModifier:
                     # Forward to main window for zoom
