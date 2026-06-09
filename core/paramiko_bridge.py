@@ -18,6 +18,9 @@ class ParamikoBridge(QObject):
     # OSC 7 正则：\x1b]7;file://hostname/path\x07  或  \x1b]7;file://hostname/path\x1b\\
     _OSC7_PATTERN = re.compile(rb'\x1b\]7;file://[^/]*(.*?)(?:\x07|\x1b\\)')
 
+    # AI 命令标记前缀正则：_CUBE_ID=数字; (含尾随空格)
+    _CUBE_ID_PATTERN = re.compile(rb'_CUBE_ID=\d+;\s*')
+
     def __init__(self, session, channel, parent=None):
         """
         Args:
@@ -103,6 +106,17 @@ class ParamikoBridge(QObject):
                     lines = clean_data.split(b'\r\n')
                     lines = [l for l in lines if b'__cs_osc7' not in l]
                     clean_data = b'\r\n'.join(lines)
+
+                # 过滤 AI 命令执行标记的回显
+                # 1. 过滤包含 __cube_end 或 PAGER=cat 的初始化命令行
+                if b'__cube_end' in clean_data or b'PAGER=cat' in clean_data:
+                    lines = clean_data.split(b'\r\n')
+                    lines = [l for l in lines
+                             if b'__cube_end' not in l and b'PAGER=cat' not in l]
+                    clean_data = b'\r\n'.join(lines)
+                # 2. 替换 _CUBE_ID=N; 前缀，只保留实际命令
+                if b'_CUBE_ID=' in clean_data:
+                    clean_data = self._CUBE_ID_PATTERN.sub(b'', clean_data)
 
                 if clean_data:
                     self.dataReceived.emit(clean_data, len(clean_data))
