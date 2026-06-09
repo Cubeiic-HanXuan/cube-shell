@@ -78,6 +78,22 @@ class ConversationManager:
         })
         self._compress_if_needed()
 
+    def add_tool_response(self, tool_name: str, content: str) -> None:
+        """添加工具调用结果到对话历史。
+
+        以 user 角色添加（模拟用户反馈工具执行结果给 AI），
+        与 add_command_result 的策略一致。
+
+        Args:
+            tool_name: 工具名称（如 skill_ssh_skill）
+            content: 工具执行结果内容
+        """
+        self._messages.append({
+            "role": "user",
+            "content": f"[Skill 执行结果] 工具: {tool_name}\n{content}"
+        })
+        self._compress_if_needed()
+
     def add_command_result(
         self,
         command: str,

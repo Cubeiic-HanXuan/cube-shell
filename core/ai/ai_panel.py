@@ -640,6 +640,79 @@ class AIChatPanel(QWidget):
         self._current_ai_bubble = None
         self._scroll_to_bottom()
 
+    def append_skill_output(self, skill_name: str, output: str, is_error: bool) -> None:
+        """显示 Skill 调用结果卡片。
+
+        Args:
+            skill_name: Skill 名称
+            output: 执行输出或错误信息
+            is_error: 是否为错误
+        """
+        # 结束当前流式气泡
+        if self._current_ai_bubble is not None:
+            self._current_ai_bubble = None
+            self._current_ai_text = ""
+
+        # 构建卡片
+        if is_error:
+            bg_color = "rgba(198, 40, 40, 0.15)"
+            border_color = "rgba(198, 40, 40, 0.4)"
+            title = f"❌ {skill_name} 执行失败"
+        else:
+            bg_color = "rgba(46, 125, 50, 0.15)"
+            border_color = "rgba(46, 125, 50, 0.4)"
+            title = f"🔧 {skill_name}"
+
+        escaped_output = (output.replace("&", "&amp;")
+                          .replace("<", "&lt;")
+                          .replace(">", "&gt;"))
+
+        frame = QFrame()
+        frame.setObjectName("SkillOutputCard")
+        frame.setStyleSheet(f"""
+            #SkillOutputCard {{
+                background: {bg_color};
+                border: 1px solid {border_color};
+                border-radius: 6px;
+                margin: 4px 8px;
+                padding: 8px 12px;
+            }}
+        """)
+
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
+
+        # 标题行
+        title_label = QLabel(title)
+        title_label.setStyleSheet("font-size: 12px; font-weight: bold; background: transparent;")
+        layout.addWidget(title_label)
+
+        # 输出内容（等宽字体，代码块样式）
+        if escaped_output.strip():
+            output_browser = QTextBrowser()
+            output_browser.setFont(QFont("Courier New", 11))
+            output_browser.setStyleSheet("""
+                QTextBrowser {
+                    background: rgba(0, 0, 0, 0.2);
+                    color: #e0e0e0;
+                    border-radius: 4px;
+                    padding: 6px;
+                    border: none;
+                }
+            """)
+            output_browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            output_browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            output_browser.setPlainText(output)
+            # 动态高度（最大 200px）
+            lines = output.splitlines()
+            doc_height = min(200, max(40, len(lines[:20]) * 16 + 20))
+            output_browser.setFixedHeight(doc_height)
+            layout.addWidget(output_browser)
+
+        self._insert_widget(frame)
+        self._scroll_to_bottom()
+
     def append_diagnosing_hint(self):
         """插入'正在自动诊断失败原因'提示"""
         self.append_ai_message("检测到命令执行失败，正在自动分析原因并生成修复方案...")
@@ -947,20 +1020,9 @@ class AIChatPanel(QWidget):
         in_ol = False
         in_table = False
         table_rows = []
-        prev_empty = False
 
         for line in lines:
             stripped = line.strip()
-
-            # 跳过连续空行，避免产生多余的 <br>（仅在非代码块时）
-            # if not stripped and '<pre ' not in line:
-            #     if prev_empty:
-            #         continue
-            #     prev_empty = True
-            #     result_lines.append("")
-            #     continue
-            # else:
-            #     prev_empty = False
 
             # 跳过 <pre> 块内的内容（已被处理）
             if '<pre ' in line or '</pre>' in line:
@@ -1001,13 +1063,13 @@ class AIChatPanel(QWidget):
             # 水平分隔线 --- *** ___
             hr_match = re.match(r'^(\-{3,}|\*{3,}|_{3,})$', stripped)
             if hr_match:
-                # if in_ul:
-                #     result_lines.append("</ul>")
-                #     in_ul = False
-                # if in_ol:
-                #     result_lines.append("</ol>")
-                #     in_ol = False
-                # result_lines.append('<hr style="margin:2px 0;border:none;border-top:1px solid rgba(128,128,128,0.3);">')
+                if in_ul:
+                    result_lines.append("</ul>")
+                    in_ul = False
+                if in_ol:
+                    result_lines.append("</ol>")
+                    in_ol = False
+                result_lines.append('<hr style="margin:2px 0;border:none;border-top:1px solid rgba(128,128,128,0.3);">')
                 continue
 
             # 标题 # ## ### ####

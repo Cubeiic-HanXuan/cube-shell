@@ -5442,6 +5442,7 @@ class MainDialog(QMainWindow):
         _safe_disconnect(agent.command_output)
         _safe_disconnect(agent.diagnosing_started)
         _safe_disconnect(agent.task_summary)
+        _safe_disconnect(agent.skill_output)
 
         # 连接信号槽
         self.ai_panel.user_message_sent.connect(agent.process_user_input)
@@ -5461,6 +5462,8 @@ class MainDialog(QMainWindow):
         agent.diagnosing_started.connect(self.ai_panel.append_diagnosing_hint)
         # 任务总结 -- 插入总结卡片
         agent.task_summary.connect(self.ai_panel.append_task_summary)
+        # Skill 执行结果 -- 插入结果卡片
+        agent.skill_output.connect(self.ai_panel.append_skill_output)
         agent.thinking_started.connect(lambda: self.ai_panel.set_thinking(True))
         agent.thinking_finished.connect(lambda: self.ai_panel.set_thinking(False))
         agent.error_occurred.connect(lambda msg: self.ai_panel.append_ai_message(f"❌ 错误: {msg}"))

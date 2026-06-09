@@ -12,7 +12,10 @@ SSHAIAgent 是 AI SSH 运维功能的核心调度中枢，负责：
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -747,6 +750,7 @@ class SSHAIAgent(QObject):
     diagnosing_started = Signal()           # AI 开始诊断失败命令
     task_summary = Signal(str)              # 任务执行总结
     command_output = Signal(str)            # 命令实时输出（下载进度等）
+    skill_output = Signal(str, str, bool)   # Skill 执行结果 (skill_name, output_text, is_error)
 
     def __init__(self, ssh_client, prefs: AIUserPrefs = None, parent=None):
         """
@@ -771,6 +775,11 @@ class SSHAIAgent(QObject):
         self._is_diagnosing: bool = False      # 是否在诊断/修复流程中
         self._goal_verify_count: int = 0       # 验证次数（防止无限循环）
         self._MAX_VERIFY_ROUNDS: int = 3       # 最多验证轮数
+
+        # 加载 Skills（必须在 _build_system_prompt 之前初始化）
+        from core.ai.skill_loader import SkillLoader
+        self._skill_loader = SkillLoader()
+        self._skills = self._skill_loader.load_all_skills()
 
         # 子系统初始化
         self._safety_checker = CommandSafetyChecker()
@@ -838,10 +847,12 @@ class SSHAIAgent(QObject):
 
         # 启动 AI 工作线程（跨线程信号必须显式 QueuedConnection，否则可能退化为
         # DirectConnection 导致槽函数在工作线程执行 → SIGABRT）
+        # 合并基础工具和 Skill 工具
+        all_tools = list(TOOLS) + self._build_skill_tools()
         self._ai_worker = _AIWorkerThread(
             prefs=self._prefs,
             messages=messages,
-            tools=TOOLS,
+            tools=all_tools,
             parent=self,
         )
         self._ai_worker.result_ready.connect(self._on_ai_result, Qt.QueuedConnection)
@@ -979,6 +990,44 @@ class SSHAIAgent(QObject):
 
     # ──────────────────────────── 内部方法 ────────────────────────────
 
+    def _build_skill_tools(self) -> list[dict]:
+        """将已加载的 Skill 转换为 Function Calling 工具定义。
+
+        仅对包含 scripts/ 目录的 Skill 生成工具定义。
+        """
+        if not hasattr(self, '_skills') or not self._skills:
+            return []
+        skill_tools = []
+        for skill in self._skills:
+            if not skill.get('has_scripts'):
+                continue
+            # 工具名使用 skill_ 前缀 + Skill 名称（将连字符替换为下划线）
+            tool_name = f"skill_{skill['name'].replace('-', '_')}"
+            tool_def = {
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "description": skill.get('description', f"执行 {skill['name']} 技能的脚本"),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "script": {
+                                "type": "string",
+                                "description": f"要执行的脚本名称，可用脚本在 {skill.get('scripts_dir', '')} 目录中"
+                            },
+                            "args": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "传递给脚本的命令行参数列表"
+                            }
+                        },
+                        "required": ["script", "args"]
+                    }
+                }
+            }
+            skill_tools.append(tool_def)
+        return skill_tools
+
     def _build_system_prompt(self) -> str:
         """构建完整的系统提示词（角色定义 + 服务器画像 + 安全约束）。"""
         prompt = (
@@ -1031,6 +1080,19 @@ class SSHAIAgent(QObject):
             "如果用户只是提问或需要解释，直接用文本回复即可，不必使用工具。"
         )
 
+        # 注入已加载的 Skill 知识
+        if self._skills:
+            prompt += "\n\n--- 已加载的技能 ---\n"
+            for skill in self._skills:
+                skill_content = skill.get('content', '')
+                # 智能截断：单个 Skill 最大 4000 字符，避免 token 超限
+                if len(skill_content) > 4000:
+                    skill_content = skill_content[:4000] + "\n...(内容已截断)"
+                prompt += f"\n### 技能: {skill['name']}"
+                if skill.get('description'):
+                    prompt += f"\n说明: {skill['description']}"
+                prompt += f"\n{skill_content}\n"
+
         return prompt
 
     def _refresh_system_prompt(self) -> None:
@@ -1069,6 +1131,11 @@ class SSHAIAgent(QObject):
             # 解析 Function Calling 结果
             commands = self._parse_tool_calls(tool_calls)
             if commands is not None:
+                if len(commands) == 0:
+                    # 空列表表示 Skill 调用已处理，不走 fallback
+                    if content:
+                        self._conversation.add_assistant_message(content)
+                    return
                 # 对命令进行安全检查
                 checked_commands = self._check_commands_safety(commands)
                 # 将 AI 响应添加到对话历史
@@ -1230,10 +1297,91 @@ class SSHAIAgent(QObject):
                         self.ai_message.emit("", explanation)
 
                     return commands
+
+                # 识别 Skill 工具调用
+                if name.startswith("skill_"):
+                    if isinstance(arguments, str):
+                        data = json.loads(arguments)
+                    else:
+                        data = arguments
+                    script = data.get("script", "")
+                    args = data.get("args", [])
+                    # 执行 Skill
+                    self._execute_skill(name, script, args)
+                    return []  # 空列表表示"已处理但非 SSH 命令"
+
         except (json.JSONDecodeError, AttributeError, TypeError) as e:
             util.logger.error(f"解析 tool_calls 失败: {e}")
 
         return None
+
+    def _execute_skill(self, tool_name: str, script: str, args: list[str]) -> None:
+        """执行 Skill 脚本并处理结果。
+
+        Args:
+            tool_name: 工具名（如 skill_ssh_skill）
+            script: 脚本文件名（如 ssh_execute.py）
+            args: 命令行参数列表
+        """
+        # 从工具名还原 Skill 名称
+        skill_name = tool_name.replace("skill_", "").replace("_", "-")
+
+        # 查找对应的 Skill
+        skill = None
+        for s in self._skills:
+            if s['name'] == skill_name or s['name'].replace('-', '_') == tool_name.replace('skill_', ''):
+                skill = s
+                break
+
+        if not skill or not skill.get('scripts_dir'):
+            error_msg = f"Skill '{skill_name}' 未找到或没有 scripts 目录"
+            self.skill_output.emit(skill_name, error_msg, True)
+            self._conversation.add_assistant_message(f"[Skill 执行失败] {error_msg}")
+            return
+
+        # 构建脚本路径
+        script_path = os.path.join(skill['scripts_dir'], script)
+        if not os.path.isfile(script_path):
+            error_msg = f"脚本 '{script}' 不存在于 {skill['scripts_dir']}"
+            self.skill_output.emit(skill_name, error_msg, True)
+            self._conversation.add_assistant_message(f"[Skill 执行失败] {error_msg}")
+            return
+
+        # 通过子进程执行
+        try:
+            result = subprocess.run(
+                [sys.executable, script_path] + args,
+                capture_output=True,
+                text=True,
+                timeout=60,  # 60 秒超时
+                cwd=skill['scripts_dir'],
+            )
+
+            output = result.stdout.strip()
+            error = result.stderr.strip()
+
+            if result.returncode == 0:
+                # 执行成功
+                display_text = output if output else "(无输出)"
+                self.skill_output.emit(skill_name, display_text, False)
+                # 将结果添加到对话历史，供 AI 后续参考
+                self._conversation.add_tool_response(tool_name, output or "(执行成功，无输出)")
+            else:
+                # 执行失败
+                error_text = error if error else f"脚本退出码: {result.returncode}"
+                if output:
+                    error_text = f"{output}\n{error_text}"
+                self.skill_output.emit(skill_name, error_text, True)
+                self._conversation.add_tool_response(tool_name, f"[错误] {error_text}")
+
+        except subprocess.TimeoutExpired:
+            error_msg = "脚本执行超时（60秒）"
+            self.skill_output.emit(skill_name, error_msg, True)
+            self._conversation.add_tool_response(tool_name, f"[超时] {error_msg}")
+        except Exception as e:
+            error_msg = f"执行异常: {str(e)}"
+            self.skill_output.emit(skill_name, error_msg, True)
+            self._conversation.add_tool_response(tool_name, f"[异常] {error_msg}")
 
     def _extract_commands_from_text(self, text: str) -> list[dict]:
         """从 AI 文本回复中通过正则提取命令（fallback 策略）。
