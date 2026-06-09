@@ -1084,6 +1084,7 @@ class MainDialog(QMainWindow):
         _add_action(":icons8-processor-48.png", self.tr("进程管理"), self.tr("远程进程管理"),
                     self.showProcessManagerDialog)
         _add_action(":icons8-hermes-48.png", self.tr("hermes"), self.tr("hermes"), self.showHermesPanel)
+        _add_action(":icons8-claudecode-48.png", "Claude Code", "Claude Code", self.showClaudeCodePanel)
         # toolbar.addSeparator()
         # _add_action(":Settings-4.png", self.tr("切换主题"), self.tr("切换亮色/暗色主题"), self.theme)
 
@@ -1401,6 +1402,68 @@ class MainDialog(QMainWindow):
         except Exception as e:
             logger.error(f"打开 Agent 终端失败: {e}")
             return None
+
+    def showClaudeCodePanel(self):
+        """在 ShellTab 中打开 Claude Code 管理面板"""
+        # 1. 检查是否已有 Claude Code tab 打开
+        for i in range(self.ui.ShellTab.count()):
+            if self.ui.ShellTab.tabText(i) == "Claude Code":
+                self.ui.ShellTab.setCurrentIndex(i)
+                return
+
+        # 2. 创建面板
+        from core.claude_code.claude_code_panel import ClaudeCodePanel
+        panel = ClaudeCodePanel(main_dialog=self)
+
+        # 3. 连接终端请求信号
+        panel.open_terminal_requested.connect(self.open_claude_terminal)
+
+        # 4. 添加到 ShellTab
+        tab_index = self.ui.ShellTab.addTab(panel, "Claude Code")
+        self.ui.ShellTab.setCurrentIndex(tab_index)
+
+        # 5. 添加关闭按钮（如果不是第一个 tab）
+        if tab_index > 0:
+            from PySide6.QtWidgets import QTabBar
+            tab_bar = self.ui.ShellTab.tabBar()
+            close_button = TabCloseButton(self, tab_bar=tab_bar)
+            close_button.clicked.connect(lambda: self._close_claude_tab())
+            tab_bar.setTabButton(tab_index, QTabBar.LeftSide, close_button)
+
+    def open_claude_terminal(self, command: str):
+        """在终端 Tab 中打开 claude 交互式会话
+
+        command: 要执行的 claude 命令，如 "claude" 或 "claude agents" 或 "claude --resume xxx"
+        """
+        try:
+            # 创建新终端 Tab
+            tab_name = f"claude:{command.split()[-1][:12]}" if len(command.split()) > 1 else "claude"
+            tab_index, terminal = self.add_new_tab(name=tab_name)
+            if tab_index == -1:
+                return None
+
+            # 启动本机终端
+            self._connect_local_with_qtermwidget(terminal, tab_name)
+
+            # 延迟发送命令
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(500, lambda: terminal.sendText(f"{command}\n"))
+
+            return tab_index
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"打开 Claude 终端失败: {e}")
+            return None
+
+    def _close_claude_tab(self):
+        """关闭 Claude Code 管理面板 Tab"""
+        for i in range(self.ui.ShellTab.count()):
+            if self.ui.ShellTab.tabText(i) == "Claude Code":
+                widget = self.ui.ShellTab.widget(i)
+                self.ui.ShellTab.removeTab(i)
+                if widget:
+                    widget.deleteLater()
+                return
 
     def showNATDialog(self):
         dlg = self._ensure_nat_dialog()

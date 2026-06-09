@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Hermes Agent 部署状态模块 - 显示版本、安装和运行状态，提供快速操作按钮"""
 
+import subprocess
+
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QLabel, QPushButton, QTextEdit, QFrame)
 from PySide6.QtCore import Qt, QThread, Signal, QDateTime
@@ -24,6 +26,23 @@ class CommandWorker(QThread):
         self.finished.emit(' '.join(self._args), result)
 
 
+class PipUpgradeWorker(QThread):
+    """后台线程执行 pip upgrade 命令"""
+    finished = Signal(str)  # output
+    error = Signal(str)
+
+    def run(self):
+        try:
+            result = subprocess.run(
+                ["pip", "install", "--upgrade", "hermes-agent"],
+                capture_output=True, text=True, timeout=120
+            )
+            output = result.stdout or result.stderr or ""
+            self.finished.emit(output.strip())
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class StatusWidget(QWidget):
     """部署状态模块：显示 Hermes 版本、安装状态、网关和 API Server 运行状态"""
 
@@ -31,6 +50,7 @@ class StatusWidget(QWidget):
         super().__init__(parent)
         self._backend = None
         self._workers = []  # 持有 worker 引用，防止 GC
+        self._update_worker: PipUpgradeWorker | None = None
         self._init_ui()
 
     def _init_ui(self):
@@ -62,16 +82,19 @@ class StatusWidget(QWidget):
         self._btn_start_gw = QPushButton(self.tr("启动网关"))
         self._btn_stop_gw = QPushButton(self.tr("停止网关"))
         self._btn_doctor = QPushButton(self.tr("检查修复"))
+        self._btn_update = QPushButton(self.tr("更新 Hermes"))
 
         self._btn_refresh.clicked.connect(self.refresh_status)
         self._btn_start_gw.clicked.connect(self._start_gateway)
         self._btn_stop_gw.clicked.connect(self._stop_gateway)
         self._btn_doctor.clicked.connect(self._run_doctor)
+        self._btn_update.clicked.connect(self._on_update)
 
         btn_layout.addWidget(self._btn_refresh)
         btn_layout.addWidget(self._btn_start_gw)
         btn_layout.addWidget(self._btn_stop_gw)
         btn_layout.addWidget(self._btn_doctor)
+        btn_layout.addWidget(self._btn_update)
         btn_layout.addStretch()
 
         main_layout.addLayout(btn_layout)
@@ -128,6 +151,39 @@ class StatusWidget(QWidget):
         if not self._backend:
             return
         self._run_command(["doctor", "--fix"], self.tr("检查修复"), self._on_command_done)
+
+    def _on_update(self):
+        """执行 pip install --upgrade hermes-agent"""
+        if not self._backend:
+            return
+        if self._update_worker and self._update_worker.isRunning():
+            return
+        self._set_buttons_enabled(False)
+        timestamp = QDateTime.currentDateTime().toString("HH:mm:ss")
+        self._log_output.append(f"[{timestamp}] {self.tr('正在更新 Hermes...')}")
+
+        self._update_worker = PipUpgradeWorker()
+        self._update_worker.finished.connect(self._on_update_finished)
+        self._update_worker.error.connect(self._on_update_error)
+        self._update_worker.start()
+
+    def _on_update_finished(self, output: str):
+        """更新命令完成"""
+        timestamp = QDateTime.currentDateTime().toString("HH:mm:ss")
+        self._log_output.append(f"[{timestamp}] {self.tr('更新完成')}")
+        if output:
+            self._log_output.append(output)
+        self._log_output.append("")
+        self._set_buttons_enabled(True)
+        # 更新完成后自动刷新状态
+        self.refresh_status()
+
+    def _on_update_error(self, error_msg: str):
+        """更新命令失败"""
+        timestamp = QDateTime.currentDateTime().toString("HH:mm:ss")
+        self._log_output.append(f"[{timestamp}] {self.tr('更新失败')}: {error_msg}")
+        self._log_output.append("")
+        self._set_buttons_enabled(True)
 
     # ─── 后台命令执行 ───
 
@@ -230,3 +286,4 @@ class StatusWidget(QWidget):
         self._btn_start_gw.setEnabled(enabled)
         self._btn_stop_gw.setEnabled(enabled)
         self._btn_doctor.setEnabled(enabled)
+        self._btn_update.setEnabled(enabled)

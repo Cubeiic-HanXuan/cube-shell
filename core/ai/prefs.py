@@ -7,68 +7,21 @@ import appdirs
 from function import util
 
 
-PROVIDER_PRESETS = {
-    "zhipuai": {
-        "name": "智谱 GLM",
-        "base_url": "https://open.bigmodel.cn/api/paas/v4",
-        "models": ["glm-4.5", "glm-4.5-air", "glm-4.6", "glm-4.7", "glm-5", "glm-5-turbo", "glm-5.1"],
-        "supports_thinking": True,
-    },
-    "deepseek": {
-        "name": "DeepSeek",
-        "base_url": "https://api.deepseek.com/v1",
-        "models": ["deepseek-v4-pro", "deepseek-v4-flash"],
-        "supports_thinking": True,
-    },
-    "aliyun": {
-        "name": "通义千问",
-        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "models": ["qwen-max", "qwen-plus", "qwen-turbo"],
-        "supports_thinking": False,
-    },
-    "moonshot": {
-        "name": "Kimi (月之暗面)",
-        "base_url": "https://api.moonshot.cn/v1",
-        "models": ["kimi-k2.6", "kimi-k2.5", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
-        "supports_thinking": False,
-    },
-    "spark": {
-        "name": "讯飞星火",
-        "base_url": "https://spark-api-open.xf-yun.com/v1",
-        "models": ["general", "generalv3", "generalv3.5"],
-        "supports_thinking": False,
-    },
-    "baichuan": {
-        "name": "百川",
-        "base_url": "https://api.baichuan-ai.com/v1",
-        "models": ["Baichuan4", "Baichuan3-Turbo"],
-        "supports_thinking": False,
-    },
-    "minimax": {
-        "name": "MiniMax",
-        "base_url": "https://api.minimax.chat/v1",
-        "models": ["MiniMax-Text-01", "abab6.5s-chat", "abab5.5-chat"],
-        "supports_thinking": False,
-    },
-    "xiaomi": {
-        "name": "小米 MiLM",
-        "base_url": "https://api.xiaomi.com/v1",
-        "models": ["MiLM-1"],
-        "supports_thinking": False,
-    },
-    "doubao": {
-        "name": "豆包 (火山引擎)",
-        "base_url": "https://ark.cn-beijing.volces.com/api/v3",
-        "models": ["doubao-seed-2-0-code-preview-260215", "doubao-seed-2-0-mini-260215", "doubao-seed-2-0-pro-260215"],
-        "supports_thinking": True,
-    },
-    "custom": {
-        "name": "自定义",
-        "base_url": "",
-        "models": [],
-        "supports_thinking": False,
-    },
-}
+def _load_providers():
+    """从配置文件加载 LLM 提供商预设"""
+    _conf_path = os.path.join(
+        os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')),
+        "conf", "llm_providers.json"
+    )
+    try:
+        with open(_conf_path, "r", encoding="utf-8") as f:
+            providers_list = json.load(f)
+        return {p["key"]: {k: v for k, v in p.items() if k != "key"} for p in providers_list}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"custom": {"name": "自定义", "base_url": "", "models": [], "supports_thinking": False}}
+
+
+PROVIDER_PRESETS = _load_providers()
 
 
 @dataclass
