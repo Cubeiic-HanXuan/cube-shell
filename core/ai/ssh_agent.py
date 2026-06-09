@@ -1074,7 +1074,6 @@ class SSHAIAgent(QObject):
                 # 将 AI 响应添加到对话历史
                 if content:
                     self._conversation.add_assistant_message(content)
-                    self.ai_message.emit("", content)
                 self.command_ready.emit(checked_commands)
                 return
 
@@ -1086,11 +1085,7 @@ class SSHAIAgent(QObject):
             fallback_commands = self._extract_commands_from_text(content)
             if fallback_commands:
                 checked_commands = self._check_commands_safety(fallback_commands)
-                self.ai_message.emit("", content)
                 self.command_ready.emit(checked_commands)
-            else:
-                # 纯文本回复
-                self.ai_message.emit("", content)
 
     def _on_ai_error(self, error_msg: str) -> None:
         """处理 AI 调用错误。"""

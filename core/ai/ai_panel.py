@@ -923,7 +923,7 @@ class AIChatPanel(QWidget):
         # 代码块 ```...```
         def _code_block_repl(m):
             code = m.group(1).strip()
-            return f'<pre style="background:#263238;color:#e0e0e0;padding:8px;border-radius:4px;font-family:Courier New;font-size:12px;overflow-x:auto;white-space:pre-wrap;">{code}</pre>'
+            return f'<pre style="background:#263238;color:#e0e0e0;padding:8px;border-radius:4px;font-family:Courier New;font-size:12px;overflow-x:auto;white-space:pre-wrap;margin:6px 0;">{code}</pre>'
 
         text = re.sub(r"```(?:\w*)\n?(.*?)```", _code_block_repl, text, flags=re.DOTALL)
 
@@ -947,9 +947,20 @@ class AIChatPanel(QWidget):
         in_ol = False
         in_table = False
         table_rows = []
+        prev_empty = False
 
         for line in lines:
             stripped = line.strip()
+
+            # 跳过连续空行，避免产生多余的 <br>（仅在非代码块时）
+            # if not stripped and '<pre ' not in line:
+            #     if prev_empty:
+            #         continue
+            #     prev_empty = True
+            #     result_lines.append("")
+            #     continue
+            # else:
+            #     prev_empty = False
 
             # 跳过 <pre> 块内的内容（已被处理）
             if '<pre ' in line or '</pre>' in line:
@@ -987,6 +998,18 @@ class AIChatPanel(QWidget):
                     table_rows = []
                     in_table = False
 
+            # 水平分隔线 --- *** ___
+            hr_match = re.match(r'^(\-{3,}|\*{3,}|_{3,})$', stripped)
+            if hr_match:
+                # if in_ul:
+                #     result_lines.append("</ul>")
+                #     in_ul = False
+                # if in_ol:
+                #     result_lines.append("</ol>")
+                #     in_ol = False
+                # result_lines.append('<hr style="margin:2px 0;border:none;border-top:1px solid rgba(128,128,128,0.3);">')
+                continue
+
             # 标题 # ## ### ####
             header_match = re.match(r'^(#{1,4})\s+(.+)$', stripped)
             if header_match:
@@ -1001,7 +1024,7 @@ class AIChatPanel(QWidget):
                 sizes = {1: '18px', 2: '16px', 3: '14px', 4: '13px'}
                 font_size = sizes.get(level, '13px')
                 result_lines.append(
-                    f'<p style="font-size:{font_size};font-weight:bold;margin:8px 0 4px 0;">{header_text}</p>'
+                    f'<p style="font-size:{font_size};font-weight:bold;margin:1px 0 1px 0;">{header_text}</p>'
                 )
                 continue
 
@@ -1011,7 +1034,7 @@ class AIChatPanel(QWidget):
                     result_lines.append("</ol>")
                     in_ol = False
                 if not in_ul:
-                    result_lines.append("<ul style='margin:4px 0;padding-left:20px;'>")
+                    result_lines.append("<ul style='margin:1px 0;padding-left:20px;'>")
                     in_ul = True
                 item_text = stripped[2:]
                 result_lines.append(f"<li>{item_text}</li>")
@@ -1024,7 +1047,7 @@ class AIChatPanel(QWidget):
                     result_lines.append("</ul>")
                     in_ul = False
                 if not in_ol:
-                    result_lines.append("<ol style='margin:4px 0;padding-left:20px;'>")
+                    result_lines.append("<ol style='margin:1px 0;padding-left:20px;'>")
                     in_ol = True
                 result_lines.append(f"<li>{ol_match.group(2)}</li>")
                 continue
