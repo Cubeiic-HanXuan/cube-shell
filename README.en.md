@@ -246,14 +246,10 @@ Contributions are welcome! We appreciate your help in making cube-shell better.
 #### Join the Community
 
 <div>
-<a target="_blank" href="https://qm.qq.com/q/VQJQlkmc4G">
-<img src="https://img.shields.io/badge/关注腾讯QQ群-blue.svg?style=for-the-badge&logo=tencent-qq" alt="follow on QQ群" height="40">
-</a>
-
-<img src="docs/images/weixin.png" width="350" alt="follow on Weixin">
+<img src="docs/images/QQ.png" width="185" alt="follow on QQ">
+<img src="docs/images/weixin.png" width="554" alt="follow on Weixin">
 <img src="docs/images/ZFB.png" width="150" alt="维护不易，觉得不错的可以赞助一下">
 <img src="docs/images/wei_zf.png" width="175" alt="维护不易，觉得不错的可以赞助一下">
-
 </div>
 
 
