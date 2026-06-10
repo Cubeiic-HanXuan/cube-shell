@@ -9,7 +9,7 @@
   <a href="./README.en.md">English</a>
 </p>
 
-![Python-badge] ![License-badge] ![release-badge] ![download-badge] ![download-latest]
+![platform-badge] ![Python-badge] ![License-badge] ![release-badge] ![download-badge] ![download-latest]
 
 ## cube-shell
 
@@ -236,11 +236,12 @@ chmod +x build-linux.sh
 <img src="docs/images/wei_zf.png" width="175" alt="维护不易，觉得不错的可以赞助一下">
 </div>
 
+[platform-link]: https://github.com/Cubeiic-HanXuan/cube-shell/releases "Platform"
+[platform-badge]: https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg "Platform"
 [License-link]: https://github.com/Cubeiic-HanXuan/cube-shell/blob/master/LICENSE "License"
 [License-badge]: https://img.shields.io/badge/License-LGPL%20v3-blue.svg "License"
 [Python-link]: https://www.python.org/downloads/ "Python"
 [Python-badge]: https://img.shields.io/badge/python-3.12+-blue.svg "Python"
-
 [release-link]: https://github.com/Cubeiic-HanXuan/cube-shell/releases "Release status"
 [release-link]: https://github.com/Cubeiic-HanXuan/cube-shell/releases "Release status"
 [release-badge]: https://img.shields.io/github/release/Cubeiic-HanXuan/cube-shell.svg?style=flat-square "Release status"

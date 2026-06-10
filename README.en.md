@@ -9,7 +9,7 @@
   <a href="./README.en.md">English</a>
 </p>
 
-![Python-badge] ![License-badge] ![release-badge] ![download-badge] ![download-latest]
+![platform-badge] ![Python-badge] ![License-badge] ![release-badge] ![download-badge] ![download-latest]
 
 ## cube-shell
 
@@ -252,7 +252,8 @@ Contributions are welcome! We appreciate your help in making cube-shell better.
 <img src="docs/images/wei_zf.png" width="175" alt="维护不易，觉得不错的可以赞助一下">
 </div>
 
-
+[platform-link]: https://github.com/Cubeiic-HanXuan/cube-shell/releases "Platform"
+[platform-badge]: https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg "Platform"
 [License-link]: https://github.com/Cubeiic-HanXuan/cube-shell/blob/master/LICENSE "License"
 [License-badge]: https://img.shields.io/badge/License-LGPL%20v3-blue.svg "License"
 [Python-link]: https://www.python.org/downloads/ "Python"
