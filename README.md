@@ -1,8 +1,33 @@
+<div align="center">
+<a href="https://github.com/Cubeiic-HanXuan/cube-shell/">
+<img src="docs/images/docs-log.png" width="350" alt="cubeShell logo">
+</a>
+</div>
+
+<p align="center">
+  <a href="./README.md">简体中文</a> |
+  <a href="./README.en.md">English</a>
+</p>
+
+<p align="center">
+    <a href="https://www.python.org/downloads/" target="_blank">
+        <img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python Downloads">
+    </a>
+    <a href="https://github.com/Cubeiic-HanXuan/cube-shell/releases/latest">
+        <img src="https://img.shields.io/github/v/release/Cubeiic-HanXuan/cube-shell?color=blue&label=Latest%20Release" alt="Latest Release">
+    </a>
+    <a href="https://github.com/Cubeiic-HanXuan/cube-shell/blob/master/LICENSE">
+        <img height="21" src="https://img.shields.io/badge/License-LGPL%20v3-blue.svg" alt="license">
+    </a>
+    <a href="https://github.com/Cubeiic-HanXuan/cube-shell/releases/latest">
+        <img height="21" src="https://img.shields.io/github/downloads/Cubeiic-HanXuan/cube-shell/latest/total.svg" alt="license">
+    </a>
+</p>
+
+
 ## cube-shell
 
 #### 介绍
-
-![输入图片说明](docs/images/docs-log.png)
 
 `cube-shell`是`linux` 服务器远程运维管理工具，可以代替Xshell、XSftp、MobaXterm 等工具对服务器进行管理，`cube-shell` 简洁且强大。市面上大多数ssh客户端工具都是集成了很多没有用的菜单，而且ui设计十分复杂，对于初用者不太友好。
 
@@ -218,4 +243,13 @@ chmod +x build-linux.sh
 [cube-shell-video](https://mp.weixin.qq.com/s/ntDuDipnCqN4v2Y4Urzo6w)
 
 #### 有任何不懂的可以加交流群
-![qq.png.png](docs/images/qq.png)
+<div>
+<a target="_blank" href="https://qm.qq.com/q/VQJQlkmc4G">
+<img src="https://img.shields.io/badge/关注腾讯QQ群-blue.svg?style=for-the-badge&logo=tencent-qq" alt="follow on QQ群" height="40">
+</a>
+
+<img src="docs/images/weixin.png" width="350" alt="follow on Weixin">
+<img src="docs/images/ZFB.png" width="150" alt="维护不易，觉得不错的可以赞助一下">
+<img src="docs/images/wei_zf.png" width="175" alt="维护不易，觉得不错的可以赞助一下">
+
+</div>
