@@ -9,21 +9,7 @@
   <a href="./README.en.md">English</a>
 </p>
 
-<p align="center">
-    <a href="https://www.python.org/downloads/" target="_blank">
-        <img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python Downloads">
-    </a>
-    <a href="https://github.com/Cubeiic-HanXuan/cube-shell/releases/latest">
-        <img src="https://img.shields.io/github/v/release/Cubeiic-HanXuan/cube-shell?color=blue&label=Latest%20Release" alt="Latest Release">
-    </a>
-    <a href="https://github.com/Cubeiic-HanXuan/cube-shell/blob/master/LICENSE">
-        <img height="21" src="https://img.shields.io/badge/License-LGPL%20v3-blue.svg" alt="license">
-    </a>
-    <a href="https://github.com/Cubeiic-HanXuan/cube-shell/releases/latest">
-        <img height="21" src="https://img.shields.io/github/downloads/Cubeiic-HanXuan/cube-shell/latest/total.svg" alt="license">
-    </a>
-</p>
-
+![Python-badge] ![License-badge] ![release-badge] ![download-badge] ![download-latest]
 
 ## cube-shell
 
@@ -253,3 +239,15 @@ chmod +x build-linux.sh
 <img src="docs/images/wei_zf.png" width="175" alt="维护不易，觉得不错的可以赞助一下">
 
 </div>
+
+[License-link]: https://github.com/Cubeiic-HanXuan/cube-shell/blob/master/LICENSE "License"
+[License-badge]: https://img.shields.io/badge/License-LGPL%20v3-blue.svg "License"
+[Python-link]: https://www.python.org/downloads/ "Python"
+[Python-badge]: https://img.shields.io/badge/python-3.12+-blue.svg "Python"
+
+[release-link]: https://github.com/Cubeiic-HanXuan/cube-shell/releases "Release status"
+[release-link]: https://github.com/Cubeiic-HanXuan/cube-shell/releases "Release status"
+[release-badge]: https://img.shields.io/github/release/Cubeiic-HanXuan/cube-shell.svg?style=flat-square "Release status"
+[download-link]: https://github.com/Cubeiic-HanXuan/cube-shell/releases/latest "Download status"
+[download-badge]: https://img.shields.io/github/downloads/Cubeiic-HanXuan/cube-shell/total.svg "Download status"
+[download-latest]: https://img.shields.io/github/downloads/Cubeiic-HanXuan/cube-shell/latest/total.svg "latest status"
