@@ -33,9 +33,17 @@ class PipUpgradeWorker(QThread):
 
     def run(self):
         try:
+            kwargs = dict(
+                capture_output=True, text=True, timeout=120
+            )
+            # Windows GUI 应用下防止弹出控制台黑窗口
+            import os
+            if os.name == 'nt':
+                import subprocess as _sp
+                kwargs['creationflags'] = _sp.CREATE_NO_WINDOW
             result = subprocess.run(
                 ["pip", "install", "--upgrade", "hermes-agent"],
-                capture_output=True, text=True, timeout=120
+                **kwargs
             )
             output = result.stdout or result.stderr or ""
             self.finished.emit(output.strip())

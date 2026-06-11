@@ -86,11 +86,17 @@ class LocalBackend(HermesBackend):
 
     def exec_cli(self, args: list[str], timeout: int = 30) -> str:
         try:
-            result = subprocess.run(
-                [self._hermes_bin] + args,
+            kwargs = dict(
                 capture_output=True,
                 text=True,
                 timeout=timeout
+            )
+            # Windows GUI 应用下防止弹出控制台黑窗口
+            if os.name == 'nt':
+                kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+            result = subprocess.run(
+                [self._hermes_bin] + args,
+                **kwargs
             )
             if result.returncode != 0:
                 logger.warning(f"hermes CLI 返回非零退出码: {result.returncode}, stderr: {result.stderr}")

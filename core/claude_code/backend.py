@@ -117,11 +117,17 @@ class LocalBackend(ClaudeCodeBackend):
 
     def run_command(self, args: list, timeout: int = 30) -> tuple[int, str, str]:
         try:
-            result = subprocess.run(
-                [self._claude_bin] + args,
+            kwargs = dict(
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+            )
+            # Windows GUI 应用下防止弹出控制台黑窗口
+            if os.name == 'nt':
+                kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+            result = subprocess.run(
+                [self._claude_bin] + args,
+                **kwargs
             )
             if result.returncode != 0:
                 logger.warning(
