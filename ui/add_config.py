@@ -159,7 +159,7 @@ class Ui_addConfig(object):
             QCoreApplication.translate("addConfig", u"\u7ec8\u7aef\u5bc6\u7801\u53ef\u4ee5\u4e0d\u8f93\u5165", None))
         self.ipEdit.setText("")
         self.ipEdit.setPlaceholderText(
-            QCoreApplication.translate("addConfig", u"\u8bf7\u8f93\u5165\u7ec8\u7aef\u5730\u5740:\u7aef\u53e3", None))
+            QCoreApplication.translate("addConfig", u"\u8bf7\u8f93\u5165IP\u5730\u5740\uff08\u652f\u6301IPv6\uff09", None))
         self.label.setText(QCoreApplication.translate("addConfig", u"\u7528\u6237\u540d\uff1a", None))
         self.usernamEdit.setText("")
         self.usernamEdit.setPlaceholderText(

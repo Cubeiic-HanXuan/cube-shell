@@ -342,6 +342,88 @@ def remove_special_lines(text):
     return result
 
 
+def is_ipv6_address(address: str) -> bool:
+    """
+    判断给定的地址是否为 IPv6 地址。
+
+    :param address: IP 地址字符串（不含端口号，可以含方括号）
+    :return: 如果是 IPv6 地址返回 True，否则返回 False
+    """
+    # 去除可能存在的方括号
+    clean_addr = address.strip('[]')
+    try:
+        socket.inet_pton(socket.AF_INET6, clean_addr)
+        return True
+    except (socket.error, OSError):
+        return False
+
+
+def parse_host_port(host_str: str) -> tuple:
+    """
+    解析 host:port 字符串，兼容 IPv4 和 IPv6 地址。
+
+    支持的格式：
+    - IPv4:       "192.168.1.1:22"        → ("192.168.1.1", 22)
+    - IPv6:       "[fdb2:2c26::bc9c]:22"   → ("fdb2:2c26::bc9c", 22)
+    - 主机名:     "example.com:22"         → ("example.com", 22)
+    - 裸 IPv6:    "fdb2:2c26::bc9c"        → ("fdb2:2c26::bc9c", 22)（无端口，默认 22）
+    - 纯主机名:   "example.com"            → ("example.com", 22)（无端口，默认 22）
+
+    注意：裸 IPv6 + 端口（如 "fdb2::bc9c:22"）格式不可解析，
+    因为无法区分 IPv6 地址尾部与端口号，IPv6 带端口必须使用方括号格式。
+
+    :param host_str: host:port 格式字符串
+    :return: (host, port) 元组，port 为 int 类型
+    """
+    if not host_str:
+        raise ValueError("host_str 不能为空")
+
+    # IPv6 格式：[ipv6_addr]:port
+    if host_str.startswith('['):
+        bracket_end = host_str.find(']')
+        if bracket_end == -1:
+            raise ValueError(f"无效的 IPv6 地址格式: {host_str}")
+        host = host_str[1:bracket_end]
+        # ]:port 部分
+        rest = host_str[bracket_end + 1:]
+        if rest.startswith(':'):
+            port = int(rest[1:])
+        else:
+            port = 22  # 默认 SSH 端口
+        return host, port
+
+    # 检查是否包含冒号
+    colon_count = host_str.count(':')
+    if colon_count == 1:
+        # IPv4 或主机名格式：host:port
+        parts = host_str.rsplit(':', 1)
+        return parts[0], int(parts[1])
+    elif colon_count > 1:
+        # 裸 IPv6 地址（没有方括号，也没有端口号）
+        return host_str, 22
+    else:
+        # 没有冒号，只有主机名
+        return host_str, 22
+
+
+def format_host_port(ip: str, port) -> str:
+    """
+    将 IP 地址和端口格式化为 host:port 字符串，自动处理 IPv6。
+
+    - IPv4: ("192.168.1.1", 22) → "192.168.1.1:22"
+    - IPv6: ("fdb2:2c26::bc9c", 22) → "[fdb2:2c26::bc9c]:22"
+
+    :param ip: IP 地址或主机名
+    :param port: 端口号
+    :return: 格式化后的 host:port 字符串
+    """
+    ip = ip.strip().strip('[]')  # 去除用户可能输入的方括号
+    if is_ipv6_address(ip):
+        return f"[{ip}]:{port}"
+    else:
+        return f"{ip}:{port}"
+
+
 def check_server_accessibility(hostname, port):
     """
     快速检查服务器在指定端口上的可访问性。
@@ -352,6 +434,7 @@ def check_server_accessibility(hostname, port):
     """
     try:
         # 使用 socket.create_connection 检查服务器可访问性
+        # socket.create_connection 内部会自动处理 IPv6 地址
         with socket.create_connection((hostname, port), timeout=1):
             return True
     except (socket.timeout, socket.error) as e:

@@ -465,12 +465,13 @@ class FRPServiceThread(QThread):
         time.sleep(0.5)
 
         # 写入 frpc 配置
-        frpc = traversal.frpc(self.host.split(':')[0], self.token, self.ant_type, self.local_port, self.server_prot)
+        frp_host, _ = util.parse_host_port(self.host)
+        frpc = traversal.frpc(frp_host, self.token, self.ant_type, self.local_port, self.server_prot)
         with open(abspath('frpc.toml'), 'w') as file:
             file.write(frpc)
 
         util.logger.info(
-            f"FRP 配置: 服务器={self.host.split(':')[0]}, 服务端端口={self.server_prot}, 本地端口={self.local_port}")
+            f"FRP 配置: 服务器={frp_host}, 服务端端口={self.server_prot}, 本地端口={self.local_port}")
 
         # 启动 frpc
         frpc_path = str(self.frp_manager.frpc_path)
@@ -522,17 +523,18 @@ class FRPConnectThread(QThread):
     def run(self):
         try:
             host = self.params['host']
+            host_addr, host_port = util.parse_host_port(host)
 
             # 检查服务器可达性
             self.status_updated.emit("正在检查服务器连接...")
-            if not util.check_server_accessibility(host.split(':')[0], int(host.split(':')[1])):
+            if not util.check_server_accessibility(host_addr, host_port):
                 self.finished_signal.emit(False, "服务器无法连接，请检查网络或服务器状态。", not self.is_stop)
                 return
 
             # 建立 SSH 连接
             self.status_updated.emit("正在建立 SSH 连接...")
             ssh_conn = SshClient(
-                host.split(':')[0], int(host.split(':')[1]),
+                host_addr, host_port,
                 self.params['username'], self.params['password'],
                 self.params['key_type'], self.params['key_file']
             )
@@ -636,8 +638,9 @@ class FRPConnectThread(QThread):
             subprocess.run(['taskkill', '/f', '/im', 'frpc.exe'], capture_output=True, text=True)
         time.sleep(0.5)
 
+        frpc_host, _ = util.parse_host_port(self.params['host'])
         frpc = traversal.frpc(
-            self.params['host'].split(':')[0],
+            frpc_host,
             self.params['token'],
             self.params['ant_type'],
             self.params['local_port'],
@@ -647,7 +650,7 @@ class FRPConnectThread(QThread):
             file.write(frpc)
 
         util.logger.info(
-            f"FRP 配置: 服务器={self.params['host'].split(':')[0]}, 服务端端口={self.params['server_prot']}, 本地端口={self.params['local_port']}")
+            f"FRP 配置: 服务器={frpc_host}, 服务端端口={self.params['server_prot']}, 本地端口={self.params['local_port']}")
 
         frpc_path = str(self.frp_manager.frpc_path)
         frp_log_dir = str(self.frp_manager.frpc_path.parent)
@@ -2592,9 +2595,8 @@ class MainDialog(QMainWindow):
             else:
                 terminal.setColorScheme("Ubuntu")
 
-            # 🔧 修正：分离主机地址和端口
-            host_ip = host.split(':')[0]  # 纯IP地址
-            host_port = int(host.split(':')[1])  # 端口号
+            # 🔧 修正：分离主机地址和端口（兼容 IPv6）
+            host_ip, host_port = util.parse_host_port(host)
             return self._connect_with_qterm_widget(host_ip, host_port, username, password, key_type,
                                                    key_file, terminal)
 
@@ -3610,8 +3612,9 @@ class MainDialog(QMainWindow):
                 self.ui.addconfwin.dial.configName.setText(name)
                 self.ui.addconfwin.dial.usernamEdit.setText(username)
                 self.ui.addconfwin.dial.passwordEdit.setText(password)
-                self.ui.addconfwin.dial.ipEdit.setText(host.split(':')[0])
-                self.ui.addconfwin.dial.protEdit.setText(host.split(':')[1])
+                edit_host, edit_port = util.parse_host_port(host)
+                self.ui.addconfwin.dial.ipEdit.setText(edit_host)
+                self.ui.addconfwin.dial.protEdit.setText(str(edit_port))
 
         self._editing_device_old_name = name
         self.ui.addconfwin.show()
@@ -5869,7 +5872,7 @@ class AddConfigUi(QDialog):
                 except (EOFError, Exception) as e:
                     util.logger.error(f"[Warning] Failed to load config.dat: {e}, using empty dict")
                     conf = {}
-            conf[name] = [username, password, f"{ip}:{prot}", private_key_type, private_key_file]
+            conf[name] = [username, password, util.format_host_port(ip, prot), private_key_type, private_key_file]
             save_config_dat(conf)
             self.close()
 
@@ -6376,7 +6379,12 @@ class TunnelConfig(QDialog):
 
         # 验证本地绑定地址
         local = self.ui.local_bind_address_edit.text().strip()
-        if not local or ':' not in local:
+        if not local:
+            QMessageBox.warning(self, self.tr("警告"), self.tr("本地绑定地址格式不正确，请使用 host:port 格式"))
+            return
+        try:
+            util.parse_host_port(local)
+        except ValueError:
             QMessageBox.warning(self, self.tr("警告"), self.tr("本地绑定地址格式不正确，请使用 host:port 格式"))
             return
 
@@ -6384,7 +6392,12 @@ class TunnelConfig(QDialog):
         tunnel_type = self.ui.comboBox_tunnel_type.currentText()
         remote = self.ui.remote_bind_address_edit.text().strip()
         if tunnel_type != "动态":
-            if not remote or ':' not in remote:
+            if not remote:
+                QMessageBox.warning(self, self.tr("警告"), self.tr("远程绑定地址格式不正确，请使用 host:port 格式"))
+                return
+            try:
+                util.parse_host_port(remote)
+            except ValueError:
                 QMessageBox.warning(self, self.tr("警告"), self.tr("远程绑定地址格式不正确，请使用 host:port 格式"))
                 return
 
@@ -6426,12 +6439,16 @@ class TunnelConfig(QDialog):
         text = self.ui.local_bind_address_edit.text()
         ssh = self.ui.comboBox_ssh.currentText()
         username, password, host, key_type, key_file = open_data(ssh)
-        if not util.check_server_accessibility(host.split(':')[0], int(host.split(':')[1])):
+        ssh_host, ssh_port = util.parse_host_port(host)
+        if not util.check_server_accessibility(ssh_host, ssh_port):
             QMessageBox.warning(self, self.tr("连接超时"), self.tr("服务器无法连接，请检查网络或服务器状态"))
             return
 
-        ssh_command = (f"ssh -L {int(text.split(':')[1])}:{self.ui.remote_bind_address_edit.text()} "
-                       f"{username}@{host.split(':')[0]}")
+        # 生成 SSH 隧道命令（IPv6 地址需要添加 -6 标志）
+        ipv6_flag = " -6" if util.is_ipv6_address(ssh_host) else ""
+        _, local_port = util.parse_host_port(text)
+        ssh_command = (f"ssh{ipv6_flag} -L {local_port}:{self.ui.remote_bind_address_edit.text()} "
+                       f"-p {ssh_port} {username}@{ssh_host}")
         self.ui.ssh_command.setText(ssh_command)
 
     def do_copy_ssh_command(self):
@@ -6480,17 +6497,20 @@ class AddTunnelConfig(QDialog):
         if remote == '' and tunnel_type != '动态':
             QMessageBox.critical(self, self.tr("警告"), self.tr("请填写远程绑定地址"))
             return
-        split = remote.split(':')
-        if len(split) != 2 and tunnel_type != '动态':
-            QMessageBox.critical(self, self.tr("警告"), self.tr("远程绑定地址格式不正确，请检查"))
-            return
+        if tunnel_type != '动态':
+            try:
+                util.parse_host_port(remote)
+            except ValueError:
+                QMessageBox.critical(self, self.tr("警告"), self.tr("远程绑定地址格式不正确，请检查"))
+                return
 
         local = self.tunnel.local_bind_address_edit.text()
         if local == '':
             QMessageBox.critical(self, self.tr("警告"), self.tr("请填写本地绑定地址"))
             return
-        local_split = local.split(':')
-        if len(local_split) != 2:
+        try:
+            util.parse_host_port(local)
+        except ValueError:
             QMessageBox.critical(self, self.tr("警告"), self.tr("本地绑定地址格式不正确，请检查"))
             return
         if self.tunnel.ssh_tunnel_name.text() == '':
@@ -6601,21 +6621,24 @@ class Tunnel(QWidget):
 
         # 本地服务器地址
         local_bind_address = self.tunnelconfig.ui.local_bind_address_edit.text().strip()
-        if not local_bind_address or ':' not in local_bind_address:
+        if not local_bind_address:
             raise ValueError("本地绑定地址格式错误，请使用 host:port 格式，例如 localhost:1080")
 
         try:
-            local_host, local_port = local_bind_address.split(':')[0], int(local_bind_address.split(':')[1])
-        except (ValueError, IndexError):
-            raise ValueError("本地绑定地址端口必须是数字")
+            local_host, local_port = util.parse_host_port(local_bind_address)
+        except ValueError:
+            raise ValueError("本地绑定地址格式错误，请使用 host:port 格式，例如 localhost:1080")
 
         # 获取SSH信息
         ssh_user, ssh_password, host, key_type, key_file = open_data(ssh)
 
-        if not host or ':' not in host:
+        if not host:
             raise ValueError(f"SSH 服务器配置错误，请检查 '{ssh}' 的配置")
 
-        ssh_host, ssh_port = host.split(':')[0], int(host.split(':')[1])
+        try:
+            ssh_host, ssh_port = util.parse_host_port(host)
+        except ValueError:
+            raise ValueError(f"SSH 服务器地址格式错误，请检查 '{ssh}' 的配置")
 
         if not ssh_user:
             raise ValueError("用户名不能为空")
@@ -6624,14 +6647,14 @@ class Tunnel(QWidget):
         tunnel_id = self.ui.name.text()
         if type_ == '本地':
             remote_bind_address = self.tunnelconfig.ui.remote_bind_address_edit.text()
-            remote_host, remote_port = remote_bind_address.split(':')[0], int(remote_bind_address.split(':')[1])
+            remote_host, remote_port = util.parse_host_port(remote_bind_address)
             # 启动本地转发隧道
             tunnel, ssh_client, transport = self.manager.start_tunnel(tunnel_id, 'local', local_host, local_port,
                                                                       remote_host, remote_port, ssh_host, ssh_port,
                                                                       ssh_user, ssh_password, key_type, key_file)
         if type_ == '远程':
             remote_bind_address = self.tunnelconfig.ui.remote_bind_address_edit.text()
-            remote_host, remote_port = remote_bind_address.split(':')[0], int(remote_bind_address.split(':')[1])
+            remote_host, remote_port = util.parse_host_port(remote_bind_address)
             # 启动远程转发隧道
             tunnel, ssh_client, transport = self.manager.start_tunnel(tunnel_id, 'remote', local_host, local_port,
                                                                       remote_host, remote_port, ssh_host, ssh_port,
