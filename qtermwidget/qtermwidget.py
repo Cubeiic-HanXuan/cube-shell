@@ -1269,12 +1269,22 @@ class QTermWidget(QWidget, QTermWidgetInterface):
             session.started.emit()
 
     def _onParamikoClosed(self):
-        """Paramiko channel 关闭时的处理"""
+        """Paramiko channel 关闭时的处理
+
+        注意：不能 emit session.finished —— 它连接了 widget.close（见
+        session.addView），会关闭 TerminalDisplay 导致黑屏，用户看不到
+        服务端断开前的最后输出（如 JumpServer MFA 失败原因）。
+        这里改为在终端中打印断开提示并保留屏幕内容。
+        """
         # 清理桥接引用
         self.paramiko_bridge = None
         session = self.m_impl.m_session
-        if hasattr(session, 'finished'):
-            session.finished.emit()
+        # 向终端写入断开提示（此槽经 QueuedConnection 调用，已在主线程）
+        try:
+            msg = "\r\n\x1b[90m[会话已断开 / Session closed]\x1b[0m\r\n".encode('utf-8')
+            session.onReceiveBlock(msg, len(msg))
+        except Exception:
+            pass
         self.finished.emit()
 
     def _force_close_session(self):

@@ -4,8 +4,11 @@ Paramiko SSH shell channel 到 QTermWidget 的桥接适配器。
 """
 import re
 import threading
+import time
 
 from PySide6.QtCore import QObject, Signal, Qt
+
+from core.shell_mfa_watcher import ShellMfaWatcher
 
 
 class ParamikoBridge(QObject):
@@ -14,6 +17,7 @@ class ParamikoBridge(QObject):
     channelClosed = Signal()
     dataReceived = Signal(bytes, int)
     cwdChanged = Signal(str)  # Shell 报告工作目录变更（通过 OSC 7）
+    shellMfaPromptDetected = Signal(str)  # Shell 流中检测到 MFA/OTP 提示（如 JumpServer 目标机二次验证）
 
     # OSC 7 正则：\x1b]7;file://hostname/path\x07  或  \x1b]7;file://hostname/path\x1b\\
     _OSC7_PATTERN = re.compile(rb'\x1b\]7;file://[^/]*(.*?)(?:\x07|\x1b\\)')
@@ -33,6 +37,9 @@ class ParamikoBridge(QObject):
         self._running = False
         self._reader_thread = None
         self._original_set_window_size = None
+        self._mfa_watcher = ShellMfaWatcher()
+        # 记录 channel 打开时刻，供关闭路径判断会话存活时长（区分秒断与正常退出）
+        self.opened_at = time.monotonic()
 
     def start(self):
         """启动桥接 — 连接信号并开始 I/O 转发"""
@@ -89,6 +96,12 @@ class ParamikoBridge(QObject):
                 if not data:
                     break
 
+                # 检测 Shell 流中的 MFA/OTP 提示（喂原始数据，watcher 自带 ANSI 剥离；
+                # feed() 非阻塞，内置冷却防止重复触发）
+                prompt = self._mfa_watcher.feed(data)
+                if prompt:
+                    self.shellMfaPromptDetected.emit(prompt)
+
                 # 检测 OSC 7 序列并提取路径
                 for m in self._OSC7_PATTERN.finditer(data):
                     try:
@@ -124,6 +137,18 @@ class ParamikoBridge(QObject):
                 break
         self._running = False
         self.channelClosed.emit()
+
+    def send_input(self, text: str):
+        """从 UI 层向 channel 发送文本（如 MFA 验证码），自动追加回车。
+
+        注意：必须用 '\\r'（真实终端回车键发送的字符）。KoKo 等服务端的
+        行读取器以 '\\r' 作为提交标志，发 '\\n' 会被视为未提交导致超时断开。
+        """
+        if self._running and self._channel and not self._channel.closed:
+            try:
+                self._channel.send((text + '\r').encode('utf-8'))
+            except Exception:
+                pass
 
     def resize(self, cols, rows):
         """同步窗口大小到远程 PTY"""

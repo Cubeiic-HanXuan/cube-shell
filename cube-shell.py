@@ -874,6 +874,7 @@ class MainDialog(QMainWindow):
 
     # 异步更新UI信号
     update_file_tree_signal = Signal(str, str, list)  # 连接ID, 当前目录, 文件列表
+    file_tree_unavailable_signal = Signal(str)  # 连接ID - 文件树不可用（如 JMS 代理到 MFA 目标机）
     update_process_list_signal = Signal(str, list)  # 连接ID, 进程列表
 
     def __init__(self, qt_app, connection_info=None):
@@ -887,6 +888,7 @@ class MainDialog(QMainWindow):
 
         # 连接异步信号
         self.update_file_tree_signal.connect(self.handle_file_tree_updated)
+        self.file_tree_unavailable_signal.connect(self._on_file_tree_unavailable)
         self.update_process_list_signal.connect(self.handle_process_list_updated)
         # macOS 下禁用输入法相关属性，避免 TUINSRemoteViewController 报错
         self.setAttribute(Qt.WA_InputMethodEnabled, False)
@@ -1148,9 +1150,19 @@ class MainDialog(QMainWindow):
         ssh_conn.pwd = new_pwd
         self.refreshDirs()
 
-    def _on_channel_closed(self, tab_name):
-        """SSH channel 关闭（用户输入 exit）→ 自动关闭对应 tab。"""
+    def _on_channel_closed(self, tab_name, opened_at=None):
+        """SSH channel 关闭（用户输入 exit）→ 自动关闭对应 tab。
+
+        宽限期：若会话存活不足 10 秒即被关闭（通常是服务端踢掉，
+        如 JumpServer MFA 失败），不自动删 tab，保留终端上的错误输出供用户查看。
+        """
         try:
+            if opened_at is not None and time.monotonic() - opened_at < 10:
+                util.logger.warning(
+                    f"channel '{tab_name}' closed within grace period, "
+                    f"keeping tab open so the user can read server output"
+                )
+                return
             for i in range(self.ui.ShellTab.count()):
                 if self.ui.ShellTab.tabText(i) == tab_name:
                     self.off(i, tab_name)
@@ -2713,6 +2725,25 @@ class MainDialog(QMainWindow):
             self._mfa_result = code
         self._mfa_event.set()
 
+    @Slot(str, object)
+    def _on_shell_mfa_prompt(self, prompt_text, bridge):
+        """主线程槽函数 - shell 流中检测到 MFA 提示（如 JumpServer 目标机二次验证），
+        弹对话框获取验证码并回填 channel。
+
+        与认证阶段的 _on_mfa_dialog_requested 不同，此路径无阻塞等待方：
+        验证码直接写入 channel。取消对话框不影响会话，用户可直接在终端键入验证码
+        （watcher 冷却期防止立即重弹）。
+        """
+        from PySide6.QtWidgets import QInputDialog, QLineEdit
+        code, ok = QInputDialog.getText(
+            self,
+            self.tr("MFA 验证"),
+            prompt_text if prompt_text else self.tr("请输入验证码:"),
+            QLineEdit.EchoMode.Password
+        )
+        if ok and code:
+            bridge.send_input(code.strip())
+
     def _start_terminal_paramiko_bridge(self, terminal):
         """MFA 模式：使用已认证的 Paramiko transport 打开 shell channel 桥接到终端"""
         conn_id = self.current_displayed_connection_id
@@ -2747,14 +2778,27 @@ class MainDialog(QMainWindow):
                 bridge.cwdChanged.connect(
                     lambda path, sc=ssh_client: self._on_cwd_changed(sc, path)
                 )
+
+                # 连接 shell 流 MFA 提示信号 → 主线程弹验证码对话框
+                # 信号从读线程发出，接收方是 lambda（无线程亲和性），必须显式 QueuedConnection
+                bridge.shellMfaPromptDetected.connect(
+                    lambda text, b=bridge: self._on_shell_mfa_prompt(text, b),
+                    Qt.ConnectionType.QueuedConnection
+                )
+
                 # 注入 Shell 集成钩子（命令会在 shell 就绪后自动执行）
-                bridge.inject_shell_integration()
+                # JumpServer 代理连接跳过：若 KoKo 正停在 MFA 提示等待输入，
+                # 注入命令会被当作验证码消费导致认证失败、会话被关闭
+                if not getattr(ssh_client, 'is_jumpserver_proxy', False):
+                    bridge.inject_shell_integration()
 
                 # 连接 channelClosed 信号 → 用户输入 exit、logout、Ctrl+D 时自动关闭 tab
                 tab_index = self.ui.ShellTab.currentIndex()
                 tab_name = self.ui.ShellTab.tabText(tab_index)
                 bridge.channelClosed.connect(
-                    lambda name=tab_name: self._on_channel_closed(name)
+                    lambda name=tab_name, b=bridge: self._on_channel_closed(
+                        name, getattr(b, 'opened_at', None)
+                    )
                 )
 
             util.logger.info("MFA 桥接模式：终端已通过 Paramiko bridge 启动")
@@ -3862,6 +3906,11 @@ class MainDialog(QMainWindow):
         if not ssh_conn:
             return
 
+        # 文件树已被标记为不可用（如 JMS 代理到 MFA 目标机：KoKo 对每个 exec
+        # 都会新开一条到目标资产的连接，MFA 资产无法自动认证），不再重试
+        if getattr(ssh_conn, '_file_tree_unavailable', False):
+            return
+
         # 1. 如果有缓存数据，且与当前目录一致，立即显示
         # 关键修正：只有当缓存的路径与当前连接的路径一致时才使用缓存，否则说明切换了目录，不应显示旧数据
         if hasattr(ssh_conn, 'cached_pwd') and hasattr(ssh_conn, 'cached_files'):
@@ -3901,6 +3950,18 @@ class MainDialog(QMainWindow):
             if not ssh_conn.active:
                 return
 
+            # 合法性校验：远程 pwd 必须是绝对路径。
+            # 命令执行失败时（如 KoKo 返回 "ssh: handshake failed..."），
+            # 错误文本会被当作 pwd，绝不能让它进入路径框
+            if pwd and not pwd.startswith('/'):
+                util.logger.warning(f"refreshDirs: invalid pwd output, skip update: {pwd[:120]!r}")
+                # JMS 代理到 MFA 目标机时，每次 exec 都注定认证失败：
+                # 标记不可用避免反复重试，并通知 UI 显示提示
+                if getattr(ssh_conn, 'is_jumpserver_proxy', False):
+                    ssh_conn._file_tree_unavailable = True
+                    self.file_tree_unavailable_signal.emit(ssh_conn.id)
+                return
+
             if pwd:  # 确保获取成功
                 # 检查 MainDialog 是否还在运行
                 # 在 C++ / PySide 中，很难直接检查 self 是否被销毁，
@@ -3916,6 +3977,21 @@ class MainDialog(QMainWindow):
                 pass
             else:
                 util.logger.error(f"Error in refreshDirs_thread: {e}")
+
+    @Slot(str)
+    def _on_file_tree_unavailable(self, conn_id):
+        """文件树不可用（如 JMS 代理到 MFA 目标机）→ 清空并显示提示。
+
+        仅当该连接是当前显示的 tab 时才更新 UI。
+        """
+        try:
+            current_index = self.ui.ShellTab.currentIndex()
+            if self.ui.ShellTab.tabWhatsThis(current_index) != conn_id:
+                return
+            self.ui.treeWidget.clear()
+            self.add_line_edit(self.tr("目标机已启用MFA，文件管理不可用"))
+        except Exception as e:
+            util.logger.error(f"file tree unavailable handler error: {e}")
 
     @Slot(str, str, list)
     def handle_file_tree_updated(self, conn_id, pwd, files):
