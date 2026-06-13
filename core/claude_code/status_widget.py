@@ -2,11 +2,13 @@
 """Claude Code 状态面板 - 显示版本、认证、守护进程和安装路径等状态信息"""
 
 import logging
+import os
+import shlex
 
 from PySide6.QtCore import Qt, QThread, Signal, QDateTime
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-                               QLabel, QPushButton, QTextEdit, QFrame)
+                               QLabel, QPushButton, QTextEdit, QFrame, QFileDialog)
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +76,7 @@ class StatusWidget(QWidget):
         self._backend = None
         self._worker: StatusWorker | None = None
         self._update_worker: UpdateWorker | None = None
+        self._last_dir: str = ""  # 记住上次选择的项目文件夹
         self._init_ui()
 
     def _init_ui(self):
@@ -156,12 +159,23 @@ class StatusWidget(QWidget):
     # ─── 按钮操作 ───
 
     def _on_open_terminal(self):
-        """打开终端 → emit open_terminal_requested("claude")"""
-        self.open_terminal_requested.emit("claude")
+        """先选择项目文件夹，再在该目录打开终端运行 claude"""
+        self._open_in_selected_dir("claude", self.tr("选择项目文件夹"))
 
     def _on_agent_view(self):
-        """Agent View → emit open_terminal_requested("claude agents")"""
-        self.open_terminal_requested.emit("claude agents")
+        """先选择项目文件夹，再在该目录打开 Agent View"""
+        self._open_in_selected_dir("claude agents", self.tr("选择项目文件夹"))
+
+    def _open_in_selected_dir(self, claude_cmd: str, caption: str):
+        """弹出文件夹选择对话框，选定后 cd 到该目录再执行 claude 命令。"""
+        directory = QFileDialog.getExistingDirectory(
+            self, caption, self._last_dir or os.path.expanduser("~")
+        )
+        if not directory:
+            return  # 用户取消
+        self._last_dir = directory
+        cmd = f"cd {shlex.quote(directory)} && {claude_cmd}"
+        self.open_terminal_requested.emit(cmd)
 
     def _on_update(self):
         """执行 claude update 命令"""
@@ -208,14 +222,31 @@ class StatusWidget(QWidget):
             self._set_card_status(self._card_version, self.tr("未安装"), "#e74c3c")
 
         # 认证状态
+        # 真实 JSON 形如：{"loggedIn": true, "authMethod": "oauth_token",
+        #                  "apiProvider": "firstParty"}
         auth = data.get("auth_status", {})
         if auth:
-            # 尝试从 JSON 结果中提取关键信息
-            account = auth.get("account", auth.get("email", auth.get("raw", "")))
-            is_authed = auth.get("authenticated", auth.get("logged_in", False))
-            if is_authed or account:
-                status_text = account if account else self.tr("已登录")
+            is_authed = auth.get(
+                "loggedIn",
+                auth.get("authenticated", auth.get("logged_in", False)),
+            )
+            account = (
+                auth.get("account")
+                or auth.get("email")
+                or auth.get("organization")
+                or ""
+            )
+            method = auth.get("authMethod", auth.get("auth_method", ""))
+            if is_authed:
+                if account:
+                    status_text = account
+                elif method:
+                    status_text = f"{self.tr('已登录')} ({method})"
+                else:
+                    status_text = self.tr("已登录")
                 self._set_card_status(self._card_auth, status_text, "#27ae60")
+            elif account:
+                self._set_card_status(self._card_auth, account, "#27ae60")
             else:
                 self._set_card_status(self._card_auth, self.tr("未登录"), "#e74c3c")
         else:

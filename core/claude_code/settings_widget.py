@@ -85,7 +85,7 @@ class SettingsWidget(QWidget):
         model_layout.addRow(self.tr("模型选择:"), self._model_combo)
 
         self._effort_combo = QComboBox()
-        self._effort_combo.addItems(["low", "medium", "high", "max"])
+        self._effort_combo.addItems(["low", "medium", "high", "xhigh", "max"])
         self._effort_combo.setCurrentText("high")
         model_layout.addRow(self.tr("Effort 级别:"), self._effort_combo)
 
@@ -128,7 +128,10 @@ class SettingsWidget(QWidget):
         perm_layout = QFormLayout(perm_group)
 
         self._mode_combo = QComboBox()
-        self._mode_combo.addItems(["default", "acceptEdits", "plan", "auto"])
+        self._mode_combo.addItems([
+            "default", "acceptEdits", "plan", "auto",
+            "dontAsk", "bypassPermissions",
+        ])
         perm_layout.addRow(self.tr("权限模式:"), self._mode_combo)
 
         self._allowed_tools_edit = QLineEdit()
@@ -214,11 +217,18 @@ class SettingsWidget(QWidget):
         if idx >= 0:
             self._effort_combo.setCurrentIndex(idx)
 
-        # 模型提供商 (从 env 加载)
+        # 模型提供商 (从 env 加载，兼容 AUTH_TOKEN / API_KEY 两种鉴权约定，
+        # 以及 ANTHROPIC_MODEL / ANTHROPIC_DEFAULT_*_MODEL 两种模型写法)
         env = settings.get("env", {})
         base_url = env.get("ANTHROPIC_BASE_URL", "")
-        api_key = env.get("ANTHROPIC_API_KEY", "")
-        env_model = env.get("ANTHROPIC_MODEL", "")
+        api_key = env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY", "")
+        env_model = (
+            env.get("ANTHROPIC_MODEL")
+            or env.get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+            or env.get("ANTHROPIC_DEFAULT_SONNET_MODEL")
+            or env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
+            or ""
+        )
 
         if base_url:
             # 反向匹配预设提供商（优先匹配 anthropic_base_url，其次 base_url）
@@ -339,11 +349,22 @@ class SettingsWidget(QWidget):
         is_anthropic = (provider_index == 0)
         env = dict(settings.get("env", {}))
 
+        # 鉴权 token / 模型相关的所有可能键，便于切换时统一清理
+        _token_keys = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
+        _model_keys = (
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        )
+
         if is_anthropic:
             # 移除提供商相关环境变量
             env.pop("ANTHROPIC_BASE_URL", None)
-            env.pop("ANTHROPIC_API_KEY", None)
-            env.pop("ANTHROPIC_MODEL", None)
+            for k in _token_keys:
+                env.pop(k, None)
+            for k in _model_keys:
+                env.pop(k, None)
             if env:
                 settings["env"] = env
             else:
@@ -355,9 +376,23 @@ class SettingsWidget(QWidget):
             if base_url:
                 env["ANTHROPIC_BASE_URL"] = base_url
             if api_key:
-                env["ANTHROPIC_API_KEY"] = api_key
+                # 保留已有的 token 键名约定，缺省用 ANTHROPIC_AUTH_TOKEN
+                # （第三方中转站常用），并清除另一个以避免冲突。
+                token_key = "ANTHROPIC_API_KEY" if "ANTHROPIC_API_KEY" in env \
+                    else "ANTHROPIC_AUTH_TOKEN"
+                for k in _token_keys:
+                    if k != token_key:
+                        env.pop(k, None)
+                env[token_key] = api_key
             if provider_model:
-                env["ANTHROPIC_MODEL"] = provider_model
+                # 若已有 DEFAULT_*_MODEL 约定则沿用，否则写 ANTHROPIC_MODEL
+                if any(k in env for k in _model_keys[1:]):
+                    env.pop("ANTHROPIC_MODEL", None)
+                    env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = provider_model
+                    env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = provider_model
+                    env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = provider_model
+                else:
+                    env["ANTHROPIC_MODEL"] = provider_model
             settings["env"] = env
 
         # 权限模式

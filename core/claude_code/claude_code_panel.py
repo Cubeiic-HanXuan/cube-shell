@@ -80,6 +80,9 @@ class ClaudeCodePanel(QWidget):
         try:
             from core.claude_code.session_widget import SessionWidget
             self._session_widget = SessionWidget(self)
+            self._session_widget.open_terminal_requested.connect(
+                self._on_open_terminal_requested
+            )
             self._tab_widget.addTab(self._session_widget, self.tr("会话"))
         except ImportError:
             logger.debug("SessionWidget 尚未实现，跳过")

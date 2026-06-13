@@ -44,6 +44,87 @@ def _find_claude_bin() -> str:
     return "claude"
 
 
+def _parse_daemon_status(returncode: int, stdout: str) -> dict:
+    """解析 claude daemon status 输出。
+
+    - JSON 输出：直接解析。
+    - 文本输出：未运行时退出码非 0 且首行为 "not running"。
+      运行时输出包含 pid/version/uptime。
+    """
+    text = (stdout or "").strip()
+    if text:
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+    if not text:
+        return {"running": False}
+    first_line = text.splitlines()[0].strip().lower()
+    running = returncode == 0 and not first_line.startswith("not running")
+    return {"raw": text, "running": running}
+
+
+def _iso_to_ms(ts: str):
+    """将 ISO8601 时间字符串（如 2026-06-13T17:06:19.651Z）转为毫秒时间戳。"""
+    if not ts or not isinstance(ts, str):
+        return None
+    try:
+        import datetime
+        dt = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return int(dt.timestamp() * 1000)
+    except (ValueError, OverflowError):
+        return None
+
+
+def _parse_transcript_head(path: str, max_lines: int = 80) -> dict:
+    """读取会话 transcript（.jsonl）头部若干行，提取标题/cwd/首条时间戳。
+
+    只读取头部，避免完整加载大文件。
+    """
+    name = ""
+    cwd = ""
+    first_ts = None
+    first_user = ""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                if i >= max_lines:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not cwd and d.get("cwd"):
+                    cwd = d["cwd"]
+                if not name and d.get("type") == "ai-title" and d.get("aiTitle"):
+                    name = d["aiTitle"]
+                if first_ts is None and d.get("timestamp"):
+                    first_ts = d["timestamp"]
+                if not first_user and d.get("type") == "user":
+                    msg = d.get("message", {})
+                    content = msg.get("content") if isinstance(msg, dict) else None
+                    if isinstance(content, list):
+                        content = " ".join(
+                            x.get("text", "") for x in content
+                            if isinstance(x, dict) and x.get("type") in (None, "text")
+                        )
+                    if isinstance(content, str) and content.strip():
+                        first_user = content.strip()
+                # 标题、cwd、首条时间都拿到即可提前结束（ai-title 通常在前几行）
+                if name and cwd and first_ts is not None:
+                    break
+    except OSError:
+        pass
+    title = name or first_user
+    title = " ".join(title.split())  # 折叠换行/多空格
+    if len(title) > 80:
+        title = title[:80] + "…"
+    return {"name": title, "cwd": cwd, "_first_ts": first_ts}
+
+
 class ClaudeCodeBackend(ABC):
     """Claude Code 数据访问抽象层基类"""
 
@@ -70,21 +151,6 @@ class ClaudeCodeBackend(ABC):
     @abstractmethod
     def list_sessions(self) -> list:
         """列出后台会话（claude agents --json），返回 session 列表"""
-        ...
-
-    @abstractmethod
-    def stop_session(self, session_id: str) -> tuple[bool, str]:
-        """停止后台会话"""
-        ...
-
-    @abstractmethod
-    def remove_session(self, session_id: str) -> tuple[bool, str]:
-        """删除后台会话"""
-        ...
-
-    @abstractmethod
-    def start_background_task(self, prompt: str) -> tuple[bool, str]:
-        """启动后台任务（claude --bg "prompt"）"""
         ...
 
     @abstractmethod
@@ -165,42 +231,74 @@ class LocalBackend(ClaudeCodeBackend):
         return {}
 
     def get_daemon_status(self) -> dict:
+        # claude daemon status：未运行时退出码为 1，首行为 "not running"；
+        # 运行时输出 pid/version/uptime。不能用 "running" 子串判断（"not running" 也含该词）。
         returncode, stdout, stderr = self.run_command(["daemon", "status"])
-        if returncode == 0 and stdout.strip():
-            try:
-                return json.loads(stdout)
-            except json.JSONDecodeError:
-                # 文本输出，尝试简单解析
-                return {"raw": stdout.strip(), "running": "running" in stdout.lower()}
-        return {"running": False}
+        return _parse_daemon_status(returncode, stdout)
 
     def list_sessions(self) -> list:
-        returncode, stdout, stderr = self.run_command(["agents", "--json"])
+        """列出全部可恢复会话。
+
+        会话历史存储在 ~/.claude/projects/<cwd编码>/<sessionId>.jsonl，
+        每个 .jsonl 即一个可 --resume 的会话。这里读取这些 transcript，
+        并叠加 agents --json 报告的“运行中”状态。
+        """
+        sessions = self._read_transcript_sessions()
+        # 叠加正在运行的 agent 状态
+        live = self._live_agent_status()
+        for s in sessions:
+            sid = s.get("sessionId")
+            if sid in live:
+                s["status"] = live[sid]
+                s["running"] = True
+        return sessions
+
+    def _live_agent_status(self) -> dict:
+        """返回 {sessionId: status} 的运行中会话映射。"""
+        result = {}
+        returncode, stdout, stderr = self.run_command(["agents", "--json", "--all"])
         if returncode == 0 and stdout.strip():
             try:
-                data = json.loads(stdout)
-                return data if isinstance(data, list) else []
-            except json.JSONDecodeError:
+                for a in json.loads(stdout):
+                    sid = a.get("sessionId")
+                    if sid:
+                        result[sid] = a.get("status", "running")
+            except (json.JSONDecodeError, AttributeError, TypeError):
                 logger.warning(f"解析 agents JSON 失败: {stdout[:200]}")
-        return []
+        return result
 
-    def stop_session(self, session_id: str) -> tuple[bool, str]:
-        returncode, stdout, stderr = self.run_command(["agents", "stop", session_id])
-        if returncode == 0:
-            return True, stdout.strip()
-        return False, stderr.strip() or stdout.strip()
-
-    def remove_session(self, session_id: str) -> tuple[bool, str]:
-        returncode, stdout, stderr = self.run_command(["agents", "remove", session_id])
-        if returncode == 0:
-            return True, stdout.strip()
-        return False, stderr.strip() or stdout.strip()
-
-    def start_background_task(self, prompt: str) -> tuple[bool, str]:
-        returncode, stdout, stderr = self.run_command(["--bg", prompt], timeout=60)
-        if returncode == 0:
-            return True, stdout.strip()
-        return False, stderr.strip() or stdout.strip()
+    def _read_transcript_sessions(self) -> list:
+        projects_dir = os.path.join(self._claude_home, "projects")
+        if not os.path.isdir(projects_dir):
+            return []
+        results = []
+        for proj in os.listdir(projects_dir):
+            proj_path = os.path.join(projects_dir, proj)
+            if not os.path.isdir(proj_path):
+                continue
+            for fn in os.listdir(proj_path):
+                if not fn.endswith(".jsonl"):
+                    continue
+                path = os.path.join(proj_path, fn)
+                try:
+                    mtime = os.path.getmtime(path)
+                except OSError:
+                    continue
+                meta = _parse_transcript_head(path)
+                started = _iso_to_ms(meta.get("_first_ts")) or int(mtime * 1000)
+                results.append({
+                    "sessionId": fn[:-len(".jsonl")],
+                    "name": meta.get("name", ""),
+                    "cwd": meta.get("cwd", ""),
+                    "status": "saved",
+                    "running": False,
+                    "startedAt": started,
+                    "_mtime": mtime,
+                })
+        # 最近活动的排在前面
+        # 按创建时间（与“创建时间”列一致）降序，最新的在前
+        results.sort(key=lambda x: x.get("startedAt", 0), reverse=True)
+        return results
 
     def read_settings(self) -> dict:
         settings_path = os.path.join(self._claude_home, "settings.json")
@@ -324,40 +422,87 @@ class RemoteBackend(ClaudeCodeBackend):
 
     def get_daemon_status(self) -> dict:
         returncode, stdout, stderr = self.run_command(["daemon", "status"])
-        if returncode == 0 and stdout.strip():
-            try:
-                return json.loads(stdout)
-            except json.JSONDecodeError:
-                return {"raw": stdout.strip(), "running": "running" in stdout.lower()}
-        return {"running": False}
+        return _parse_daemon_status(returncode, stdout)
 
     def list_sessions(self) -> list:
-        returncode, stdout, stderr = self.run_command(["agents", "--json"])
+        """远程列出可恢复会话：扫描 ~/.claude/projects/*/*.jsonl。
+
+        通过单条 shell 脚本提取 sessionId / mtime / aiTitle / cwd，
+        再叠加 agents --json 报告的运行中状态。
+        """
+        sessions = self._read_remote_transcripts()
+        live = self._live_agent_status()
+        for s in sessions:
+            sid = s.get("sessionId")
+            if sid in live:
+                s["status"] = live[sid]
+                s["running"] = True
+        return sessions
+
+    def _live_agent_status(self) -> dict:
+        result = {}
+        returncode, stdout, stderr = self.run_command(["agents", "--json", "--all"])
         if returncode == 0 and stdout.strip():
             try:
-                data = json.loads(stdout)
-                return data if isinstance(data, list) else []
-            except json.JSONDecodeError:
+                for a in json.loads(stdout):
+                    sid = a.get("sessionId")
+                    if sid:
+                        result[sid] = a.get("status", "running")
+            except (json.JSONDecodeError, AttributeError, TypeError):
                 logger.warning(f"远程解析 agents JSON 失败: {stdout[:200]}")
-        return []
+        return result
 
-    def stop_session(self, session_id: str) -> tuple[bool, str]:
-        returncode, stdout, stderr = self.run_command(["agents", "stop", session_id])
-        if returncode == 0:
-            return True, stdout.strip()
-        return False, stderr.strip() or stdout.strip()
+    def _read_remote_transcripts(self) -> list:
+        # 兼容 GNU/BSD stat；grep 提取首个 aiTitle 与非空 cwd
+        script = (
+            'for f in ~/.claude/projects/*/*.jsonl; do '
+            '[ -f "$f" ] || continue; '
+            'sid=$(basename "$f" .jsonl); '
+            'mt=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null); '
+            "title=$(grep -m1 -oE '\"aiTitle\": *\"[^\"]*\"' \"$f\" 2>/dev/null); "
+            "cwd=$(grep -m1 -oE '\"cwd\": *\"[^\"]+\"' \"$f\" 2>/dev/null); "
+            'printf \'%s\\t%s\\t%s\\t%s\\n\' "$sid" "$mt" "$title" "$cwd"; '
+            'done'
+        )
+        try:
+            out = self.ssh_conn.exec(script, pty=False)
+        except Exception as e:
+            logger.error(f"远程读取会话 transcript 失败: {e}")
+            return []
+        if not out:
+            return []
 
-    def remove_session(self, session_id: str) -> tuple[bool, str]:
-        returncode, stdout, stderr = self.run_command(["agents", "remove", session_id])
-        if returncode == 0:
-            return True, stdout.strip()
-        return False, stderr.strip() or stdout.strip()
+        def _val(fragment: str) -> str:
+            # fragment 形如 "aiTitle": "xxx"，取冒号后引号内的值
+            try:
+                return json.loads("{" + fragment + "}").popitem()[1]
+            except (json.JSONDecodeError, KeyError, ValueError):
+                return ""
 
-    def start_background_task(self, prompt: str) -> tuple[bool, str]:
-        returncode, stdout, stderr = self.run_command(["--bg", prompt], timeout=60)
-        if returncode == 0:
-            return True, stdout.strip()
-        return False, stderr.strip() or stdout.strip()
+        results = []
+        for line in out.splitlines():
+            parts = line.rstrip("\n").split("\t")
+            if not parts or not parts[0]:
+                continue
+            sid = parts[0]
+            try:
+                mt = float(parts[1]) if len(parts) > 1 and parts[1] else 0.0
+            except ValueError:
+                mt = 0.0
+            title = _val(parts[2]) if len(parts) > 2 and parts[2] else ""
+            cwd = _val(parts[3]) if len(parts) > 3 and parts[3] else ""
+            results.append({
+                "sessionId": sid,
+                "name": title,
+                "cwd": cwd,
+                "status": "saved",
+                "running": False,
+                "startedAt": int(mt * 1000),
+                "_mtime": mt,
+            })
+        # 按创建时间（与“创建时间”列一致）降序，最新的在前
+        results.sort(key=lambda x: x.get("startedAt", 0), reverse=True)
+        return results
 
     def read_settings(self) -> dict:
         try:
