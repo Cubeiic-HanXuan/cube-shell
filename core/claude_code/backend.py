@@ -4,6 +4,7 @@ Claude Code 集成抽象层
 分别用于本地和通过 SSH 远程访问 claude CLI / 配置文件。
 """
 
+import glob
 import json
 import logging
 import os
@@ -14,34 +15,110 @@ from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
 
+# 缓存登录 shell 的 PATH，避免重复 fork shell（GUI 启动时会被多次调用）
+_login_path_cache = None
+
+
+def _get_login_shell_path():
+    """通过用户登录 shell 读取完整 PATH。
+
+    macOS/Linux 下从 Finder/Dock 启动的 GUI 应用不会加载用户的
+    shell 配置（.zshrc/.bash_profile 等），导致 PATH 不完整，
+    nvm/fnm/volta 等 node 版本管理器安装的 claude 无法被找到。
+    这里显式拉起登录交互式 shell 取其 PATH。
+    """
+    global _login_path_cache
+    if _login_path_cache is not None:
+        return _login_path_cache
+    _login_path_cache = ""  # 失败时缓存空串，避免重复尝试
+    if os.name == "nt":
+        return _login_path_cache
+    shell = os.environ.get("SHELL") or "/bin/bash"
+    try:
+        result = subprocess.run(
+            [shell, "-ilc", 'printf %s "$PATH"'],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        path = (result.stdout or "").strip()
+        if path:
+            _login_path_cache = path
+    except Exception as e:  # 取 PATH 失败不应阻断后续候选路径查找
+        logger.debug(f"读取登录 shell PATH 失败: {e}")
+    return _login_path_cache
+
 
 def _find_claude_bin() -> str:
     """查找 claude 可执行文件路径，兼容 GUI 应用无 PATH 的情况。
 
     优先级：
-    1. shutil.which("claude")
-    2. ~/.claude/bin/claude
-    3. /usr/local/bin/claude
-    4. /opt/homebrew/bin/claude
-    5. ~/.local/bin/claude
+    1. 当前进程 PATH 下的 claude
+    2. 登录 shell PATH 下的 claude（解决 Finder/Dock 启动无 PATH 问题）
+    3. 常见安装目录 + nvm/fnm/volta/pnpm 等 node 版本管理器路径
     """
     found = shutil.which("claude")
     if found:
         return found
 
+    # 用登录 shell 的完整 PATH 再找一次
+    login_path = _get_login_shell_path()
+    if login_path:
+        found = shutil.which("claude", path=login_path)
+        if found:
+            return found
+
     home = os.path.expanduser("~")
     candidates = [
+        os.path.join(home, ".claude", "local", "claude"),  # 官方原生安装器
         os.path.join(home, ".claude", "bin", "claude"),
         "/usr/local/bin/claude",
         "/opt/homebrew/bin/claude",
         os.path.join(home, ".local", "bin", "claude"),
+        os.path.join(home, ".npm-global", "bin", "claude"),
+        os.path.join(home, ".volta", "bin", "claude"),
+        os.path.join(home, "Library", "pnpm", "claude"),
     ]
+    # node 版本管理器（nvm/fnm/n 等）安装路径，取最新版本优先
+    glob_patterns = [
+        os.path.join(home, ".nvm", "versions", "node", "*", "bin", "claude"),
+        os.path.join(home, ".fnm", "node-versions", "*", "installation", "bin", "claude"),
+        "/usr/local/n/versions/node/*/bin/claude",
+    ]
+    for pattern in glob_patterns:
+        candidates.extend(sorted(glob.glob(pattern), reverse=True))
+
     for path in candidates:
         if os.path.isfile(path) and os.access(path, os.X_OK):
             return path
 
     # 都找不到就返回裸命令名，让后续报错更明确
     return "claude"
+
+
+def _build_subprocess_env() -> dict:
+    """构造运行 claude 时的环境变量，确保 PATH 包含 claude 及其依赖（node）。
+
+    claude 自身可能是 node 脚本/依赖同目录的 node，故除了 claude
+    所在目录外，还合入登录 shell 的完整 PATH。
+    """
+    env = os.environ.copy()
+    extra_paths = []
+    login_path = _get_login_shell_path()
+    if login_path:
+        extra_paths.append(login_path)
+    if extra_paths:
+        existing = env.get("PATH", "")
+        merged = os.pathsep.join(p for p in [existing] + extra_paths if p)
+        # 去重并保持顺序
+        seen = set()
+        ordered = []
+        for p in merged.split(os.pathsep):
+            if p and p not in seen:
+                seen.add(p)
+                ordered.append(p)
+        env["PATH"] = os.pathsep.join(ordered)
+    return env
 
 
 def _parse_daemon_status(returncode: int, stdout: str) -> dict:
@@ -180,6 +257,7 @@ class LocalBackend(ClaudeCodeBackend):
     def __init__(self):
         self._claude_bin = _find_claude_bin()
         self._claude_home = os.path.expanduser("~/.claude")
+        self._env = _build_subprocess_env()
 
     def run_command(self, args: list, timeout: int = 30) -> tuple[int, str, str]:
         try:
@@ -187,6 +265,7 @@ class LocalBackend(ClaudeCodeBackend):
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                env=self._env,
             )
             # Windows GUI 应用下防止弹出控制台黑窗口
             if os.name == 'nt':
