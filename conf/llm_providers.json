@@ -12,7 +12,7 @@
     "name": "智谱 GLM",
     "base_url": "https://open.bigmodel.cn/api/paas/v4",
     "anthropic_base_url": "https://open.bigmodel.cn/api/anthropic",
-    "models": ["glm-4.5", "glm-4.5-air", "glm-4.6", "glm-4.7", "glm-5", "glm-5-turbo", "glm-5.1"],
+    "models": ["glm-5.2[1m]", "glm-5.1", "glm-4.5", "glm-4.5-air", "glm-4.6", "glm-4.7", "glm-5", "glm-5-turbo"],
     "supports_thinking": true
   },
   {
@@ -36,7 +36,7 @@
     "name": "Kimi (月之暗面)",
     "base_url": "https://api.moonshot.cn/v1",
     "anthropic_base_url": "",
-    "models": ["kimi-k2.6", "kimi-k2.5", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
+    "models": ["kimi-k2.7", "kimi-k2.6", "kimi-k2.5", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
     "supports_thinking": false
   },
   {
@@ -60,7 +60,7 @@
     "name": "MiniMax",
     "base_url": "https://api.minimax.chat/v1",
     "anthropic_base_url": "",
-    "models": ["MiniMax-Text-01", "abab6.5s-chat", "abab5.5-chat"],
+    "models": ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-Text-01", "abab6.5s-chat", "abab5.5-chat"],
     "supports_thinking": false
   },
   {

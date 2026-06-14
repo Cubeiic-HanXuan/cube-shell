@@ -44,6 +44,7 @@ from qtermwidget.character_color import TABLE_COLORS  # Character color definiti
 # Import the already implemented modules
 from qtermwidget.filter import FilterChain, Filter, TerminalImageFilterChain  # Filter.h implementation
 from qtermwidget.screen_window import ScreenWindow  # ScreenWindow implementation
+from qtermwidget.screen import MODE_Cursor  # 光标可见性模式常量
 from qtermwidget.wcwidth import konsole_wcwidth
 
 # 避免循环导入 - QTermWidget将在需要时动态导入
@@ -1820,19 +1821,42 @@ class TerminalDisplay(QWidget):
                     text_color = effective_bg
             if abs(self._brightness(text_color) - self._brightness(default_bg)) < 20:
                 text_color = self._best_bw_for_bg(default_bg)
-        if hasattr(style, 'rendition') and (style.rendition & RE_CURSOR) and self.hasFocus() and (
-        not self._cursor_blinking):
-            # 终端模拟层会在“光标所在的单元格”打上 RE_CURSOR 标记。
+        if hasattr(style, 'rendition') and (style.rendition & RE_CURSOR) and self.hasFocus():
+            # 终端模拟层会在”光标所在的单元格”打上 RE_CURSOR 标记。
             # 该单元格的绘制顺序通常是：背景 -> 光标 -> 文本。
             #
-            # 这里使用 _cursor_paint_colors() 计算“光标填充色”和“光标上的文字颜色”，保证：
-            # - 不会因为反显、同色前景/背景等情况导致光标不可见
-            # - 如果用户配置了固定光标颜色，则优先使用用户配置
-            #
-            # 注意：这里一定要用 effective_fg/effective_bg 来计算，而不是原始 fg_color/bg_color。
-            cursor_fill, cursor_text = self._cursor_paint_colors(effective_fg, effective_bg, self._cursor_color)
-            painter.fillRect(rect, cursor_fill)
-            text_color = cursor_text
+            # 检查应用是否通过 DECTCEM (\x1b[?25l) 隐藏了光标：
+            # - MODE_Cursor 为 ON：绘制正常实心光标，受闪烁控制
+            # - MODE_Cursor 为 OFF 但终端有焦点：绘制弱化半透明光标（光标增强）
+            #   这是现代终端的标准做法，确保用户在 TUI 应用（如 Claude Code）中
+            #   仍能看到输入位置指示，即使应用隐藏了光标
+            mode_cursor_on = True
+            if self._screenWindow and self._screenWindow.screen():
+                try:
+                    mode_cursor_on = self._screenWindow.screen().getMode(MODE_Cursor)
+                except Exception:
+                    pass
+
+            if mode_cursor_on and not self._cursor_blinking:
+                # 正常光标：实心块，受闪烁控制
+                # 这里使用 _cursor_paint_colors() 计算”光标填充色”和”光标上的文字颜色”，保证：
+                # - 不会因为反显、同色前景/背景等情况导致光标不可见
+                # - 如果用户配置了固定光标颜色，则优先使用用户配置
+                #
+                # 注意：这里一定要用 effective_fg/effective_bg 来计算，而不是原始 fg_color/bg_color。
+                cursor_fill, cursor_text = self._cursor_paint_colors(effective_fg, effective_bg, self._cursor_color)
+                painter.fillRect(rect, cursor_fill)
+                text_color = cursor_text
+            elif not mode_cursor_on:
+                # 光标增强：应用通过 DECTCEM 隐藏了光标，但终端有焦点时显示弱化光标
+                # 关键：不能使用 effective_fg 作为填充色，因为 effective_fg 可能与背景色
+                # 相同（例如反显字符、应用自定义配色等），导致光标不可见。
+                # 正确做法：以终端默认背景色为参照，选择对比色（黑/白），再叠加半透明
+                default_bg_color = self._color_table[DEFAULT_BACK_COLOR].color
+                cursor_fill = TerminalDisplay._best_bw_for_bg(default_bg_color)
+                cursor_fill = QColor(cursor_fill)  # 复制以修改 alpha
+                cursor_fill.setAlpha(100)
+                painter.fillRect(rect, cursor_fill)
 
         painter.setPen(text_color)
 
