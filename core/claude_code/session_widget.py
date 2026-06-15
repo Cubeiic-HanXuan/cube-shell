@@ -3,7 +3,6 @@
 
 import logging
 import os
-import shlex
 
 from PySide6.QtCore import QThread, Signal, QDateTime, Qt
 from PySide6.QtGui import QColor, QBrush, QFont
@@ -153,10 +152,8 @@ class SessionWidget(QWidget):
         # 所属的 cwd 下找到对应记录，否则报 "No conversation found"。
         # 因此优先 cd 到会话的 cwd 再执行 resume。
         cwd = session.get("cwd", "")
-        if cwd:
-            cmd = f"cd {shlex.quote(str(cwd))} && claude --resume {full_id}"
-        else:
-            cmd = f"claude --resume {full_id}"
+        from core.claude_code.backend import build_cd_command
+        cmd = build_cd_command(cwd, f"claude --resume {full_id}")
         self.open_terminal_requested.emit(cmd)
         logger.info(f"请求恢复会话: {cmd}")
 

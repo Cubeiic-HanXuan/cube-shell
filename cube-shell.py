@@ -1411,7 +1411,7 @@ class MainDialog(QMainWindow):
             # 终端启动后发送 Profile 切换命令
             # 使用 QTimer 延迟发送，确保 shell 已就绪
             from PySide6.QtCore import QTimer
-            QTimer.singleShot(500, lambda: terminal.sendText(f"hermes -p {profile_name} chat\n"))
+            QTimer.singleShot(500, lambda: self._send_terminal_line(terminal, f"hermes -p {profile_name} chat"))
 
             return tab_index
         except Exception as e:
@@ -1445,6 +1445,38 @@ class MainDialog(QMainWindow):
             close_button.clicked.connect(lambda: self._close_claude_tab())
             tab_bar.setTabButton(tab_index, QTabBar.LeftSide, close_button)
 
+    @staticmethod
+    def _claude_tab_name(command):
+        """根据 claude 命令语义生成终端 Tab 名称。
+
+        命令可能被包裹了切目录前缀（``cd ... &&`` 或 PowerShell 的
+        ``Set-Location ...; if ($?) {{ ... }}``），不能简单取最后一个 token，
+        否则会得到 ``}``/``)`` 等包裹字符。这里按语义提取：
+        - ``--resume <id>`` → ``claude:<id 前 12 位>``
+        - ``claude agents`` → ``claude:agents``
+        - 其它 → ``claude``
+        """
+        tokens = command.split()
+        if "--resume" in tokens:
+            i = tokens.index("--resume")
+            if i + 1 < len(tokens):
+                return f"claude:{tokens[i + 1][:12]}"
+        if "agents" in tokens:
+            return "claude:agents"
+        return "claude"
+
+    @staticmethod
+    def _send_terminal_line(terminal, command):
+        """向终端发送一行命令并回车执行，按平台选择行结束符。
+
+        Windows 终端（ConPTY + PowerShell/PSReadLine）将裸 ``\\n`` 视为
+        "插入换行"（相当于 Shift+Enter），会进入 ``>>`` 续行而不执行命令；
+        必须发送 ``\\r``(回车) 才会被识别为 Enter 并执行。
+        macOS/Linux 使用 ``\\n``。
+        """
+        eol = "\r" if os.name == "nt" else "\n"
+        terminal.sendText(f"{command}{eol}")
+
     def open_claude_terminal(self, command: str):
         """在终端 Tab 中打开 claude 交互式会话
 
@@ -1452,7 +1484,7 @@ class MainDialog(QMainWindow):
         """
         try:
             # 创建新终端 Tab
-            tab_name = f"claude:{command.split()[-1][:12]}" if len(command.split()) > 1 else "claude"
+            tab_name = self._claude_tab_name(command)
             tab_index, terminal = self.add_new_tab(name=tab_name)
             if tab_index == -1:
                 return None
@@ -1462,7 +1494,7 @@ class MainDialog(QMainWindow):
 
             # 延迟发送命令
             from PySide6.QtCore import QTimer
-            QTimer.singleShot(500, lambda: terminal.sendText(f"{command}\n"))
+            QTimer.singleShot(500, lambda: self._send_terminal_line(terminal, command))
 
             return tab_index
         except Exception as e:
@@ -3516,7 +3548,7 @@ class MainDialog(QMainWindow):
             if command and command.strip():
                 # 延迟发送命令，等待 shell 就绪
                 from PySide6.QtCore import QTimer
-                QTimer.singleShot(500, lambda: terminal.sendText(f"{command}\n"))
+                QTimer.singleShot(500, lambda: self._send_terminal_line(terminal, command))
         except Exception as e:
             util.logger.error(f"open_local_terminal_at_path 失败: {e}")
 

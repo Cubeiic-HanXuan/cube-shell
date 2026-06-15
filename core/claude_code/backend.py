@@ -15,6 +15,26 @@ from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
 
+
+def build_cd_command(cwd: str, command: str) -> str:
+    """构造"切换到 cwd 后执行 command"的终端命令字符串，按平台选择 shell 语法。
+
+    - POSIX (bash/zsh): ``cd 'dir' && command``
+    - Windows PowerShell（5.1 与 7 均兼容）: ``Set-Location -LiteralPath 'dir'; if ($?) { command }``
+      Windows 终端默认走 pwsh/powershell，而 Windows PowerShell 5.1 不支持 ``&&``，
+      故用 ``;`` + ``$?`` 实现"目录切换成功才执行命令"的等价语义。
+
+    cwd 为空时直接返回 command。
+    """
+    if not cwd:
+        return command
+    if os.name == "nt":
+        # PowerShell 单引号字符串内的单引号需写成两个单引号转义
+        quoted = "'" + str(cwd).replace("'", "''") + "'"
+        return f"Set-Location -LiteralPath {quoted}; if ($?) {{ {command} }}"
+    return f"cd {shlex.quote(str(cwd))} && {command}"
+
+
 # 缓存登录 shell 的 PATH，避免重复 fork shell（GUI 启动时会被多次调用）
 _login_path_cache = None
 

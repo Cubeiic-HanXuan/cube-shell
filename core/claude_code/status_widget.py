@@ -3,7 +3,6 @@
 
 import logging
 import os
-import shlex
 
 from PySide6.QtCore import Qt, QThread, Signal, QDateTime
 from PySide6.QtGui import QFont
@@ -174,7 +173,8 @@ class StatusWidget(QWidget):
         if not directory:
             return  # 用户取消
         self._last_dir = directory
-        cmd = f"cd {shlex.quote(directory)} && {claude_cmd}"
+        from core.claude_code.backend import build_cd_command
+        cmd = build_cd_command(directory, claude_cmd)
         self.open_terminal_requested.emit(cmd)
 
     def _on_update(self):
