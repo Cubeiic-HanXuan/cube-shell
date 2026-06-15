@@ -2888,7 +2888,7 @@ class MainDialog(QMainWindow):
             from core.url_dispatch.url_handler import parse_cubeshell_url
             connection_info = parse_cubeshell_url(url)
             if connection_info and connection_info.get('scheme') == 'cubeshell' and connection_info.get('action') == 'open-local':
-                self.open_local_terminal_at_path(connection_info['path'])
+                self.open_local_terminal_at_path(connection_info['path'], connection_info.get('command'))
             return
         self.bastion_client.handle_url(url)
 
@@ -3496,8 +3496,12 @@ class MainDialog(QMainWindow):
         except Exception as e:
             util.logger.error(f"新建本机终端失败: {e}")
 
-    def open_local_terminal_at_path(self, path):
-        """通过 cubeshell://open-local URL Scheme 打开指定目录的本地终端"""
+    def open_local_terminal_at_path(self, path, command=None):
+        """通过 cubeshell://open-local URL Scheme 打开指定目录的本地终端。
+
+        command: 可选，打开终端后自动执行的命令（如 "claude --resume xxx"），
+        供 CC Switch 等外部程序将 cube-shell 作为首选终端使用。
+        """
         import os
         if not os.path.isdir(path):
             logger.warning(f"open_local_terminal_at_path: 目录不存在: {path}")
@@ -3509,6 +3513,10 @@ class MainDialog(QMainWindow):
             return
         try:
             self._connect_local_with_qtermwidget(terminal, tab_name, start_dir=path)
+            if command and command.strip():
+                # 延迟发送命令，等待 shell 就绪
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(500, lambda: terminal.sendText(f"{command}\n"))
         except Exception as e:
             util.logger.error(f"open_local_terminal_at_path 失败: {e}")
 
@@ -8489,7 +8497,8 @@ if __name__ == '__main__':
     if isinstance(connection_info, dict) and connection_info.get('scheme') == 'cubeshell' and connection_info.get('action') == 'open-local':
         # cubeshell://open-local 延迟到窗口完全加载后再打开终端 Tab
         _cubeshell_path = connection_info['path']
-        QTimer.singleShot(0, lambda: window.open_local_terminal_at_path(_cubeshell_path))
+        _cubeshell_cmd = connection_info.get('command')
+        QTimer.singleShot(0, lambda: window.open_local_terminal_at_path(_cubeshell_path, _cubeshell_cmd))
     else:
         setup_deferred_url_check(app, window, connection_info)
 

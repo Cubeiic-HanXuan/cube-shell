@@ -215,15 +215,18 @@ def parse_cubeshell_url(url_string):
 
     格式示例：
       cubeshell://open-local?path=/path/to/folder
+      cubeshell://open-local?path=/path/to/folder&command=claude%20--resume%20xxx
 
     返回字典：
     {
         'scheme': 'cubeshell',
-        'action': str,       # e.g. 'open-local'
-        'path': str,         # URL decoded 路径
+        'action': str,            # e.g. 'open-local'
+        'path': str,              # URL decoded 路径
+        'command': str or None,   # URL decoded 待在终端执行的命令（可选）
     }
 
     如果 path 参数缺失、路径不存在或不是目录，返回 None。
+    command 为可选参数，供外部程序（如 CC Switch）打开终端后自动执行命令。
     """
     if not url_string or not url_string.startswith('cubeshell://'):
         return None
@@ -232,7 +235,7 @@ def parse_cubeshell_url(url_string):
         parsed = urllib.parse.urlparse(url_string)
         action = parsed.netloc  # e.g. 'open-local'
 
-        # 解析 query string 获取 path 参数
+        # 解析 query string 获取 path / command 参数
         params = urllib.parse.parse_qs(parsed.query)
         path_list = params.get('path')
 
@@ -251,13 +254,18 @@ def parse_cubeshell_url(url_string):
             logger.warning(f"Path is not a directory: {path}")
             return None
 
+        command_list = params.get('command')
+        command = urllib.parse.unquote(command_list[0]) if command_list and command_list[0] else None
+
         result = {
             'scheme': 'cubeshell',
             'action': action,
             'path': path,
+            'command': command,
         }
 
-        logger.info(f"Parsed cubeshell URL: action={action}, path={path}")
+        logger.info(f"Parsed cubeshell URL: action={action}, path={path}, "
+                    f"has_command={'yes' if command else 'no'}")
 
         return result
 
