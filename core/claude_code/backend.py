@@ -12,6 +12,7 @@ import shlex
 import shutil
 import subprocess
 from abc import ABC, abstractmethod
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -261,13 +262,15 @@ class ClaudeCodeBackend(ABC):
         ...
 
     @abstractmethod
-    def read_mcp_config(self) -> dict:
-        """读取 MCP 配置"""
+    def read_mcp_config(self, scope: str = "user",
+                        project_path: Optional[str] = None) -> dict:
+        """读取 MCP 配置（scope: user=~/.claude.json, project=<path>/.mcp.json）"""
         ...
 
     @abstractmethod
-    def write_mcp_config(self, config: dict) -> tuple[bool, str]:
-        """写入 MCP 配置"""
+    def write_mcp_config(self, config: dict, scope: str = "user",
+                         project_path: Optional[str] = None) -> tuple[bool, str]:
+        """写入 MCP 配置（scope: user=~/.claude.json, project=<path>/.mcp.json）"""
         ...
 
 
@@ -428,29 +431,57 @@ class LocalBackend(ClaudeCodeBackend):
             logger.error(f"写入 settings.json 失败: {e}")
             return False, str(e)
 
-    def read_mcp_config(self) -> dict:
-        mcp_path = os.path.join(self._claude_home, "mcp.json")
-        try:
-            if not os.path.isfile(mcp_path):
-                return {}
-            with open(mcp_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except json.JSONDecodeError as e:
-            logger.warning(f"解析 mcp.json 失败: {e}")
-            return {}
-        except Exception as e:
-            logger.error(f"读取 mcp.json 失败: {e}")
-            return {}
+    def _mcp_config_path(self, scope: str, project_path: Optional[str]) -> str:
+        """根据作用域返回 Claude Code 实际读取的 MCP 配置文件路径。
 
-    def write_mcp_config(self, config: dict) -> tuple[bool, str]:
-        mcp_path = os.path.join(self._claude_home, "mcp.json")
+        - user:    ~/.claude.json （顶层 mcpServers，对所有项目生效）
+        - project: <project_path>/.mcp.json （仅对该项目生效，可随仓库共享）
+        """
+        if scope == "project":
+            base = project_path or os.getcwd()
+            return os.path.join(os.path.expanduser(base), ".mcp.json")
+        return os.path.expanduser("~/.claude.json")
+
+    def read_mcp_config(self, scope: str = "user",
+                        project_path: Optional[str] = None) -> dict:
+        path = self._mcp_config_path(scope, project_path)
         try:
-            os.makedirs(self._claude_home, exist_ok=True)
-            with open(mcp_path, "w", encoding="utf-8") as f:
-                json.dump(config, f, indent=2, ensure_ascii=False)
+            if not os.path.isfile(path):
+                return {"mcpServers": {}}
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            servers = data.get("mcpServers", {}) if isinstance(data, dict) else {}
+            return {"mcpServers": servers if isinstance(servers, dict) else {}}
+        except json.JSONDecodeError as e:
+            logger.warning(f"解析 MCP 配置失败 ({path}): {e}")
+            return {"mcpServers": {}}
+        except Exception as e:
+            logger.error(f"读取 MCP 配置失败 ({path}): {e}")
+            return {"mcpServers": {}}
+
+    def write_mcp_config(self, config: dict, scope: str = "user",
+                         project_path: Optional[str] = None) -> tuple[bool, str]:
+        path = self._mcp_config_path(scope, project_path)
+        servers = config.get("mcpServers", {}) if isinstance(config, dict) else {}
+        try:
+            # 读-改-写：只替换 mcpServers 键，保留文件中的其它配置，避免覆盖
+            existing: dict = {}
+            if os.path.isfile(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        existing = loaded
+                except json.JSONDecodeError as e:
+                    logger.warning(f"现有 MCP 配置无法解析，将重建 ({path}): {e}")
+            existing["mcpServers"] = servers
+
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(existing, f, indent=2, ensure_ascii=False)
             return True, ""
         except Exception as e:
-            logger.error(f"写入 mcp.json 失败: {e}")
+            logger.error(f"写入 MCP 配置失败 ({path}): {e}")
             return False, str(e)
 
     @staticmethod
@@ -629,26 +660,54 @@ class RemoteBackend(ClaudeCodeBackend):
             logger.error(f"远程写入 settings.json 失败: {e}")
             return False, str(e)
 
-    def read_mcp_config(self) -> dict:
-        try:
-            result = self.ssh_conn.exec("cat ~/.claude/mcp.json", pty=False)
-            if result and result.strip():
-                return json.loads(result)
-        except json.JSONDecodeError as e:
-            logger.warning(f"远程解析 mcp.json 失败: {e}")
-        except Exception as e:
-            logger.error(f"远程读取 mcp.json 失败: {e}")
-        return {}
+    @staticmethod
+    def _remote_mcp_path(scope: str, project_path: Optional[str]) -> str:
+        """远程 MCP 配置路径（user=~/.claude.json, project=<path>/.mcp.json）"""
+        if scope == "project":
+            base = (project_path or ".").rstrip("/")
+            return f"{base}/.mcp.json"
+        return "~/.claude.json"
 
-    def write_mcp_config(self, config: dict) -> tuple[bool, str]:
+    def read_mcp_config(self, scope: str = "user",
+                        project_path: Optional[str] = None) -> dict:
+        path = self._remote_mcp_path(scope, project_path)
         try:
-            content = json.dumps(config, indent=2, ensure_ascii=False)
+            result = self.ssh_conn.exec(f"cat {path} 2>/dev/null", pty=False)
+            if result and result.strip():
+                data = json.loads(result)
+                servers = data.get("mcpServers", {}) if isinstance(data, dict) else {}
+                return {"mcpServers": servers if isinstance(servers, dict) else {}}
+        except json.JSONDecodeError as e:
+            logger.warning(f"远程解析 MCP 配置失败 ({path}): {e}")
+        except Exception as e:
+            logger.error(f"远程读取 MCP 配置失败 ({path}): {e}")
+        return {"mcpServers": {}}
+
+    def write_mcp_config(self, config: dict, scope: str = "user",
+                         project_path: Optional[str] = None) -> tuple[bool, str]:
+        path = self._remote_mcp_path(scope, project_path)
+        servers = config.get("mcpServers", {}) if isinstance(config, dict) else {}
+        try:
+            # 读-改-写：拉取远端现有配置，只替换 mcpServers，保留其它键
+            existing: dict = {}
+            try:
+                raw = self.ssh_conn.exec(f"cat {path} 2>/dev/null", pty=False)
+                if raw and raw.strip():
+                    loaded = json.loads(raw)
+                    if isinstance(loaded, dict):
+                        existing = loaded
+            except json.JSONDecodeError as e:
+                logger.warning(f"远端现有 MCP 配置无法解析，将重建 ({path}): {e}")
+            existing["mcpServers"] = servers
+
+            content = json.dumps(existing, indent=2, ensure_ascii=False)
             escaped = content.replace("\\", "\\\\").replace("'", "'\\''")
-            cmd = f"mkdir -p ~/.claude && printf '%s' '{escaped}' > ~/.claude/mcp.json"
+            dir_part = path.rsplit("/", 1)[0] if "/" in path else "."
+            cmd = f"mkdir -p {dir_part} && printf '%s' '{escaped}' > {path}"
             self.ssh_conn.exec(cmd, pty=False)
             return True, ""
         except Exception as e:
-            logger.error(f"远程写入 mcp.json 失败: {e}")
+            logger.error(f"远程写入 MCP 配置失败 ({path}): {e}")
             return False, str(e)
 
     @staticmethod

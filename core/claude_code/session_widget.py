@@ -92,21 +92,8 @@ class SessionWidget(QWidget):
         self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
 
         self._tree.setStyleSheet("""
-            QTreeWidget {
-                background-color: #1e1e1e;
-                border: 1px solid #333333;
-            }
             QTreeWidget::item {
                 padding: 4px 6px;
-            }
-            QTreeWidget::item:selected {
-                background-color: #2a4a6b;
-            }
-            QHeaderView::section {
-                background-color: #2a2a2a;
-                border: 1px solid #333333;
-                padding: 4px 8px;
-                color: #cccccc;
             }
         """)
 

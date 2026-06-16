@@ -268,7 +268,7 @@ class StatusWidget(QWidget):
         if bin_path:
             self._card_path["value"].setText(bin_path)
             self._card_path["value"].setStyleSheet(
-                "font-size: 12px; border: none; color: palette(text);"
+                "font-size: 12px; border: none; color: #27ae60;"
             )
         else:
             self._set_card_status(self._card_path, self.tr("未找到"), "#e74c3c")

@@ -10,7 +10,8 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QTableWidget, QTableWidgetItem, QHeaderView,
                                QDialog, QFormLayout, QLineEdit, QTextEdit,
-                               QLabel, QMessageBox, QDialogButtonBox)
+                               QLabel, QMessageBox, QDialogButtonBox,
+                               QComboBox)
 
 logger = logging.getLogger(__name__)
 
@@ -21,19 +22,25 @@ class McpWorker(QThread):
     saved = Signal(bool, str)  # (success, message)
     error = Signal(str)
 
-    def __init__(self, backend, mode: str = "load", config: Optional[dict] = None):
+    def __init__(self, backend, mode: str = "load", config: Optional[dict] = None,
+                 scope: str = "user", project_path: Optional[str] = None):
         super().__init__()
         self._backend = backend
         self._mode = mode
         self._config = config
+        self._scope = scope
+        self._project_path = project_path
 
     def run(self):
         try:
             if self._mode == "load":
-                data = self._backend.read_mcp_config()
+                data = self._backend.read_mcp_config(
+                    scope=self._scope, project_path=self._project_path)
                 self.loaded.emit(data)
             elif self._mode == "save":
-                success, msg = self._backend.write_mcp_config(self._config or {})
+                success, msg = self._backend.write_mcp_config(
+                    self._config or {}, scope=self._scope,
+                    project_path=self._project_path)
                 self.saved.emit(success, msg)
         except Exception as e:
             logger.error(f"McpWorker 执行失败 (mode={self._mode}): {e}")
@@ -47,28 +54,36 @@ class McpEditDialog(QDialog):
                  server_config: Optional[dict] = None):
         super().__init__(parent)
         self.setWindowTitle(self.tr("编辑 MCP Server"))
-        self.setMinimumWidth(450)
+        self.setMinimumWidth(560)
+        self.setMinimumHeight(420)
         self._init_ui(server_name, server_config or {})
 
     def _init_ui(self, server_name: str, config: dict) -> None:
         layout = QVBoxLayout(self)
 
         form_layout = QFormLayout()
+        # 让输入框随对话框拉伸，避免宽度过窄
+        form_layout.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
 
         # Server 名称
         self._name_edit = QLineEdit()
+        self._name_edit.setMinimumWidth(380)
         self._name_edit.setText(server_name)
         self._name_edit.setPlaceholderText("server-name")
         form_layout.addRow(self.tr("Server 名称:"), self._name_edit)
 
         # Command
         self._command_edit = QLineEdit()
+        self._command_edit.setMinimumWidth(380)
         self._command_edit.setText(config.get("command", ""))
         self._command_edit.setPlaceholderText("npx")
         form_layout.addRow(self.tr("Command:"), self._command_edit)
 
         # Args
         self._args_edit = QLineEdit()
+        self._args_edit.setMinimumWidth(380)
         args_list = config.get("args", [])
         if isinstance(args_list, list):
             self._args_edit.setText(", ".join(str(a) for a in args_list))
@@ -80,8 +95,7 @@ class McpEditDialog(QDialog):
         form_layout.addRow(env_label)
 
         self._env_edit = QTextEdit()
-        self._env_edit.setMinimumHeight(80)
-        self._env_edit.setMaximumHeight(150)
+        self._env_edit.setMinimumHeight(140)
         env_dict = config.get("env", {})
         if isinstance(env_dict, dict):
             env_lines = [f"{k}={v}" for k, v in env_dict.items()]
@@ -153,6 +167,22 @@ class McpWidget(QWidget):
         # --- 顶部工具栏 ---
         toolbar = QHBoxLayout()
 
+        # 作用域选择：用户全局 / 当前项目
+        toolbar.addWidget(QLabel(self.tr("作用域:")))
+        self._scope_combo = QComboBox()
+        self._scope_combo.addItem(self.tr("用户全局"), "user")
+        self._scope_combo.addItem(self.tr("项目"), "project")
+        self._scope_combo.currentIndexChanged.connect(self._on_scope_changed)
+        toolbar.addWidget(self._scope_combo)
+
+        # 项目路径（仅项目作用域可见）
+        self._project_edit = QLineEdit()
+        self._project_edit.setPlaceholderText(self.tr("项目路径，写入 <路径>/.mcp.json"))
+        self._project_edit.setMinimumWidth(220)
+        self._project_edit.editingFinished.connect(self._on_refresh)
+        self._project_edit.setVisible(False)
+        toolbar.addWidget(self._project_edit)
+
         self._refresh_btn = QPushButton(self.tr("刷新"))
         self._refresh_btn.clicked.connect(self._on_refresh)
         toolbar.addWidget(self._refresh_btn)
@@ -198,12 +228,35 @@ class McpWidget(QWidget):
         layout.addWidget(self._table)
 
         # --- 底部说明 ---
-        hint_label = QLabel(self.tr(
-            "MCP 配置文件路径: ~/.claude/mcp.json  |  "
-            "选中行后可编辑或删除"
-        ))
-        hint_label.setStyleSheet("color: gray; font-size: 11px;")
-        layout.addWidget(hint_label)
+        self._hint_label = QLabel()
+        self._hint_label.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(self._hint_label)
+        self._update_hint()
+
+    def _current_scope(self) -> str:
+        """当前选中的作用域：user / project"""
+        return self._scope_combo.currentData() or "user"
+
+    def _current_project_path(self) -> Optional[str]:
+        """项目作用域下的项目路径"""
+        if self._current_scope() != "project":
+            return None
+        return self._project_edit.text().strip() or None
+
+    def _update_hint(self) -> None:
+        """根据作用域更新底部路径说明"""
+        if self._current_scope() == "project":
+            path = self._current_project_path() or self.tr("<项目路径>")
+            text = self.tr("MCP 配置文件: {}/.mcp.json  |  选中行后可编辑或删除").format(path)
+        else:
+            text = self.tr("MCP 配置文件: ~/.claude.json (mcpServers)  |  选中行后可编辑或删除")
+        self._hint_label.setText(text)
+
+    def _on_scope_changed(self) -> None:
+        """切换作用域：显示/隐藏项目路径，重新加载表格"""
+        self._project_edit.setVisible(self._current_scope() == "project")
+        self._update_hint()
+        self._load_mcp_config()
 
     def set_backend(self, backend) -> None:
         """设置 Backend"""
@@ -220,7 +273,10 @@ class McpWidget(QWidget):
         if self._worker and self._worker.isRunning():
             return
         self._refresh_btn.setEnabled(False)
-        self._worker = McpWorker(self._backend, mode="load")
+        self._worker = McpWorker(
+            self._backend, mode="load",
+            scope=self._current_scope(),
+            project_path=self._current_project_path())
         self._worker.loaded.connect(self._on_mcp_loaded)
         self._worker.error.connect(self._on_worker_error)
         self._worker.finished.connect(lambda: self._refresh_btn.setEnabled(True))
@@ -271,7 +327,8 @@ class McpWidget(QWidget):
         )
 
     def _on_refresh(self) -> None:
-        """刷新按钮点击"""
+        """刷新按钮点击（或项目路径变更）"""
+        self._update_hint()
         self._load_mcp_config()
 
     def _on_add(self) -> None:
@@ -336,10 +393,16 @@ class McpWidget(QWidget):
         if not self._backend:
             QMessageBox.warning(self, self.tr("警告"), self.tr("未连接后端"))
             return
+        if self._current_scope() == "project" and not self._current_project_path():
+            QMessageBox.warning(self, self.tr("警告"), self.tr("请先填写项目路径"))
+            return
         if self._worker and self._worker.isRunning():
             return
 
-        self._worker = McpWorker(self._backend, mode="save", config=self._mcp_data)
+        self._worker = McpWorker(
+            self._backend, mode="save", config=self._mcp_data,
+            scope=self._current_scope(),
+            project_path=self._current_project_path())
         self._worker.saved.connect(self._on_mcp_saved)
         self._worker.error.connect(self._on_worker_error)
         self._worker.start()

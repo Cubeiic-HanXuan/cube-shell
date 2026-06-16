@@ -193,9 +193,9 @@ class AgentWidget(QWidget):
         self._btn_rename.clicked.connect(self._rename_profile)
         toolbar_layout.addWidget(self._btn_rename)
 
-        self._btn_delete = QPushButton(self.tr("删除"))
-        self._btn_delete.clicked.connect(self._delete_profile)
-        toolbar_layout.addWidget(self._btn_delete)
+        # self._btn_delete = QPushButton(self.tr("删除"))
+        # self._btn_delete.clicked.connect(self._delete_profile)
+        # toolbar_layout.addWidget(self._btn_delete)
 
         toolbar_layout.addStretch()
         main_layout.addLayout(toolbar_layout)
