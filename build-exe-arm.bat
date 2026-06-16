@@ -38,8 +38,8 @@ nuitka --msvc=latest --windows-console-mode=disable --windows-icon-from-ico=icon
   --include-data-dir=conf=conf ^
   --company-name=HanXuan ^
   --product-name="cubeShell" ^
-  --file-version=2.6.0.0 ^
-  --product-version=2.6.0 ^
+  --file-version=2.7.0.0 ^
+  --product-version=2.7.0 ^
   --file-description="A powerful shell application" ^
   cube-shell.py
 

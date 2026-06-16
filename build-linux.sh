@@ -19,7 +19,7 @@ set -o pipefail
 # 项目 / 版本信息
 # ---------------------------------------------------------------------------
 APP_NAME="cube-shell"
-APP_VERSION="2.6.0"
+APP_VERSION="2.7.0"
 COMPANY_NAME="HanXuan"
 PRODUCT_NAME="cubeShell"
 FILE_DESC="A powerful shell application"

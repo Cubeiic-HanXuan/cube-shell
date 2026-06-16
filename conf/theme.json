@@ -4,7 +4,7 @@
     "theme_color": "#000000",
     "appearance": "dark",
     "font_size": 14,
-    "terminal_theme": "Ubuntu",
+    "terminal_theme": "Tango",
     "language": "zh_CN",
-    "version": "2.6.0"
+    "version": "2.7.0"
 }
