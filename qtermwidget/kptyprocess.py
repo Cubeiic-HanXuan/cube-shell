@@ -24,9 +24,17 @@ IS_WINDOWS = sys.platform == 'win32'
 if IS_WINDOWS:
     try:
         from winpty import PtyProcess as WinPtyProcess
+
     except ImportError:
         print("警告: 未找到winpty模块，Windows终端功能将不可用。请安装pywinpty: pip install pywinpty")
         WinPtyProcess = None
+    # ConPTY 后端能完整透传 256/真彩色等 VT 序列；旧的 winpty 后端会把控制台
+    # 缓冲区降级为 16 色，导致 Claude Code 等 TUI 的选中行背景高亮丢失。
+    # 这里显式优先 ConPTY，失败再回退 winpty。
+    try:
+        from winpty.enums import Backend as WinPtyBackend
+    except Exception:
+        WinPtyBackend = None
 else:
     import pty
     import termios
@@ -82,6 +90,7 @@ class KPtyProcess(KProcess):
 
         # Windows相关
         self._winpty_process = None
+        self._winpty_backend = None  # 实际使用的 PTY 后端（"ConPTY" / "winpty..."），便于诊断
         self._read_thread = None
         self._read_running = False
         self._win_input_filter_buf = ""
@@ -886,6 +895,9 @@ class KPtyProcess(KProcess):
 
             # 设置TERM
             env_dict['TERM'] = 'xterm-256color'
+            # 通过 ConPTY 可完整透传真彩色，显式告知子进程（Node 的 supports-color
+            # 据此启用 24-bit 色），确保 Claude Code 等 TUI 的高亮背景按全保真渲染
+            env_dict['COLORTERM'] = 'truecolor'
 
             # 准备命令行
             cmd_args = [program] + (arguments if arguments else [])
@@ -894,12 +906,48 @@ class KPtyProcess(KProcess):
             cwd = self.workingDirectory() if self.workingDirectory() and os.path.isdir(
                 self.workingDirectory()) else None
 
-            self._winpty_process = WinPtyProcess.spawn(
-                cmd_args,
-                cwd=cwd,
-                env=env_dict,
-                dimensions=(24, 80)  # 初始大小
-            )
+            # 优先使用 ConPTY 后端（完整透传真彩色/256 色 SGR，修复 Windows 下
+            # TUI 选中行背景高亮丢失的问题）；ConPTY 不可用时回退到 winpty。
+            #
+            # 注意 pywinpty 的 PtyProcess.spawn 内部为：
+            #     backend = backend or os.environ.get('PYWINPTY_BACKEND', None)
+            # 而 3.x 起 Backend.ConPTY == 0，直接传 backend=Backend.ConPTY 会因 0
+            # 为假值被丢弃、退化成自动选择。各版本枚举值还不同（3.x: ConPTY=0；
+            # 2.x: ConPTY=1）。因此改用环境变量 PYWINPTY_BACKEND 强制——其字符串
+            # 非空可绕过上面的假值判断，且用 str(int(Backend.ConPTY)) 动态取当前
+            # 版本的正确值。ConPTY 不可用（旧 Windows）时回退到默认/ winpty。
+            spawn_kwargs = dict(cwd=cwd, env=env_dict, dimensions=(24, 80))
+            self._winpty_process = None
+            self._winpty_backend = "auto"
+
+            conpty_val = None
+            if WinPtyBackend is not None:
+                try:
+                    conpty_val = str(int(WinPtyBackend.ConPTY))
+                except Exception:
+                    conpty_val = None
+
+            if conpty_val is not None:
+                _prev_backend_env = os.environ.get("PYWINPTY_BACKEND")
+                os.environ["PYWINPTY_BACKEND"] = conpty_val
+                try:
+                    self._winpty_process = WinPtyProcess.spawn(cmd_args, **spawn_kwargs)
+                    self._winpty_backend = "ConPTY"
+                except Exception as e:
+                    print(f"ConPTY 后端启动失败，回退 winpty: {e}")
+                    self._winpty_process = None
+                finally:
+                    # 还原环境变量，避免影响后续逻辑（子进程使用的是 env_dict，不受影响）
+                    if _prev_backend_env is None:
+                        os.environ.pop("PYWINPTY_BACKEND", None)
+                    else:
+                        os.environ["PYWINPTY_BACKEND"] = _prev_backend_env
+
+            if self._winpty_process is None:
+                self._winpty_process = WinPtyProcess.spawn(cmd_args, **spawn_kwargs)
+                self._winpty_backend = "winpty/auto(fallback)"
+
+            print(f"[cube-shell] Windows PTY 后端 = {self._winpty_backend}")
 
             self._childPid = 12345  # 假PID
 
