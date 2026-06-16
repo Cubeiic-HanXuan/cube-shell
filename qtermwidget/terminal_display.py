@@ -1956,6 +1956,19 @@ class TerminalDisplay(QWidget):
             if getattr(self, "_suppress_program_background_colors", False) and not is_reverse:
                 fill_color = default_bg
 
+            # 对比度保险（反显单元格）：
+            # 反显光标 / 反显文本的“背景”其实是被交换过来的前景色。某些来源——典型如 macOS
+            # 原生 PTY 透传的 Claude Code 反显光标——这个颜色是一个不随主题变化的固定深色，
+            # 切到深色主题后会与终端背景几乎同色，导致整块反显光标“消失”。
+            # 这里兜底：当反显格的填充色与终端默认背景亮度过于接近时，改用与背景对比最强的
+            # 黑/白填充，保证反显光标/反显文本在任意主题下都可见，并把它同步给下方文本对比逻辑，
+            # 使反显文本仍然可读。
+            # （Windows ConPTY 会把该格归一化成具体对比色，通常不触发此分支，故不受影响。）
+            if is_reverse and effective_bg.isValid():
+                if abs(self._brightness(fill_color) - self._brightness(default_bg)) < 40:
+                    fill_color = self._best_bw_for_bg(default_bg)
+                    effective_bg = fill_color
+
             if fill_color != default_bg:
                 self._draw_background(painter, rect, fill_color, False)
 
