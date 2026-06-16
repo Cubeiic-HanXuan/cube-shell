@@ -196,6 +196,12 @@ class Emulation(QObject, ABC, metaclass=QABCMeta):
     zmodemDetected = Signal()
     changeTabTextColorRequest = Signal(int)  # color
     programUsesMouseChanged = Signal(bool)  # usesMouse
+    # True=主屏(primary screen)，False=备用屏(alternate screen，即全屏TUI应用如 vim/less/htop)
+    # 显示层据此决定是否对内容做语法高亮：仅主屏 shell 输出才高亮，TUI 交还应用自身配色
+    primaryScreenInUse = Signal(bool)
+    # 焦点上报模式 (DEC ?1004)。Claude Code 等在主屏内重绘的交互式 TUI 会开启此模式，
+    # 而普通 shell 不会。显示层据此识别“主屏内的交互式应用”，关闭语法高亮避免覆盖其配色。
+    programReportFocusChanged = Signal(bool)
     programBracketedPasteModeChanged = Signal(bool)  # bracketedPasteMode
     outputChanged = Signal()
     titleChanged = Signal(int, str)  # title, newTitle

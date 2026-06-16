@@ -392,6 +392,8 @@ class Vt102Emulation(Emulation):
         elif mode == MODE_AppScreen:
             self._screen[1].clearSelection()
             self.setScreen(1)
+            # 进入备用屏（全屏TUI），通知显示层关闭语法高亮
+            self.primaryScreenInUse.emit(False)
 
         if mode < MODES_SCREEN:
             self._screen[0].setMode(mode)
@@ -411,6 +413,8 @@ class Vt102Emulation(Emulation):
         elif mode == MODE_AppScreen:
             self._screen[0].clearSelection()
             self.setScreen(0)
+            # 退回主屏（shell），通知显示层恢复语法高亮
+            self.primaryScreenInUse.emit(True)
 
         if mode < MODES_SCREEN:
             self._screen[0].resetMode(mode)
@@ -1168,6 +1172,11 @@ class Vt102Emulation(Emulation):
             target_mode = MODE_AppScreen
         elif mode_num == 2004:
             target_mode = MODE_BracketedPaste
+
+        # 焦点上报 (?1004)：不影响渲染状态机，仅通知显示层“主屏内有交互式TUI在运行”
+        if mode_num == 1004:
+            self.programReportFocusChanged.emit(enable)
+            return
 
         # 特殊处理
         if mode_num == 1048:

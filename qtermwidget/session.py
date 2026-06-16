@@ -365,6 +365,14 @@ class Session(QObject):
                 if hasattr(widget, 'setUsesMouse') and hasattr(self._emulation, 'programUsesMouse'):
                     widget.setUsesMouse(self._emulation.programUsesMouse())
 
+                # 主屏/备用屏切换通知视图：备用屏(TUI)下关闭语法高亮，避免覆盖应用自身配色
+                if hasattr(self._emulation, 'primaryScreenInUse') and hasattr(widget, 'setPrimaryScreenInUse'):
+                    self._emulation.primaryScreenInUse.connect(widget.setPrimaryScreenInUse)
+
+                # 焦点上报(?1004)通知视图：识别主屏内的交互式TUI(如 Claude Code)并关闭语法高亮
+                if hasattr(self._emulation, 'programReportFocusChanged') and hasattr(widget, 'setReportFocusMode'):
+                    self._emulation.programReportFocusChanged.connect(widget.setReportFocusMode)
+
                 # connect(_emulation, SIGNAL(programBracketedPasteModeChanged(bool)), widget, SLOT(setBracketedPasteMode(bool)));
                 if hasattr(self._emulation, 'programBracketedPasteModeChanged') and hasattr(widget,
                                                                                             'setBracketedPasteMode'):

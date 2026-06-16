@@ -463,6 +463,16 @@ class TerminalDisplay(QWidget):
         self._column_selection_mode = False
         self._selection_cache = None
 
+        # 语法高亮：每帧计算一次的“按 cell 的前景着色映射” {line: {col: QColor}}
+        # 由 _compute_highlight_map() 从 filter_chain 的 Highlight 型热点构建，
+        # 在 _draw_line 中融入正常绘制流程（不再使用后绘制覆盖层）。
+        self._highlight_map = None
+        # True=主屏(shell)，False=备用屏(全屏TUI，如 vim/less/htop)；备用屏下不做语法高亮
+        self._primary_screen_in_use = True
+        # 焦点上报模式(?1004)。Claude Code 等在主屏内重绘的交互式 TUI 会开启它，
+        # 而普通 shell 不会，据此识别“主屏内的交互式应用”并关闭语法高亮。
+        self._program_report_focus = False
+
         # Scrollbar
         self._scrollbar_location = ScrollBarPosition.NoScrollBar
         self._scroll_bar = None
@@ -1346,6 +1356,32 @@ class TerminalDisplay(QWidget):
         """Returns whether terminal uses mouse"""
         return self._mouse_marks
 
+    def setPrimaryScreenInUse(self, primary: bool):
+        """
+        主屏/备用屏切换通知（由 Emulation.primaryScreenInUse 信号驱动）。
+
+        备用屏（全屏TUI，如 Claude Code、vim）下应用会自行控制每个字符的配色，
+        此时若再叠加语法高亮会覆盖应用本意（例如 Claude Code 的 “/” 菜单选中项配色异常），
+        因此切到备用屏时关闭高亮、切回主屏时恢复，并触发一次重绘。
+        """
+        primary = bool(primary)
+        if self._primary_screen_in_use != primary:
+            self._primary_screen_in_use = primary
+            self.update()
+
+    def setReportFocusMode(self, enabled: bool):
+        """
+        焦点上报模式(DEC ?1004)切换通知（由 Emulation.programReportFocusChanged 驱动）。
+
+        Claude Code 等在主屏内重绘的交互式 TUI 会开启此模式（普通 shell 不会），
+        以此识别“主屏内的交互式应用”并关闭语法高亮，避免覆盖应用自身配色
+        （例如 “/” 菜单中以斜杠开头的命令名被路径高亮误着色）。
+        """
+        enabled = bool(enabled)
+        if self._program_report_focus != enabled:
+            self._program_report_focus = enabled
+            self.update()
+
     def setBracketedPasteMode(self, enabled: bool):
         """Sets bracketed paste mode"""
         self._bracketed_paste_mode = enabled
@@ -1489,6 +1525,10 @@ class TerminalDisplay(QWidget):
             # - 对每个小 rect 分别执行 _draw_background + _draw_contents 会导致重复扫描同一行/同一片字符，
             #   在输出高峰（例如 Claude 连续打印）时，容易让单次 paintEvent 的工作量指数级放大。
             # - 因此当 rectCount 特别大时，退化为绘制一次 boundingRect（减少重复工作，换取少量过绘）。
+            # 本帧只计算一次语法高亮着色映射（备用屏返回 None → 本帧不高亮）。
+            # 在内容绘制之前构建、绘制之后清空，供 _draw_line 逐 cell 查询。
+            self._highlight_map = self._compute_highlight_map()
+
             if rect_count is not None and rect_count > 256:
                 rect = region_to_draw.boundingRect()
                 self._draw_background(painter, rect, self.palette().window().color(), True)
@@ -1498,7 +1538,9 @@ class TerminalDisplay(QWidget):
                     self._draw_background(painter, rect, self.palette().window().color(), True)
                     self._draw_contents(painter, rect)
 
-            # Draw filters (在内容之后绘制，确保覆盖)
+            self._highlight_map = None
+
+            # Draw filters (链接下划线等；语法高亮已并入正常绘制流程)
             self._paint_filters(painter)
 
             # Draw input method preedit string
@@ -1615,6 +1657,96 @@ class TerminalDisplay(QWidget):
             self._draw_line(painter, y, lux, rlx, tlx, tly, fm)
         self._selection_cache = None
 
+    # 权限字符串 (drwxr-xr-x) 的逐字符着色，沿用原 _draw_custom_highlight 的配色
+    _PERM_HL_COLORS = {
+        'd': QColor("#bd93f9"),  # 紫色
+        'r': QColor("#8be9fd"),  # 蓝色
+        'w': QColor("#f1fa8c"),  # 黄色
+        'x': QColor("#ff5555"),  # 红色
+        '-': QColor("#6272a4"),  # 灰色
+    }
+
+    def _compute_highlight_map(self):
+        """
+        把 filter_chain 中的 Highlight 型热点转换为“按 cell 的前景着色映射”。
+
+        返回 {line: {col: QColor}}，仅包含前景色（不涉及背景）。
+        这样语法高亮可以在 _draw_line 的正常绘制流程里逐 cell 应用，
+        天然尊重选区与绘制层级，避免后绘制覆盖层带来的：
+          - 备用屏(TUI)被误着色（这里直接对备用屏返回 None）
+          - 选区内出现与选中背景不一致的色块（这里完全不画背景）
+
+        交互式应用控制终端时返回 None（本帧不做语法高亮），判定为以下任一：
+          - 备用屏(MODE_AppScreen)：vim/less/htop 等全屏应用
+          - 程序抢占鼠标(?1000/1002/1003)：fzf/btop 等
+          - 焦点上报(?1004)：Claude Code 等在主屏内重绘的交互式 TUI
+        """
+        if (not self._primary_screen_in_use) or (not self._mouse_marks) or self._program_report_focus:
+            return None
+
+        fc = getattr(self, "_filter_chain", None)
+        if not fc:
+            return None
+
+        try:
+            if hasattr(fc, "hotSpots"):
+                spots = fc.hotSpots()
+            elif hasattr(fc, "hot_spots"):
+                spots = fc.hot_spots()
+            else:
+                return None
+        except Exception:
+            return None
+
+        if not spots:
+            return None
+
+        cols = self._columns
+        total = len(self._image)
+        if cols <= 0 or total <= 0:
+            return None
+
+        result = {}
+        for spot in spots:
+            try:
+                if spot.type() != Filter.HotSpot.Type.Highlight:
+                    continue
+            except Exception:
+                continue
+
+            is_perm = spot.__class__.__name__ == 'PermissionHotSpot'
+            fg = None
+            if not is_perm:
+                fg = spot.foregroundColor() if hasattr(spot, 'foregroundColor') else None
+                if not fg:
+                    continue  # 仅以背景表达的高亮在这里忽略（当前过滤器均为前景高亮）
+
+            s_line = spot.startLine()
+            e_line = spot.endLine()
+            for line in range(s_line, e_line + 1):
+                start_col = spot.startColumn() if line == s_line else 0
+                end_col = spot.endColumn() if line == e_line else cols
+                row = result.get(line)
+                if row is None:
+                    row = {}
+                    result[line] = row
+                base = line * cols
+                for col in range(start_col, end_col):
+                    idx = base + col
+                    if idx >= total:
+                        break
+                    if is_perm:
+                        ch = self._image[idx].character
+                        c = chr(ch) if ch > 0 else ' '
+                        pc = self._PERM_HL_COLORS.get(c)
+                        if pc is None:
+                            continue
+                        row[col] = pc
+                    else:
+                        row[col] = fg
+
+        return result or None
+
     def _compute_selection_cache(self):
         sw = getattr(self, "_screenWindow", None)
         if not sw:
@@ -1717,6 +1849,12 @@ class TerminalDisplay(QWidget):
             sel_range = self._selection_range_for_line(y)
             current_selected = bool(sel_range and sel_range[0] <= start_x <= sel_range[1])
 
+            # 语法高亮：取本行的 col->QColor 映射；选中的 cell 不应用高亮（选区前景优先）。
+            hl_row = self._highlight_map.get(y) if self._highlight_map else None
+            start_hl = None
+            if hl_row and not current_selected:
+                start_hl = hl_row.get(start_x)
+
             while x <= rlx and line_start + x < len(self._image):
                 # 续位列继承起始列的选中状态，避免拆分宽字符导致闪烁
                 if self._image[line_start + x].character == 0 and x > 0:
@@ -1724,6 +1862,10 @@ class TerminalDisplay(QWidget):
                 else:
                     selected = bool(sel_range and sel_range[0] <= x <= sel_range[1])
                     if selected != current_selected:
+                        break
+                    # 高亮色发生变化时断开片段，使每段用统一前景色绘制
+                    cell_hl = hl_row.get(x) if (hl_row and not current_selected) else None
+                    if cell_hl != start_hl:
                         break
 
                 char = self._image[line_start + x]
@@ -1770,11 +1912,16 @@ class TerminalDisplay(QWidget):
                     self._fontHeight
                 )
 
-                self._draw_text_fragment(painter, text_area, text, current_attrs, current_selected)
+                self._draw_text_fragment(painter, text_area, text, current_attrs, current_selected,
+                                         override_fg=start_hl)
 
     def _draw_text_fragment(self, painter: QPainter, rect: QRect, text: str, style: Character,
-                            invert_colors: bool = False):
-        """Draw text and cursor fragment - 彻底简化版本，避免选择相关的复杂颜色处理"""
+                            invert_colors: bool = False, override_fg: Optional[QColor] = None):
+        """Draw text and cursor fragment - 彻底简化版本，避免选择相关的复杂颜色处理
+
+        override_fg: 语法高亮前景色。非选中(invert_colors=False)且非 None 时，
+        直接作为该片段的文本前景色，并跳过自动对比/抑制背景的二次改色逻辑。
+        """
         painter.save()
 
         # 基础前景/背景色
@@ -1809,10 +1956,15 @@ class TerminalDisplay(QWidget):
         # 处理光标（简化版本）
         # 绘制文本（简化版本）
         text_color = effective_fg
-        if (not invert_colors) and effective_bg.isValid():
+        # 语法高亮：非选中片段直接采用高亮前景色，并跳过下面的自动对比/抑制背景改色，
+        # 以保证高亮颜色稳定一致（这些颜色已是预先挑选的高对比度配色）。
+        apply_override = (not invert_colors) and (override_fg is not None)
+        if apply_override:
+            text_color = override_fg
+        elif (not invert_colors) and effective_bg.isValid():
             if abs(self._brightness(text_color) - self._brightness(effective_bg)) < 20:
                 text_color = self._best_bw_for_bg(effective_bg)
-        if getattr(self, "_suppress_program_background_colors", False) and (not invert_colors):
+        if (not apply_override) and getattr(self, "_suppress_program_background_colors", False) and (not invert_colors):
             # 一些配色/语法组只通过“背景色”表达高亮（前景仍是默认色）。
             # 在抑制背景后，这类高亮会完全消失，甚至可能因为前景与默认背景对比不足而“看不见”。
             # 这里将“原本的背景色”降级为“前景色”，用来保留高亮信息但不绘制背景块。
@@ -2244,157 +2396,12 @@ class TerminalDisplay(QWidget):
             # 这里的逻辑依赖于 filter chain 已经被 ScreenWindow 的 updateFilters 触发
 
             for spot in spots:
+                # 语法高亮(Type.Highlight)已并入 _draw_line 的正常绘制流程（见 _compute_highlight_map），
+                # 此处不再做后绘制覆盖，仅保留链接(Link)的鼠标悬停下划线等交互绘制。
                 if spot.type() == Filter.HotSpot.Type.Link:
                     self._draw_hotspot_highlight(painter, spot)
-                elif spot.type() == Filter.HotSpot.Type.Marker:
-                    self._draw_hotspot_marker(painter, spot)
-                elif spot.type() == Filter.HotSpot.Type.Highlight:
-                    self._draw_custom_highlight(painter, spot)
         except Exception as e:
             print(f"Warning: Could not paint filters: {e}")
-
-    def _draw_custom_highlight(self, painter: QPainter, spot):
-        """
-        绘制自定义高亮区域
-        支持通过 spot.foregroundColor() 和 spot.backgroundColor() 获取颜色
-        也支持对特殊热点类型 (如 PermissionHotSpot) 进行精细化绘制
-        """
-        try:
-            # 检查是否是特殊的权限热点
-            is_permission = spot.__class__.__name__ == 'PermissionHotSpot'
-
-            # 保存画笔状态
-            painter.save()
-
-            # 遍历热点覆盖的每一行
-            cursor_cell = self._cursor_position()
-            for line in range(spot.startLine(), spot.endLine() + 1):
-                # 计算当前行的列范围
-                start_column = spot.startColumn() if line == spot.startLine() else 0
-                end_column = spot.endColumn() if line == spot.endLine() else self._columns
-
-                # 计算绘制区域
-                # 修复：left_margin 计算需要统一
-                left_margin = (self._left_base_margin +
-                               (self._scrollbar_location == ScrollBarPosition.ScrollBarLeft and
-                                not self._scroll_bar.style().styleHint(QStyle.StyleHint.SH_ScrollBar_Transient, None,
-                                                                       self._scroll_bar)
-                                ) * self._scroll_bar.width())
-
-                # 绘制字符
-                for col in range(start_column, end_column):
-                    # 跳过当前键盘光标所在的单元格，避免覆盖导致不可见
-                    if cursor_cell.y() == line and cursor_cell.x() == col:
-                        continue
-                    # 计算字符的像素位置
-                    x = col * self._fontWidth + left_margin
-                    y = line * self._fontHeight + self._top_base_margin
-                    rect = QRect(x, y, self._fontWidth, self._fontHeight)
-
-                    # 获取当前位置的字符
-                    char_idx = line * self._columns + col
-                    if char_idx >= len(self._image):
-                        continue
-
-                    char_obj = self._image[char_idx]
-                    char_code = char_obj.character
-                    char_text = chr(char_code) if char_code > 0 else ' '
-
-                    # 确定颜色
-                    fg_color = None
-                    bg_color = None
-
-                    if is_permission:
-                        # 权限字符串的特殊着色逻辑
-                        if char_text == 'd':
-                            fg_color = QColor("#bd93f9")  # 紫色
-                        elif char_text == 'r':
-                            fg_color = QColor("#8be9fd")  # 蓝色
-                        elif char_text == 'w':
-                            fg_color = QColor("#f1fa8c")  # 黄色
-                        elif char_text == 'x':
-                            fg_color = QColor("#ff5555")  # 红色
-                        elif char_text == '-':
-                            fg_color = QColor("#6272a4")  # 灰色
-                    else:
-                        # 普通高亮热点
-                        if hasattr(spot, 'foregroundColor'):
-                            fg_color = spot.foregroundColor()
-                        if hasattr(spot, 'backgroundColor'):
-                            bg_color = spot.backgroundColor()
-
-                    # 如果没有指定颜色，则跳过绘制（保持原有显示）
-                    if not fg_color and not bg_color:
-                        continue
-
-                    # 绘制背景
-                    if bg_color:
-                        painter.fillRect(rect, bg_color)
-                    elif fg_color:
-                        # 如果只指定了前景色，我们需要擦除旧文字以避免重影
-                        # 使用终端当前的默认背景色（带透明度）进行“擦除”
-                        # 这是消除重影且不引入可见背景框的最佳方法
-
-                        # 1. 获取应当使用的背景色
-                        # 优先使用字符自身的背景色（如果有），否则使用终端默认背景色
-                        erase_bg = None
-                        if hasattr(char_obj, 'backgroundColor'):
-                            erase_bg = char_obj.backgroundColor.color(self._color_table)
-
-                        if not erase_bg or not erase_bg.isValid():
-                            erase_bg = self._color_table[DEFAULT_BACK_COLOR].color
-
-                        # 2. 执行擦除
-                        if erase_bg and erase_bg.isValid():
-                            painter.save()
-                            if self._opacity < 1.0:
-                                # 透明模式：使用 Source 模式直接替换像素（包括Alpha通道）
-                                # 这样可以完美“抠掉”旧文字，恢复成背景色
-                                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
-                                c = QColor(erase_bg)
-                                c.setAlphaF(self._opacity)
-                                painter.fillRect(rect, c)
-                            else:
-                                # 不透明模式：直接填充背景色
-                                painter.fillRect(rect, erase_bg)
-                            painter.restore()
-
-                    # 绘制字符
-                    if fg_color:
-                        painter.setPen(fg_color)
-
-                        # 关键修复：完全复刻 _draw_text_fragment 的绘制逻辑以确保对齐
-                        # 1. 设置字体样式 (粗体/斜体/下划线)
-                        font = painter.font()
-                        if hasattr(char_obj, 'rendition'):
-                            font.setBold(bool(char_obj.rendition & RE_BOLD))
-                            font.setItalic(bool(char_obj.rendition & RE_ITALIC))
-                            font.setUnderline(bool(char_obj.rendition & RE_UNDERLINE))
-                        painter.setFont(font)
-
-                        # 2. 计算位置 (居中对齐 + 基线对齐)
-                        fm = QFontMetrics(font)
-                        char_width = fm.horizontalAdvance(char_text)
-
-                        # 居中偏移量
-                        offset = (self._fontWidth - char_width) / 2
-
-                        # 基线位置计算: y + ascent + line_spacing
-                        text_x = x + offset
-                        text_y = y + self._fontAscent + self._line_spacing
-
-                        painter.drawText(QPointF(text_x, text_y), char_text)
-
-            # 恢复画笔状态
-            painter.restore()
-
-        except Exception as e:
-            print(f"Error drawing custom highlight: {e}")
-            # 确保出错时也能恢复状态
-            try:
-                painter.restore()
-            except:
-                pass
 
     def _draw_hotspot_highlight(self, painter: QPainter, spot):
         """Draw hotspot highlight"""
