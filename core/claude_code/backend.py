@@ -294,12 +294,16 @@ class LocalBackend(ClaudeCodeBackend):
                 [self._claude_bin] + args,
                 **kwargs
             )
+            # subprocess 在某些平台/调用下 stdout/stderr 可能为 None，统一归一为空串，
+            # 避免调用方对返回值执行 .strip() 等操作时抛 AttributeError。
+            stdout = result.stdout or ""
+            stderr = result.stderr or ""
             if result.returncode != 0:
                 logger.warning(
                     f"claude CLI 返回非零退出码: {result.returncode}, "
-                    f"stderr: {result.stderr.strip()}"
+                    f"stderr: {stderr.strip()}"
                 )
-            return result.returncode, result.stdout, result.stderr
+            return result.returncode, stdout, stderr
         except subprocess.TimeoutExpired:
             logger.error(f"claude CLI 执行超时 ({timeout}s): {args}")
             return -1, "", "Command timed out"
