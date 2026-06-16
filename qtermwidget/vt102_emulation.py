@@ -11,6 +11,8 @@ Copyright 1997,1998 by Lars Doelle <lars.doelle@on-line.de>
 转换为Python PySide6版本，使用C++风格命名
 """
 
+import sys
+
 from PySide6.QtCore import (
     Qt, QTimer, Slot, QStringEncoder, QSize
 )
@@ -19,6 +21,8 @@ from PySide6.QtGui import QKeyEvent
 from qtermwidget.emulation import Emulation, KeyboardCursorShape
 from qtermwidget.keyboard_translator import CTRL_MOD
 from qtermwidget.screen import MODES_SCREEN, MODE_NewLine, MODE_Insert, MODE_Cursor
+
+IS_WINDOWS = sys.platform == 'win32'
 
 # VT102模式常量定义 (从Vt102Emulation.h)
 MODE_AppScreen = MODES_SCREEN + 0  # Mode #1
@@ -207,9 +211,10 @@ class Vt102Emulation(Emulation):
 
     def eraseChar(self) -> str:
         """返回用于退格的字符 - 对应C++: char eraseChar() const override"""
-        if hasattr(self, '_keyTranslator') and self._keyTranslator:
-            # 简化处理，返回标准退格字符
-            return '\b'
+        # Windows ConPTY 把 0x08(^H) 当作 Ctrl+Backspace（按词删除），
+        # 0x7f(DEL) 才是单字符退格，所以 Windows 上必须返回 0x7f。
+        if IS_WINDOWS:
+            return '\x7f'
         return '\b'
 
     # ============================================================================
@@ -310,6 +315,20 @@ class Vt102Emulation(Emulation):
             elif event.text():
                 # 回退到默认文本处理
                 textToSend += event.text().encode('utf-8')
+
+            # Windows ConPTY 退格修正：
+            # ConPTY 把输入字节翻译回控制台按键事件，其映射是固定的——
+            #   0x7f (DEL) -> Backspace 单键，删除一个字符
+            #   0x08 (BS/^H) -> Ctrl+Backspace，PSReadLine 会按“删除整个单词”处理
+            # 而 keytab 是按 Unix PTY 习惯写的（Backspace 发 0x08），导致 Windows 上
+            # 按一次退格会一次删掉整段连续的非空格字符。这里按平台纠正字节：
+            #   普通 Backspace -> 0x7f（删一个字符）
+            #   Ctrl+Backspace -> 0x08（保留按词删除）
+            if IS_WINDOWS and event.key() == Qt.Key.Key_Backspace and textToSend:
+                if modifiers & CTRL_MOD:
+                    textToSend = textToSend.replace(b"\x7f", b"\b")
+                else:
+                    textToSend = textToSend.replace(b"\b", b"\x7f")
 
             # 发送输出
             if not fromPaste and textToSend:

@@ -1387,9 +1387,10 @@ class Screen:
                     self.reverseRendition(dest[i])
         
         # 标记当前光标位置 - 修复：创建新的Character对象，避免引用共享问题
-        # 始终标记 RE_CURSOR，由渲染层根据 MODE_Cursor 决定绘制"正常光标"还是"弱化光标"
+        # 仅在光标可见(MODE_Cursor)时标记 RE_CURSOR：应用通过 DECTCEM(\x1b[?25l) 隐藏光标时不标记，
+        # 与原生终端一致。隐藏硬件光标的 TUI（如 Claude Code）会自行用反显空格绘制输入光标。
         cursor_index = loc(self.cuX, self.cuY + lines_in_history_buffer, self.columns)
-        if cursor_index < self.columns * merged_lines:
+        if self.getMode(MODE_Cursor) and cursor_index < self.columns * merged_lines:
             if cursor_index < len(dest):
                 # 创建新的Character对象，复制原有属性，然后添加光标标志
                 original_char = dest[cursor_index]

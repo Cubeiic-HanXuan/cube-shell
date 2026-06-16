@@ -1929,25 +1929,31 @@ class TerminalDisplay(QWidget):
         bg_color = style.backgroundColor.color(self._color_table)
         default_bg = self._color_table[DEFAULT_BACK_COLOR].color
 
+        # 反显标记：注意 reverse(RE_REVERSE) 已在 screen.updateEffectiveRendition() 阶段
+        # 把前景/背景交换并写入 cell（与 Konsole 一致），这里 fg_color/bg_color 已经是交换后的结果。
+        is_reverse = bool(getattr(style, "rendition", 0) & RE_REVERSE)
+
         if invert_colors:
             selection_bg = self.palette().highlight().color()
             selection_fg = self.palette().highlightedText().color()
             self._draw_background(painter, rect, selection_bg, False)
             effective_fg, effective_bg = selection_fg, selection_bg
         else:
-            # 选择反色：当字符带有RE_REVERSE并且控件拥有焦点时，交换前景/背景
-            apply_reverse = self._should_apply_reverse(
-                invert_colors,
-                getattr(style, "rendition", 0),
-                self.hasFocus(),
-                getattr(self, "_suppress_program_background_colors", False),
-            )
+            # 关键：绝不能在这里再次按 RE_REVERSE 交换前景/背景。
+            # screen 层已经交换过一次，若这里再换就是“双重 reverse”相互抵消，等价于没有反显——
+            # 会让 Ink 类 TUI（如 Claude Code）用反显空格绘制的输入光标退化成“背景色块”而不可见，
+            # 并在不同主题下呈现为黑块/不可见。历史上据此误加了“弱化光标”兜底，
+            # 又因兜底画在硬件光标位置而在 Windows ConPTY 下漂移到右下角。
+            # 正确做法：直接采用 cell 中已交换好的前景/背景色。
+            effective_fg, effective_bg = fg_color, bg_color
 
-            effective_fg, effective_bg = (bg_color, fg_color) if apply_reverse else (fg_color, bg_color)
-
-            # 绘制背景：当启用“抑制程序背景色”时，仅保留选择（invert_colors）等显示层背景。
+            # 绘制背景：当启用“抑制程序背景色”时，仅保留显示层背景（如选区）。
+            #
+            # 例外：反显（RE_REVERSE / inverse）单元格不受抑制影响。
+            # 其“背景”实质是被交换过来的前景色，属于文本渲染语义，而非“程序设置的背景色”。
+            # 若把它当作程序背景色一并抑制，反显光标 / 反显选中项会被吞掉而不可见。
             fill_color = effective_bg
-            if getattr(self, "_suppress_program_background_colors", False):
+            if getattr(self, "_suppress_program_background_colors", False) and not is_reverse:
                 fill_color = default_bg
 
             if fill_color != default_bg:
@@ -1964,7 +1970,8 @@ class TerminalDisplay(QWidget):
         elif (not invert_colors) and effective_bg.isValid():
             if abs(self._brightness(text_color) - self._brightness(effective_bg)) < 20:
                 text_color = self._best_bw_for_bg(effective_bg)
-        if (not apply_override) and getattr(self, "_suppress_program_background_colors", False) and (not invert_colors):
+        if (not apply_override) and getattr(self, "_suppress_program_background_colors", False) and (
+                not invert_colors) and (not is_reverse):
             # 一些配色/语法组只通过“背景色”表达高亮（前景仍是默认色）。
             # 在抑制背景后，这类高亮会完全消失，甚至可能因为前景与默认背景对比不足而“看不见”。
             # 这里将“原本的背景色”降级为“前景色”，用来保留高亮信息但不绘制背景块。
@@ -1978,10 +1985,14 @@ class TerminalDisplay(QWidget):
             # 该单元格的绘制顺序通常是：背景 -> 光标 -> 文本。
             #
             # 检查应用是否通过 DECTCEM (\x1b[?25l) 隐藏了光标：
-            # - MODE_Cursor 为 ON：绘制正常实心光标，受闪烁控制
-            # - MODE_Cursor 为 OFF 但终端有焦点：绘制弱化半透明光标（光标增强）
-            #   这是现代终端的标准做法，确保用户在 TUI 应用（如 Claude Code）中
-            #   仍能看到输入位置指示，即使应用隐藏了光标
+            # - MODE_Cursor 为 ON：绘制正常实心硬件光标，受闪烁控制
+            # - MODE_Cursor 为 OFF：尊重应用意图，不绘制硬件光标（与 xterm/konsole/原生终端一致）
+            #
+            # 不再绘制“弱化光标”兜底：Ink 类 TUI（如 Claude Code）会隐藏硬件光标、改用一个反显
+            # 空格自行绘制输入光标。该反显光标现在已能正确渲染（见上面对 RE_REVERSE 不抑制背景的处理），
+            # 因此无需再在硬件光标位置画兜底光标。兜底光标画在硬件光标 (cuX, cuY) 上：
+            # macOS 原生 PTY 下它恰好停在输入框附近所以“看起来正常”，但 Windows ConPTY 在隐藏光标时
+            # 会把硬件光标停泊到屏幕右下角，于是兜底光标漂移到右下角，脱离 Claude Code 的输入框。
             mode_cursor_on = True
             if self._screenWindow and self._screenWindow.screen():
                 try:
@@ -1999,16 +2010,6 @@ class TerminalDisplay(QWidget):
                 cursor_fill, cursor_text = self._cursor_paint_colors(effective_fg, effective_bg, self._cursor_color)
                 painter.fillRect(rect, cursor_fill)
                 text_color = cursor_text
-            elif not mode_cursor_on:
-                # 光标增强：应用通过 DECTCEM 隐藏了光标，但终端有焦点时显示弱化光标
-                # 关键：不能使用 effective_fg 作为填充色，因为 effective_fg 可能与背景色
-                # 相同（例如反显字符、应用自定义配色等），导致光标不可见。
-                # 正确做法：以终端默认背景色为参照，选择对比色（黑/白），再叠加半透明
-                default_bg_color = self._color_table[DEFAULT_BACK_COLOR].color
-                cursor_fill = TerminalDisplay._best_bw_for_bg(default_bg_color)
-                cursor_fill = QColor(cursor_fill)  # 复制以修改 alpha
-                cursor_fill.setAlpha(100)
-                painter.fillRect(rect, cursor_fill)
 
         painter.setPen(text_color)
 
@@ -2044,10 +2045,6 @@ class TerminalDisplay(QWidget):
         # 绿色权重最高，其次红色，再到蓝色。
         # 这不是严格的 sRGB 相对亮度公式，但足够用来做“光标可见性”的快速判断。
         return 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
-
-    @staticmethod
-    def _should_apply_reverse(invert_colors: bool, rendition: int, has_focus: bool, suppress_bg: bool) -> bool:
-        return bool(invert_colors or (rendition & RE_REVERSE))
 
     @staticmethod
     def _best_bw_for_bg(bg: QColor) -> QColor:
