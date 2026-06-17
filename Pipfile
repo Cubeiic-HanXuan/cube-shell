@@ -17,6 +17,7 @@ PyYAML = "*"
 zai-sdk = "*"
 keyring = "*"
 prompt_toolkit = "*"
+aardwolf = "*"
 
 [dev-packages]
 pytest = "*"

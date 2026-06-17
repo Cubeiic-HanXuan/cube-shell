@@ -424,6 +424,23 @@ def format_host_port(ip: str, port) -> str:
         return f"{ip}:{port}"
 
 
+def device_protocol(entry) -> str:
+    """
+    判断设备配置条目使用的连接协议。
+
+    - SSH 设备：值为 list（[username, password, host:port, key_type, key_file]，兼容旧的 len==3）
+    - RDP 设备：值为 dict 且 __type__ == "rdp"
+
+    用 isinstance 区分，兼容存量配置，无需迁移。
+
+    :param entry: config.dat 中某个设备名对应的值
+    :return: "rdp" 或 "ssh"
+    """
+    if isinstance(entry, dict) and entry.get("__type__") == "rdp":
+        return "rdp"
+    return "ssh"
+
+
 def check_server_accessibility(hostname, port):
     """
     快速检查服务器在指定端口上的可访问性。

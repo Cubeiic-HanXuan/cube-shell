@@ -11,3 +11,4 @@ openai>=2.37.0
 keyring>=25.7.0
 prompt_toolkit>=3.0.52
 pytest>=9.0.3
+aardwolf>=0.2.13

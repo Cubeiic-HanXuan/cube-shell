@@ -46,7 +46,7 @@ from PySide6.QtGui import QIcon, QAction, QCursor, QCloseEvent, QInputMethodEven
 from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QDialog, QMessageBox, QTreeWidgetItem, \
     QInputDialog, QFileDialog, QTreeWidget, QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QTableWidgetItem, \
     QHeaderView, QTabBar, QTextBrowser, QLineEdit, QScrollArea, QGridLayout, QProgressBar, QProgressDialog, \
-    QDockWidget, QCheckBox, QFrame, QListWidget, QListWidgetItem, QStyledItemDelegate, QSizePolicy
+    QDockWidget, QCheckBox, QFrame, QListWidget, QListWidgetItem, QStyledItemDelegate, QSizePolicy, QComboBox
 from deepdiff import DeepDiff
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
@@ -58,7 +58,9 @@ from core.frequently_used_commands import TreeSearchApp
 from core.uploader.progress_adapter import ProgressAdapter
 from core.uploader.sftp_uploader_core import SFTPUploaderCore
 from core.vars import ICONS, CONF_FILE, CMDS, KEYS
+from core.rdp.rdp_client import RDPWidget, RDPClientConsoleSettings, build_rdp_url
 from function import util, about, theme, traversal
+from function.util import device_protocol
 from function.ssh_func import SshClient
 from function.util import format_file_size, has_valid_suffix
 from qtermwidget.filter import HighlightFilter, PermissionHighlightFilter
@@ -898,6 +900,8 @@ class MainDialog(QMainWindow):
         self.update_timer = None
         # 存储 SSH 客户端实例，用于管理后台连接
         self.ssh_clients = {}
+        # 存储 RDP 会话（RDPWidget），key 为 tab 的 tabWhatsThis
+        self.rdp_clients = {}
         icon = QIcon(":index.png")
         self.ui.ShellTab.tabBar().setTabIcon(0, icon)
 
@@ -1777,6 +1781,128 @@ class MainDialog(QMainWindow):
 
         return tab_index, self.Shell
 
+    # 新增 RDP 标签页：内嵌 RDPWidget 渲染远程桌面
+    def add_new_rdp_tab(self, name, rdp_widget):
+        tab = QWidget()
+        tab.setObjectName("rdpTab")
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(0)
+        layout.setContentsMargins(0, 0, 0, 0)
+        rdp_widget.setObjectName("RDPView")
+        layout.addWidget(rdp_widget)
+
+        tab_name = self.generate_unique_tab_name(name)
+        tab_index = self.ui.ShellTab.addTab(tab, tab_name)
+        self.ui.ShellTab.setCurrentIndex(tab_index)
+
+        if tab_index > 0:
+            tab_bar = self.ui.ShellTab.tabBar()
+            close_button = TabCloseButton(self, tab_bar=tab_bar)
+            close_button.clicked.connect(lambda: self.off_rdp(tab_name))
+            tab_bar.setTabButton(tab_index, QTabBar.LeftSide, close_button)
+
+        return tab_index, tab_name
+
+    # 显示缩放系数：连接分辨率 = 屏幕物理像素 ÷ 该系数。
+    # aardwolf 不发送 RDP 的 DPI 缩放协商(desktopScaleFactor)，远程内容大小完全由连接分辨率
+    # 决定：分辨率越高内容越小越锐利、越低越大略柔化。直接用满物理像素会让高分屏(如 Retina)
+    # 上的图标/文字过小无法操作，故按系数缩小连接分辨率(类比 Windows 的 150% 缩放)，
+    # 显示区仍铺满物理像素 → 内容放大约 1.5 倍，同时保持该分辨率下的清晰度。
+    RDP_DISPLAY_SCALE = 2
+
+    # 计算 RDP 连接分辨率：取主屏物理像素(逻辑尺寸×设备像素比) ÷ 显示缩放系数，
+    # 宽对齐到 4、高对齐到 2，并夹在合理范围内(避免过小变糊 / 过大耗资源)。
+    def _rdp_target_resolution(self):
+        w, h = 1920, 1080
+        try:
+            screen = self.screen() or QApplication.primaryScreen()
+            if screen is not None:
+                geo = screen.geometry()
+                dpr = screen.devicePixelRatio() or 1.0
+                w = int(geo.width() * dpr / self.RDP_DISPLAY_SCALE)
+                h = int(geo.height() * dpr / self.RDP_DISPLAY_SCALE)
+        except Exception as e:
+            util.logger.warning(f"获取屏幕分辨率失败，回退 1920x1080: {e}")
+        # 对齐 + 夹取范围（RDP 宽度需 4 对齐，高度需偶数）
+        w = max(1280, min(w, 4096))
+        h = max(800, min(h, 2304))
+        w -= w % 4
+        h -= h % 2
+        return w, h
+
+    # 打开 RDP 远程桌面连接
+    def open_rdp_tab(self, name):
+        from aardwolf.commons.iosettings import RDPIOSettings
+        from aardwolf.commons.queuedata.constants import VIDEO_FORMAT
+
+        with open(get_config_path('config.dat'), 'rb') as c:
+            entry = pickle.loads(c.read())[name]
+            c.close()
+
+        if device_protocol(entry) != "rdp":
+            return
+
+        username = entry.get("username", "")
+        password = entry.get("password", "")
+        host_field = entry.get("host", "")
+        domain = entry.get("domain", "")
+        auth = entry.get("auth", "ntlm")
+
+        host_ip, host_port = util.parse_host_port(host_field)
+        # host_field 始终由 format_host_port 写入(带端口)，缺省时回退到 RDP 默认端口
+        if not host_port:
+            host_port = 3389
+
+        url = build_rdp_url(host_ip, host_port, username, password, domain, auth)
+        util.logger.info(f"打开 RDP 连接: {host_ip}:{host_port} (auth={auth})")
+
+        # 按屏幕物理像素(含 Retina 设备像素比)连接，使窗口内始终是"缩小显示"=锐利不糊。
+        # aardwolf 不支持连接中改分辨率，故一次性取够大的分辨率，缩放时只做 downscale。
+        rdp_w, rdp_h = self._rdp_target_resolution()
+        iosettings = RDPIOSettings()
+        iosettings.video_width = rdp_w
+        iosettings.video_height = rdp_h
+        iosettings.video_bpp_min = 15
+        iosettings.video_bpp_max = 32
+        iosettings.video_out_format = VIDEO_FORMAT.PIL
+        iosettings.client_keyboard = 'enus'
+        util.logger.info(f"RDP 连接分辨率: {rdp_w}x{rdp_h}")
+
+        settings = RDPClientConsoleSettings(url, iosettings)
+        rdp_widget = RDPWidget(settings)
+
+        tab_index, tab_name = self.add_new_rdp_tab(name, rdp_widget)
+        conn_id = "rdp-" + uuid.uuid4().hex
+        self.ui.ShellTab.setTabWhatsThis(tab_index, conn_id)
+        self.rdp_clients[conn_id] = rdp_widget
+
+        # 连接断开：仅在已成功显示过画面(真正连上后断开)时自动关闭标签页；
+        # 若从未连上(认证/网络失败)，保留标签页展示错误信息，避免"一闪而过"
+        rdp_widget.connection_terminated.connect(
+            lambda tn=tab_name, w=rdp_widget: self._on_rdp_session_ended(tn, w))
+        rdp_widget.connection_error.connect(
+            lambda msg, nm=name: util.logger.error(f"RDP 连接失败 [{nm}]: {msg}"))
+        rdp_widget.setFocus()
+
+    def _on_rdp_session_ended(self, tab_name, widget):
+        # 已成功连上后远程断开 → 自动关闭；从未连上 → 保留标签页展示错误
+        if widget.had_frame():
+            self.off_rdp(tab_name)
+
+    # 关闭 RDP 标签页并清理线程
+    def off_rdp(self, name):
+        for i in range(self.ui.ShellTab.count()):
+            if self.ui.ShellTab.tabText(i) == name:
+                conn_id = self.ui.ShellTab.tabWhatsThis(i)
+                widget = self.rdp_clients.pop(conn_id, None)
+                if widget is not None:
+                    try:
+                        widget.stop()
+                    except Exception as e:
+                        util.logger.error(f"Failed to stop RDP widget: {e}")
+                break
+        self._remove_tab_by_name(name)
+
     # 生成标签名
     def generate_unique_tab_name(self, base_name):
         existing_names = [self.ui.ShellTab.tabText(i) for i in range(self.ui.ShellTab.count())]
@@ -2230,6 +2356,9 @@ class MainDialog(QMainWindow):
             dic = pickle.loads(c.read())
             c.close()
         for k in dic.keys():
+            # 隧道/FRP 仅支持 SSH 设备，跳过 RDP 设备
+            if device_protocol(dic.get(k)) == "rdp":
+                continue
             self.ui.comboBox.addItem(icon_ssh, k)
 
     def menuBarController(self):
@@ -3071,10 +3200,25 @@ class MainDialog(QMainWindow):
             if item_type == "group":
                 current_item.setExpanded(not current_item.isExpanded())
                 return
-            # 只允许设备节点和本机终端触发连接
-            if item_type not in ("device", "localhost"):
+            # 只允许设备节点、RDP 节点和本机终端触发连接
+            if item_type not in ("device", "rdp_device", "localhost"):
                 return
             name = current_item.text(0)
+
+            # RDP 设备：走独立的远程桌面标签页，不进入 SSH 连接流程
+            if item_type == "rdp_device" and name:
+                if self.is_connecting_lock:
+                    return
+                if now_ms - getattr(self, "_last_connect_attempt_ts", 0) < 800:
+                    return
+                self._last_connect_attempt_ts = now_ms
+                try:
+                    self.open_rdp_tab(name)
+                except Exception as e:
+                    util.logger.error(f"打开 RDP 连接失败: {e}")
+                    self.alarm(self.tr('打开 RDP 连接失败：') + str(e))
+                return
+
             if name:
 
                 # 标记开始连接
@@ -3209,6 +3353,15 @@ class MainDialog(QMainWindow):
                     except Exception as _e:
                         util.logger.error(f"Failed to shutdown AI agent: {_e}")
                 self._ai_agents.clear()
+
+            # 停止所有 RDP 会话线程，避免 'QThread: Destroyed while thread is still running'
+            if getattr(self, 'rdp_clients', None):
+                for _rdp in list(self.rdp_clients.values()):
+                    try:
+                        _rdp.stop()
+                    except Exception as _e:
+                        util.logger.error(f"Failed to stop RDP widget: {_e}")
+                self.rdp_clients.clear()
 
             # 尝试关闭所有终端组件，给它们机会清理进程
             if hasattr(self.ui, 'ShellTab'):
@@ -3358,8 +3511,8 @@ class MainDialog(QMainWindow):
                 else:
                     action_rename.setVisible(False)
 
-            elif item_type == "device":
-                # 设备节点右键菜单
+            elif item_type in ("device", "rdp_device"):
+                # 设备节点右键菜单（SSH 与 RDP 共用编辑/删除/移动分组）
                 self.ui.action1 = QAction(QIcon(':addConfig.png'), self.tr('编辑配置'), self)
                 self.ui.action1.setIconVisibleInMenu(True)
                 self.ui.action2 = QAction(QIcon(':delConf.png'), self.tr('删除配置'), self)
@@ -3686,7 +3839,17 @@ class MainDialog(QMainWindow):
                 with open(get_config_path('config.dat'), 'rb') as c:
                     conf = pickle.loads(c.read())[name]
 
-                if len(conf) == 3:
+                if device_protocol(conf) == "rdp":
+                    # RDP 设备（dict）：回填协议、认证、域
+                    self.ui.addconfwin.set_protocol('rdp')
+                    username = conf.get("username", "")
+                    password = conf.get("password", "")
+                    host = conf.get("host", "")
+                    self.ui.addconfwin.domainEdit.setText(conf.get("domain", ""))
+                    auth_index = self.ui.addconfwin.authCombo.findData(conf.get("auth", "ntlm"))
+                    if auth_index >= 0:
+                        self.ui.addconfwin.authCombo.setCurrentIndex(auth_index)
+                elif len(conf) == 3:
                     username, password, host = conf[0], conf[1], conf[2]
                 else:
                     username, password, host, key_type, key_file = conf[0], conf[1], conf[2], conf[3], conf[4]
@@ -3842,8 +4005,12 @@ class MainDialog(QMainWindow):
                 dev_item = QTreeWidgetItem(group_item)
                 dev_item.setFont(0, _make_device_font())
                 dev_item.setText(0, dev_name)
-                dev_item.setData(0, Qt.UserRole, "device")
-                dev_item.setIcon(0, QIcon(':icons8-ssh-48.png'))
+                if device_protocol(dic.get(dev_name)) == "rdp":
+                    dev_item.setData(0, Qt.UserRole, "rdp_device")
+                    dev_item.setIcon(0, QIcon(':icons8-windows-48.png'))
+                else:
+                    dev_item.setData(0, Qt.UserRole, "device")
+                    dev_item.setIcon(0, QIcon(':icons8-ssh-48.png'))
 
             # 默认展开分组
             group_item.setExpanded(True)
@@ -3861,8 +4028,12 @@ class MainDialog(QMainWindow):
                 dev_item = QTreeWidgetItem(ungrouped_item)
                 dev_item.setFont(0, _make_device_font())
                 dev_item.setText(0, dev_name)
-                dev_item.setData(0, Qt.UserRole, "device")
-                dev_item.setIcon(0, QIcon(':icons8-ssh-48.png'))
+                if device_protocol(dic.get(dev_name)) == "rdp":
+                    dev_item.setData(0, Qt.UserRole, "rdp_device")
+                    dev_item.setIcon(0, QIcon(':icons8-windows-48.png'))
+                else:
+                    dev_item.setData(0, Qt.UserRole, "device")
+                    dev_item.setIcon(0, QIcon(':icons8-ssh-48.png'))
 
             ungrouped_item.setExpanded(True)
 
@@ -5961,36 +6132,145 @@ class AddConfigUi(QDialog):
 
         self.dial.comboBox.currentIndexChanged.connect(self.handleComboBox)
 
+        self._inject_protocol_fields()
+
+    def _inject_protocol_fields(self):
+        """程序化注入「连接类型 / 认证方式 / 域」，复用现有 add_config.ui 布局。
+
+        布局调整：把原有控件整体下移一行，row 0 让给「连接类型」；
+        在私钥行之后追加「认证方式 / 域」(RDP 专用)，确认/取消按钮移到末行。
+        """
+        g = self.dial.gridLayout
+
+        # 连接类型选择器
+        self.label_proto = QLabel(self)
+        self.label_proto.setText(self.tr('连接类型：'))
+        self.protoCombo = QComboBox(self)
+        self.protoCombo.addItem('SSH')
+        self.protoCombo.addItem('RDP')
+
+        # 认证方式 + 域（RDP 专用）
+        self.label_auth = QLabel(self)
+        self.label_auth.setText(self.tr('认证方式：'))
+        self.authCombo = QComboBox(self)
+        self.authCombo.addItem(self.tr('NTLM 密码'), 'ntlm')
+        self.authCombo.addItem(self.tr('明文(无 NLA)'), 'plain')
+        self.label_domain = QLabel(self)
+        self.label_domain.setText(self.tr('域(可选)：'))
+        self.domainEdit = QLineEdit(self)
+        self.domainEdit.setPlaceholderText(self.tr('Windows 域，可留空'))
+
+        # 整体下移一行，腾出 row 0
+        g.addWidget(self.label_proto, 0, 0, 1, 1)
+        g.addWidget(self.protoCombo, 0, 1, 1, 2)
+        g.addWidget(self.dial.label_4, 1, 0, 1, 1)
+        g.addWidget(self.dial.configName, 1, 1, 1, 2)
+        g.addWidget(self.dial.label, 2, 0, 1, 1)
+        g.addWidget(self.dial.usernamEdit, 2, 1, 1, 2)
+        g.addWidget(self.dial.label_2, 3, 0, 1, 1)
+        g.addWidget(self.dial.passwordEdit, 3, 1, 1, 2)
+        g.addWidget(self.dial.label_3, 4, 0, 1, 1)
+        g.addWidget(self.dial.ipEdit, 4, 1, 1, 2)
+        g.addWidget(self.dial.label_7, 5, 0, 1, 1)
+        g.addWidget(self.dial.protEdit, 5, 1, 1, 2)
+        # SSH 私钥行
+        g.addWidget(self.dial.label_5, 6, 0, 1, 1)
+        g.addWidget(self.dial.comboBox, 6, 1, 1, 2)
+        g.addWidget(self.dial.label_6, 7, 0, 1, 1)
+        g.addWidget(self.dial.lineEdit, 7, 1, 1, 1)
+        g.addWidget(self.dial.pushButton_3, 7, 2, 1, 1)
+        # RDP 认证行
+        g.addWidget(self.label_auth, 8, 0, 1, 1)
+        g.addWidget(self.authCombo, 8, 1, 1, 2)
+        g.addWidget(self.label_domain, 9, 0, 1, 1)
+        g.addWidget(self.domainEdit, 9, 1, 1, 2)
+        # 确认 / 取消
+        g.addWidget(self.dial.pushButton, 10, 0, 1, 2)
+        g.addWidget(self.dial.pushButton_2, 10, 2, 1, 1)
+
+        self.protoCombo.currentIndexChanged.connect(self._on_protocol_changed)
+        self._on_protocol_changed()
+
+    def _ssh_key_widgets(self):
+        return [self.dial.label_5, self.dial.comboBox,
+                self.dial.label_6, self.dial.lineEdit, self.dial.pushButton_3]
+
+    def _rdp_auth_widgets(self):
+        return [self.label_auth, self.authCombo, self.label_domain, self.domainEdit]
+
+    def _on_protocol_changed(self):
+        is_rdp = self.protoCombo.currentText() == 'RDP'
+        for w in self._ssh_key_widgets():
+            w.setVisible(not is_rdp)
+        for w in self._rdp_auth_widgets():
+            w.setVisible(is_rdp)
+        # 切换协议时给出合理的默认端口
+        cur_port = self.dial.protEdit.text().strip()
+        if is_rdp and cur_port in ('', '22'):
+            self.dial.protEdit.setText('3389')
+        elif not is_rdp and cur_port in ('', '3389'):
+            self.dial.protEdit.setText('22')
+
+    def set_protocol(self, proto: str):
+        """供编辑配置时回填协议（'ssh' / 'rdp'）。"""
+        self.protoCombo.setCurrentText('RDP' if proto == 'rdp' else 'SSH')
+
     def addDev(self):
-        name, username, password, ip, prot, private_key_file, private_key_type = self.dial.configName.text(), \
-            self.dial.usernamEdit.text(), self.dial.passwordEdit.text(), self.dial.ipEdit.text(), \
-            self.dial.protEdit.text(), self.dial.lineEdit.text(), self.dial.comboBox.currentText()
+        is_rdp = self.protoCombo.currentText() == 'RDP'
+        name = self.dial.configName.text()
+        username = self.dial.usernamEdit.text()
+        password = self.dial.passwordEdit.text()
+        ip = self.dial.ipEdit.text()
+        prot = self.dial.protEdit.text()
 
         if name == '':
             self.alarm(self.tr('配置名称不能为空！'))
-        elif username == '':
+            return
+        if username == '':
             self.alarm(self.tr('用户名不能为空！'))
-        elif password == '' and private_key_type == '':
-            self.alarm(self.tr('密码或者密钥必须提供一个！'))
-        elif private_key_type != '' and private_key_file == '':
-            self.alarm(self.tr('请上传私钥文件！'))
-        elif ip == '':
+            return
+        if ip == '':
             self.alarm(self.tr('ip地址不能为空！'))
+            return
+
+        if is_rdp:
+            if password == '':
+                self.alarm(self.tr('RDP 连接需要提供密码！'))
+                return
+            entry = {
+                "__type__": "rdp",
+                "username": username,
+                "password": password,
+                "host": util.format_host_port(ip, prot or '3389'),
+                "domain": self.domainEdit.text().strip(),
+                "auth": self.authCombo.currentData() or 'ntlm',
+            }
         else:
-            config = get_config_path('config.dat')
-            with open(config, 'rb') as c:
-                data = c.read()
-            if not data:
+            private_key_file = self.dial.lineEdit.text()
+            private_key_type = self.dial.comboBox.currentText()
+            if password == '' and private_key_type == '':
+                self.alarm(self.tr('密码或者密钥必须提供一个！'))
+                return
+            if private_key_type != '' and private_key_file == '':
+                self.alarm(self.tr('请上传私钥文件！'))
+                return
+            entry = [username, password, util.format_host_port(ip, prot),
+                     private_key_type, private_key_file]
+
+        config = get_config_path('config.dat')
+        with open(config, 'rb') as c:
+            data = c.read()
+        if not data:
+            conf = {}
+        else:
+            try:
+                conf = pickle.loads(data)
+            except (EOFError, Exception) as e:
+                util.logger.error(f"[Warning] Failed to load config.dat: {e}, using empty dict")
                 conf = {}
-            else:
-                try:
-                    conf = pickle.loads(data)
-                except (EOFError, Exception) as e:
-                    util.logger.error(f"[Warning] Failed to load config.dat: {e}, using empty dict")
-                    conf = {}
-            conf[name] = [username, password, util.format_host_port(ip, prot), private_key_type, private_key_file]
-            save_config_dat(conf)
-            self.close()
+        conf[name] = entry
+        save_config_dat(conf)
+        self.close()
 
     def addKeyFile(self):
         file_name, _ = QFileDialog.getOpenFileName(
@@ -6462,6 +6742,9 @@ class TunnelConfig(QDialog):
             dic = pickle.loads(c.read())
             c.close()
         for k in dic.keys():
+            # 隧道仅支持 SSH 设备，跳过 RDP 设备
+            if device_protocol(dic.get(k)) == "rdp":
+                continue
             self.ui.comboBox_ssh.addItem(icon_ssh, k)
 
         tunnel_type = data.get(KEYS.TUNNEL_TYPE)
@@ -6600,6 +6883,9 @@ class AddTunnelConfig(QDialog):
             dic = pickle.loads(c.read())
             c.close()
         for k in dic.keys():
+            # 隧道仅支持 SSH 设备，跳过 RDP 设备
+            if device_protocol(dic.get(k)) == "rdp":
+                continue
             self.tunnel.comboBox_ssh.addItem(icon_ssh, k)
 
         self.tunnel.add_tunnel.accepted.connect(self.addTunnel)

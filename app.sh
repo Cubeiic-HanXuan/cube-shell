@@ -24,6 +24,7 @@ nuitka \
   --include-module=openai \
   --include-module=keyring \
   --include-module=prompt_toolkit \
+  --include-package=unicrypto \
   --include-module=pygments.formatters.html \
   --include-module=pygments.lexers.shell \
   --include-package=qtermwidget,core,function,style,ui,icons \
