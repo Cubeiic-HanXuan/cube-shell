@@ -1,6 +1,6 @@
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap, QIcon
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton, QHBoxLayout
 
 from function import util
 
@@ -11,7 +11,8 @@ class AboutDialog(QWidget):
         self.setWindowTitle("关于 cubeShell")
         # self.setGeometry(300, 300, 400, 300)
         # 设置窗口大小固定
-        self.setFixedSize(400, 300)
+        self.setFixedSize(400, 360)
+        self._main = None  # 主窗口引用,由 MainDialog.about() 注入
         self.init_ui()
 
     def init_ui(self):
@@ -37,4 +38,19 @@ class AboutDialog(QWidget):
         info_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(info_label)
 
+        # 检查更新按钮
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        check_btn = QPushButton("检查更新", self)
+        check_btn.clicked.connect(self._check_update)
+        btn_layout.addWidget(check_btn)
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+
         self.setLayout(layout)
+
+    def _check_update(self):
+        """复用主窗口的检查更新逻辑(主窗口引用由 MainDialog.about() 注入)。"""
+        if self._main is not None and hasattr(self._main, 'check_for_update'):
+            self._main.check_for_update()
+            self.close()

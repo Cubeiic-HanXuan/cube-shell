@@ -3,6 +3,7 @@
 
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import Qt, QThread, Signal, QDateTime
 from PySide6.QtGui import QFont
@@ -43,21 +44,25 @@ class StatusWorker(QThread):
     def run(self):
         try:
             result = {}
-            # 获取版本
-            result["version"] = self._backend.get_version()
-            # 获取认证状态
-            result["auth_status"] = self._backend.get_auth_status()
-            # 获取守护进程状态
-            result["daemon_status"] = self._backend.get_daemon_status()
-            # 获取 claude 二进制路径
-            if hasattr(self._backend, '_claude_bin'):
-                result["bin_path"] = self._backend._claude_bin
-            else:
-                # 远程模式：通过 which 获取路径
-                returncode, stdout, stderr = self._backend.run_command(
-                    ["--version"]
-                )
-                result["bin_path"] = "claude (远程)"
+            # version/auth/daemon 三个 claude 子进程互相独立，并行执行可把
+            # 串行总耗时（~0.34s）压到≈最慢单次（~0.15s）。线程池在此 QThread
+            # 内运行，不占 UI 线程；run_command 内部对 env 构建做了加锁保护。
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                fut_version = pool.submit(self._backend.get_version)
+                fut_auth = pool.submit(self._backend.get_auth_status)
+                fut_daemon = pool.submit(self._backend.get_daemon_status)
+                result["version"] = fut_version.result()
+                result["auth_status"] = fut_auth.result()
+                result["daemon_status"] = fut_daemon.result()
+                # 获取 claude 二进制路径
+                if hasattr(self._backend, '_claude_bin'):
+                    result["bin_path"] = self._backend._claude_bin
+                else:
+                    # 远程模式：通过 which 获取路径
+                    returncode, stdout, stderr = self._backend.run_command(
+                        ["--version"]
+                    )
+                    result["bin_path"] = "claude (远程)"
             self.finished.emit(result)
         except Exception as e:
             logger.error(f"获取 Claude Code 状态失败: {e}")

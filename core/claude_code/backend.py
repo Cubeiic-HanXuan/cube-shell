@@ -9,8 +9,8 @@ import json
 import logging
 import os
 import shlex
-import shutil
 import subprocess
+import threading
 from abc import ABC, abstractmethod
 from typing import Optional
 
@@ -40,7 +40,34 @@ def build_cd_command(cwd: str, command: str) -> str:
 _login_path_cache = None
 
 
-def _get_login_shell_path():
+def _which(cmd: str, path: Optional[str] = None) -> Optional[str]:
+    """在 PATH 中查找可执行文件，返回首个匹配的完整路径，未找到返回 None。
+
+    用以替代 shutil.which：typeshed 中 shutil.which 的 PathLike[str] 重载被标记
+    为 @deprecated（Windows + Python<3.12 下 PathLike 形参会失败/返回 None），
+    部分编辑器会对所有 shutil.which 调用报弃用告警。此处只接收纯 str，语义与
+    shutil.which(cmd, path=...) 的 str 重载一致：遍历 PATH 各目录，取首个存在
+    且可执行（Windows 额外匹配 PATHEXT 扩展名）的文件。
+    """
+    search_path = path if path is not None else os.environ.get("PATH", "")
+    # Windows 下可执行文件按 PATHEXT 扩展名匹配（如 claude.exe / claude.cmd）；
+    # 非 Windows 无扩展名概念，用单个空串表示"不加扩展名"。
+    exts = (
+        [e.strip().lower() for e in os.environ.get("PATHEXT", "").split(os.pathsep) if e.strip()]
+        if os.name == "nt"
+        else [""]
+    )
+    for dir_ in search_path.split(os.pathsep):
+        if not dir_:
+            continue
+        for ext in exts:
+            candidate = os.path.join(dir_, cmd + ext)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+    return None
+
+
+def _get_login_shell_path() -> str:
     """通过用户登录 shell 读取完整 PATH。
 
     macOS/Linux 下从 Finder/Dock 启动的 GUI 应用不会加载用户的
@@ -70,6 +97,10 @@ def _get_login_shell_path():
     return _login_path_cache
 
 
+# 缓存 claude 可执行文件路径，避免每次 LocalBackend.__init__ 重复 which/glob
+_claude_bin_cache = None
+
+
 def _find_claude_bin() -> str:
     """查找 claude 可执行文件路径，兼容 GUI 应用无 PATH 的情况。
 
@@ -78,15 +109,22 @@ def _find_claude_bin() -> str:
     2. 登录 shell PATH 下的 claude（解决 Finder/Dock 启动无 PATH 问题）
     3. 常见安装目录 + nvm/fnm/volta/pnpm 等 node 版本管理器路径
     """
-    found = shutil.which("claude")
+    global _claude_bin_cache
+    if _claude_bin_cache is not None:
+        return _claude_bin_cache
+
+    # 1. 当前进程 PATH 下的 claude
+    found = _which("claude")
     if found:
+        _claude_bin_cache = found
         return found
 
-    # 用登录 shell 的完整 PATH 再找一次
+    # 2. 用登录 shell 的完整 PATH 再找一次（解决 Finder/Dock 启动无 PATH 问题）
     login_path = _get_login_shell_path()
     if login_path:
-        found = shutil.which("claude", path=login_path)
+        found = _which("claude", path=login_path)
         if found:
+            _claude_bin_cache = found
             return found
 
     home = os.path.expanduser("~")
@@ -111,9 +149,11 @@ def _find_claude_bin() -> str:
 
     for path in candidates:
         if os.path.isfile(path) and os.access(path, os.X_OK):
+            _claude_bin_cache = path
             return path
 
     # 都找不到就返回裸命令名，让后续报错更明确
+    _claude_bin_cache = "claude"
     return "claude"
 
 
@@ -280,7 +320,22 @@ class LocalBackend(ClaudeCodeBackend):
     def __init__(self):
         self._claude_bin = _find_claude_bin()
         self._claude_home = os.path.expanduser("~/.claude")
-        self._env = _build_subprocess_env()
+        # env 惰性构建：_build_subprocess_env() 会 fork 登录 shell 取 PATH（~0.7s），
+        # 放在构造期会在 UI 线程阻塞。推迟到首次 run_command（在 QThread worker 内）
+        # 才构建，使 LocalBackend() 构造纯内存、UI 线程零子进程。
+        self._env = None
+        self._env_lock = threading.Lock()
+
+    def _ensure_env(self) -> dict:
+        """首次调用时构建子进程环境变量（含登录 shell PATH），之后复用缓存。
+
+        加锁防止 StatusWorker 并行调用多个 run_command 时重复 fork 登录 shell。
+        """
+        if self._env is None:
+            with self._env_lock:
+                if self._env is None:  # double-check，避免多线程重复构建
+                    self._env = _build_subprocess_env()
+        return self._env
 
     def run_command(self, args: list, timeout: int = 30) -> tuple[int, str, str]:
         try:
@@ -288,7 +343,7 @@ class LocalBackend(ClaudeCodeBackend):
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                env=self._env,
+                env=self._ensure_env(),
             )
             # Windows GUI 应用下防止弹出控制台黑窗口
             if os.name == 'nt':

@@ -1023,6 +1023,35 @@ class MainDialog(QMainWindow):
         if self._connection_info:
             QTimer.singleShot(1500, self._auto_connect)
 
+        # 启动后空闲预热 Claude Code 后端依赖，消除首次点击卡顿
+        QTimer.singleShot(200, self._prewarm_claude_code)
+
+    def _prewarm_claude_code(self):
+        """后台预热 Claude Code 依赖，消除首次点击卡顿。
+
+        在后台线程完成两件首次点击时本会在 UI 线程同步执行的重活：
+        1. 填充 backend._login_path_cache（fork 登录 shell 取 PATH，~0.7s）
+        2. 预 import claude_code 模块链（首次加载 PySide6 子模块，~0.24s）
+        二者都只读、无副作用，结果缓存在模块级/sys.modules，UI 线程命中即跳过。
+        预热失败不影响功能——点击时仍会照常 import + 兜底 fork，仅无加速。
+        """
+        def _work():
+            try:
+                from core.claude_code.backend import _get_login_shell_path
+                _get_login_shell_path()  # 填充模块级 _login_path_cache
+                # 预 import 模块链，让点击时的 import 走 sys.modules 缓存
+                import core.claude_code.claude_code_panel  # noqa: F401
+                import core.claude_code.status_widget      # noqa: F401
+                import core.claude_code.session_widget     # noqa: F401
+                import core.claude_code.settings_widget    # noqa: F401
+                import core.claude_code.mcp_widget         # noqa: F401
+            except Exception as e:
+                util.logger.debug(
+                    f"预热 Claude Code 依赖失败(可忽略，点击时仍会正常加载): {e}"
+                )
+
+        threading.Thread(target=_work, daemon=True).start()
+
     def _setup_compat_stubs(self):
         """创建向后兼容的 widget 存根，替代已从 ui/main.py 移除的组件。
         这些 stub widget 不会显示在 UI 中，仅作为数据持有者供现有代码引用。
@@ -2450,6 +2479,15 @@ class MainDialog(QMainWindow):
         help_menu.addAction(about_action)
         about_action.triggered.connect(self.about)
 
+        # 创建"检查更新"动作
+        check_update_action = QAction(QIcon(":Download.png"), self.tr("&检查更新"), self)
+        check_update_action.setIconVisibleInMenu(True)
+        check_update_action.setMenuRole(QAction.MenuRole.NoRole)
+        check_update_action.setShortcut("Shift+Ctrl+U")
+        check_update_action.setStatusTip(self.tr("检查并安装 cube-shell 最新版本"))
+        help_menu.addAction(check_update_action)
+        check_update_action.triggered.connect(self.check_for_update)
+
         linux_action = QAction(self.tr("&Linux常用命令"), self)
         linux_action.setIconVisibleInMenu(True)
         linux_action.setShortcut("Shift+Ctrl+P")
@@ -2467,7 +2505,110 @@ class MainDialog(QMainWindow):
     # 关于
     def about(self):
         self.about_dialog = about.AboutDialog()
+        self.about_dialog._main = self  # 注入主窗口引用,供"检查更新"按钮复用
         self.about_dialog.show()
+
+    # ────────────────────────── 软件更新 ──────────────────────────
+
+    def check_for_update(self):
+        """手动触发检查更新(帮助菜单项 + 关于对话框按钮共用入口)。"""
+        from core.update.worker import UpdateWorker
+        if hasattr(self, '_update_worker') and self._update_worker and self._update_worker.isRunning():
+            return  # 防重复触发
+        self._update_worker = UpdateWorker(util.THEME.get('version', '0'), parent=self)
+        self._update_worker.checked.connect(self._on_update_checked)
+        self._update_worker.progress_updated.connect(self._on_update_progress)
+        self._update_worker.status_updated.connect(self._on_update_status)
+        self._update_worker.download_finished.connect(self._on_update_downloaded)
+        self._update_worker.error.connect(self._on_update_error)
+        # 检查中:不确定进度框(无取消按钮)
+        self._update_progress = QProgressDialog(self.tr("正在检查更新…"), None, 0, 0, self)
+        self._update_progress.setWindowTitle(self.tr("检查更新"))
+        self._update_progress.setWindowModality(Qt.WindowModal)
+        self._update_progress.setMinimumDuration(0)
+        self._update_progress.setCancelButton(None)
+        self._update_progress.setMinimumWidth(320)
+        self._update_progress.show()
+        self._update_worker.check()  # 在 worker 线程执行检查,不阻塞 UI
+
+    def _on_update_checked(self, has_update, remote, local, release, error_msg):
+        self._close_update_progress()
+        if error_msg:
+            QMessageBox.warning(self, self.tr("检查更新"), error_msg)
+            return
+        if not has_update:
+            QMessageBox.information(self, self.tr("检查更新"),
+                                    self.tr(f"已是最新版本(v{local})。"))
+            return
+        # 有更新:展示确认对话框(版本/大小/说明)
+        from core.update.platform_match import select_asset
+        from core.frp_manager import get_platform_key
+        asset = select_asset(release.assets, get_platform_key()) if release else None
+        if asset:
+            size_txt = format_file_size(asset.size)
+        else:
+            size_txt = self.tr("未匹配到平台包,将打开 Release 页")
+        body = (release.body or "")[:500] if release else ""
+        msg = QMessageBox(self)
+        msg.setWindowTitle(self.tr("发现新版本"))
+        msg.setIcon(QMessageBox.Question)
+        msg.setText(self.tr(f"发现新版本 v{remote}(当前 v{local})\n大小:{size_txt}"))
+        msg.setInformativeText(self.tr(f"更新说明:\n{body}"))
+        b_download = msg.addButton(self.tr("立即下载并安装"), QMessageBox.AcceptRole)
+        b_open = msg.addButton(self.tr("打开 Release 页"), QMessageBox.ActionRole)
+        msg.addButton(self.tr("取消"), QMessageBox.RejectRole)
+        msg.exec()
+        if msg.clickedButton() is b_download:
+            self._start_update_download()
+        elif msg.clickedButton() is b_open:
+            QDesktopServices.openUrl(QUrl(release.html_url))
+
+    def _start_update_download(self):
+        """切换进度框为带取消按钮的下载进度,并启动下载。"""
+        if not hasattr(self, '_update_worker') or not self._update_worker:
+            return
+        self._update_progress = QProgressDialog(self.tr("正在下载…"), self.tr("取消"), 0, 100, self)
+        self._update_progress.setWindowTitle(self.tr("下载更新"))
+        self._update_progress.setWindowModality(Qt.WindowModal)
+        self._update_progress.setMinimumDuration(0)
+        self._update_progress.setMinimumWidth(360)
+        self._update_progress.canceled.connect(self._update_worker.request_cancel)
+        self._update_progress.show()
+        self._update_worker.download()
+
+    def _on_update_progress(self, pct):
+        if hasattr(self, '_update_progress') and self._update_progress:
+            self._update_progress.setValue(pct)
+
+    def _on_update_status(self, txt):
+        if hasattr(self, '_update_progress') and self._update_progress:
+            self._update_progress.setLabelText(self.tr(txt))
+
+    def _close_update_progress(self):
+        if hasattr(self, '_update_progress') and self._update_progress:
+            self._update_progress.close()
+            self._update_progress = None
+
+    def _on_update_error(self, msg):
+        self._close_update_progress()
+        if msg:
+            QMessageBox.warning(self, self.tr("更新"), msg)
+
+    def _on_update_downloaded(self, path):
+        self._close_update_progress()
+        if not path:
+            # 未匹配到平台包 → 打开 Release 页兜底
+            from core.update import installer
+            installer.install_and_restart("", self)
+            return
+        ans = QMessageBox.question(self, self.tr("更新"),
+                                   self.tr("下载完成,是否立即安装并重启 cube-shell?"))
+        if ans == QMessageBox.Yes:
+            from core.update import installer
+            installer.install_and_restart(path, self)  # 内部会触发 QApplication.quit()
+        else:
+            QMessageBox.information(self, self.tr("更新"),
+                                    self.tr(f"安装包已保存到:\n{path}\n可稍后手动安装。"))
 
     def theme(self):
         self.theme_dialog = theme.MainWindow(self)
@@ -3382,6 +3523,12 @@ class MainDialog(QMainWindow):
                 if not self.upload_thread.wait(1000):
                     self.upload_thread.terminate()
                     self.upload_thread.wait()
+
+            # 停止更新检查 worker,避免 'QThread: Destroyed while thread is still running'
+            if hasattr(self, '_update_worker') and self._update_worker and self._update_worker.isRunning():
+                self._update_worker.request_cancel()
+                self._update_worker.quit()
+                self._update_worker.wait(2000)
 
             """
              窗口关闭事件 当存在通道的时候关闭通道
