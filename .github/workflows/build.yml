@@ -63,7 +63,9 @@ jobs:
             cube-shell.py
 
       - name: Create tunnel.json
-        run: echo {} > deploy\cube-shell.dist\conf\tunnel.json
+        run: |
+          New-Item -ItemType Directory -Path deploy\cube-shell.dist\conf -Force
+          "{}" | Out-File deploy\cube-shell.dist\conf\tunnel.json
 
       - name: Clean config.dat
         run: Remove-Item -Force deploy\cube-shell.dist\conf\config.dat -ErrorAction SilentlyContinue
