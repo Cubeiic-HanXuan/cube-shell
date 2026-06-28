@@ -33,33 +33,33 @@ jobs:
 
       - name: Build with Nuitka
         run: |
-          nuitka --windows-console-mode=disable --windows-icon-from-ico=icons/logo.ico ^
-            --follow-imports ^
-            --remove-output ^
-            --jobs=4 ^
-            --python-flag=no_site ^
-            --lto=yes ^
-            --output-dir=deploy ^
-            --standalone ^
-            --enable-plugin=pyside6 ^
-            --include-module=qdarktheme ^
-            --include-module=deepdiff ^
-            --include-module=pygments ^
-            --include-module=paramiko ^
-            --include-module=yaml ^
-            --include-module=openai ^
-            --include-module=keyring ^
-            --include-module=prompt_toolkit ^
-            --include-package=unicrypto ^
-            --include-module=pygments.formatters.html ^
-            --include-module=pygments.lexers.shell ^
-            --include-package=qtermwidget,core,function,style,ui,icons ^
-            --include-data-dir=conf=conf ^
-            --company-name=HanXuan ^
-            --product-name=cubeShell ^
-            --file-version=2.7.0.0 ^
-            --product-version=2.7.0 ^
-            --file-description="A powerful shell application" ^
+          nuitka --windows-console-mode=disable --windows-icon-from-ico=icons/logo.ico `
+            --follow-imports `
+            --remove-output `
+            --jobs=4 `
+            --python-flag=no_site `
+            --lto=yes `
+            --output-dir=deploy `
+            --standalone `
+            --enable-plugin=pyside6 `
+            --include-module=qdarktheme `
+            --include-module=deepdiff `
+            --include-module=pygments `
+            --include-module=paramiko `
+            --include-module=yaml `
+            --include-module=openai `
+            --include-module=keyring `
+            --include-module=prompt_toolkit `
+            --include-package=unicrypto `
+            --include-module=pygments.formatters.html `
+            --include-module=pygments.lexers.shell `
+            --include-package=qtermwidget,core,function,style,ui,icons `
+            --include-data-dir=conf=conf `
+            --company-name=HanXuan `
+            --product-name=cubeShell `
+            --file-version=2.7.0.0 `
+            --product-version=2.7.0 `
+            --file-description="A powerful shell application" `
             cube-shell.py
 
       - name: Create tunnel.json
