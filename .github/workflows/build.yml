@@ -87,7 +87,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cubeShell-installer
-          path: "*.exe"
+          path: Output/*.exe
           retention-days: 30
 
       - name: Create Release
