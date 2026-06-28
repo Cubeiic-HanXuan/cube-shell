@@ -72,10 +72,12 @@ jobs:
 
       - name: Copy qtermwidget files
         run: |
-          New-Item -ItemType Directory -Path deploy\cube-shell.dist\qtermwidget -Force
-          Copy-Item qtermwidget\color-schemes\* deploy\cube-shell.dist\qtermwidget\color-schemes\ -Recurse -Force
-          Copy-Item qtermwidget\kb-layouts\* deploy\cube-shell.dist\qtermwidget\kb-layouts\ -Recurse -Force
-          Copy-Item qtermwidget\translations\* deploy\cube-shell.dist\qtermwidget\translations\ -Recurse -Force
+          New-Item -ItemType Directory -Path deploy\cube-shell.dist\qtermwidget\color-schemes -Force
+          New-Item -ItemType Directory -Path deploy\cube-shell.dist\qtermwidget\kb-layouts -Force
+          New-Item -ItemType Directory -Path deploy\cube-shell.dist\qtermwidget\translations -Force
+          Copy-Item qtermwidget\color-schemes\* deploy\cube-shell.dist\qtermwidget\color-schemes\ -Recurse -Force -ErrorAction SilentlyContinue
+          Copy-Item qtermwidget\kb-layouts\* deploy\cube-shell.dist\qtermwidget\kb-layouts\ -Recurse -Force -ErrorAction SilentlyContinue
+          Copy-Item qtermwidget\translations\* deploy\cube-shell.dist\qtermwidget\translations\ -Recurse -Force -ErrorAction SilentlyContinue
           Copy-Item qtermwidget\default.keytab deploy\cube-shell.dist\qtermwidget\
 
       - name: Build installer with Inno Setup
