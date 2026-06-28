@@ -20,16 +20,16 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
-          pip install nuitka pyside6 qdarktheme deepdiff pygments paramiko pyyaml keyring prompt_toolkit pywin32
-
-      - name: Install Nuitka
-        run: pip install nuitka
+          pip install --no-cache-dir pyyaml keyring prompt_toolkit pywin32
+          pip install --no-cache-dir pygments paramiko deepdiff
+          pip install --no-cache-dir qdarktheme
+          pip install --no-cache-dir nuitka pyside6 --timeout=600
 
       - name: Install Inno Setup
         run: |
-          choco install innosetup -y
+          choco install innosetup -y --no-progress
 
       - name: Build with Nuitka
         run: |
