@@ -5,7 +5,7 @@ AppName=cube-shell
 AppVersion=2.7.0
 DefaultDirName={commonpf}\cube-shell
 DefaultGroupName=寒暄
-OutputDir=.
+OutputDir=Output
 OutputBaseFilename=cube-shell
 
 [Files]
