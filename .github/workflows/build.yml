@@ -1,0 +1,67 @@
+name: Build Windows Installer
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install --no-cache-dir -r requirements.txt
+
+      - name: Install Nuitka
+        run: pip install --no-cache-dir nuitka
+
+      - name: Verify PySide6
+        run: python -c "from PySide6 import QtCore; print('PySide6 OK:', QtCore.__version__)"
+
+      - name: Build with Nuitka
+        run: |
+          nuitka --windows-console-mode=disable --windows-icon-from-ico=icons/logo.ico --follow-imports --remove-output --jobs=4 --output-dir=deploy --standalone --enable-plugin=pyside6 --include-module=qdarktheme --include-module=deepdiff --include-module=pygments --include-module=paramiko --include-module=yaml --include-module=openai --include-module=keyring --include-module=prompt_toolkit --include-package=unicrypto --include-module=pygments.formatters.html --include-module=pygments.lexers.shell --include-package=qtermwidget,core,function,style,ui,icons --include-data-dir=conf=conf --company-name=HanXuan --product-name=cubeShell --file-version=2.7.0.0 --product-version=2.7.0 --file-description="cubeShell" cube-shell.py
+
+      - name: Check deploy output
+        run: |
+          if (Test-Path deploy\cube-shell.dist) {
+            $size = (Get-ChildItem deploy\cube-shell.dist -Recurse | Measure-Object -Property Length -Sum).Sum
+            Write-Host "Total size: $([math]::Round($size/1MB,1)) MB"
+            Get-ChildItem deploy\cube-shell.dist -Filter "*.exe" | ForEach-Object { Write-Host "Exe: $($_.Name) - $([math]::Round($_.Length/1MB,1)) MB" }
+          } else {
+            Write-Host "ERROR: deploy cube-shell.dist not found"
+            Get-ChildItem deploy -ErrorAction SilentlyContinue
+            exit 1
+          }
+
+      - name: Create tunnel.json
+        run: |
+          New-Item -ItemType Directory -Path deploy\cube-shell.dist\conf -Force -ErrorAction SilentlyContinue
+          $null | Out-File deploy\cube-shell.dist\conf\tunnel.json
+          Remove-Item deploy\cube-shell.dist\conf\config.dat -ErrorAction SilentlyContinue
+
+      - name: Copy qtermwidget
+        run: |
+          New-Item -ItemType Directory -Path deploy\cube-shell.dist\qtermwidget\color-schemes -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path deploy\cube-shell.dist\qtermwidget\kb-layouts -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path deploy\cube-shell.dist\qtermwidget\translations -Force -ErrorAction SilentlyContinue
+          Copy-Item qtermwidget\color-schemes\* deploy\cube-shell.dist\qtermwidget\color-schemes\ -Recurse -Force -ErrorAction SilentlyContinue
+          Copy-Item qtermwidget\kb-layouts\* deploy\cube-shell.dist\qtermwidget\kb-layouts\ -Recurse -Force -ErrorAction SilentlyContinue
+          Copy-Item qtermwidget\translations\* deploy\cube-shell.dist\qtermwidget\translations\ -Recurse -Force -ErrorAction SilentlyContinue
+          Copy-Item qtermwidget\default.keytab deploy\cube-shell.dist\qtermwidget\ -ErrorAction SilentlyContinue
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cubeShell-windows-X86_64
+          path: deploy/cube-shell.dist/
+          retention-days: 30
