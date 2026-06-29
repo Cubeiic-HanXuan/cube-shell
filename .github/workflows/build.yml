@@ -60,5 +60,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cubeShell-windows-X86_64
-          path: deploy\cube-shell.dist\
+          path: deploy/cube-shell.dist/
           retention-days: 30
