@@ -21,6 +21,9 @@ jobs:
       - name: Install dependencies
         run: pip install --no-cache-dir -r requirements.txt
 
+      - name: Install Nuitka
+        run: pip install --no-cache-dir nuitka
+
       - name: Build with Nuitka
         run: |
           nuitka --windows-console-mode=disable --windows-icon-from-ico=icons/logo.ico --follow-imports --remove-output --jobs=4 --python-flag=no_site --output-dir=deploy --standalone --enable-plugin=pyside6 --include-data-dir=conf=conf --company-name=HanXuan --product-name=cubeShell --file-version=2.7.0.0 --product-version=2.7.0 --file-description="cubeShell" cube-shell.py
