@@ -56,14 +56,9 @@ jobs:
           Copy-Item qtermwidget\translations\* deploy\cube-shell.dist\qtermwidget\translations\ -Recurse -Force -ErrorAction SilentlyContinue
           Copy-Item qtermwidget\default.keytab deploy\cube-shell.dist\qtermwidget\ -ErrorAction SilentlyContinue
 
-      - name: Package as zip
-        run: |
-          Compress-Archive -Path deploy\cube-shell.dist\* -DestinationPath cube-shell-windows-X86_64.zip -Force
-          Write-Host "Zip created: $((Get-Item cube-shell-windows-X86_64.zip).Length / 1MB) MB"
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: cubeShell-windows-X86_64
-          path: cube-shell-windows-X86_64.zip
+          path: deploy\cube-shell.dist\
           retention-days: 30
