@@ -26,49 +26,46 @@ jobs:
           pip install --no-cache-dir pyside6
           pip install --no-cache-dir openai aardwolf
 
-      - name: Install Nuitka
-        run: pip install --no-cache-dir nuitka
-
-      - name: Install Inno Setup
-        run: choco install innosetup -y --no-progress
-
       - name: Build with Nuitka
         run: |
           nuitka --windows-console-mode=disable --windows-icon-from-ico=icons/logo.ico --follow-imports --remove-output --jobs=4 --python-flag=no_site --output-dir=deploy --standalone --enable-plugin=pyside6 --include-data-dir=conf=conf --company-name=HanXuan --product-name=cubeShell --file-version=2.7.0.0 --product-version=2.7.0 --file-description="cubeShell" cube-shell.py
 
-      - name: Check output
+      - name: Check deploy output
         run: |
           if (Test-Path deploy\cube-shell.dist) {
-            Write-Host "Nuitka output found"
-            Get-ChildItem deploy\cube-shell.dist -Recurse | Measure-Object -Property Length -Sum | ForEach-Object { Write-Host "Total: $([math]::Round($_.Sum/1MB,1)) MB" }
+            $size = (Get-ChildItem deploy\cube-shell.dist -Recurse | Measure-Object -Property Length -Sum).Sum
+            Write-Host "Total size: $([math]::Round($size/1MB,1)) MB"
+            Get-ChildItem deploy\cube-shell.dist -Filter "*.exe" | ForEach-Object { Write-Host "Exe: $($_.Name) - $([math]::Round($_.Length/1MB,1)) MB" }
           } else {
             Write-Host "ERROR: deploy cube-shell.dist not found"
             Get-ChildItem deploy -ErrorAction SilentlyContinue
+            exit 1
           }
 
-      - name: Create directories
+      - name: Create tunnel.json
         run: |
           New-Item -ItemType Directory -Path deploy\cube-shell.dist\conf -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path deploy\cube-shell.dist\qtermwidget\color-schemes -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path deploy\cube-shell.dist\qtermwidget\kb-layouts -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path deploy\cube-shell.dist\qtermwidget\translations -Force -ErrorAction SilentlyContinue
-
-      - name: Create tunnel.json
-        run: $null | Out-File deploy\cube-shell.dist\conf\tunnel.json
+          $null | Out-File deploy\cube-shell.dist\conf\tunnel.json
+          Remove-Item deploy\cube-shell.dist\conf\config.dat -ErrorAction SilentlyContinue
 
       - name: Copy qtermwidget
         run: |
+          New-Item -ItemType Directory -Path deploy\cube-shell.dist\qtermwidget\color-schemes -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path deploy\cube-shell.dist\qtermwidget\kb-layouts -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path deploy\cube-shell.dist\qtermwidget\translations -Force -ErrorAction SilentlyContinue
           Copy-Item qtermwidget\color-schemes\* deploy\cube-shell.dist\qtermwidget\color-schemes\ -Recurse -Force -ErrorAction SilentlyContinue
           Copy-Item qtermwidget\kb-layouts\* deploy\cube-shell.dist\qtermwidget\kb-layouts\ -Recurse -Force -ErrorAction SilentlyContinue
           Copy-Item qtermwidget\translations\* deploy\cube-shell.dist\qtermwidget\translations\ -Recurse -Force -ErrorAction SilentlyContinue
           Copy-Item qtermwidget\default.keytab deploy\cube-shell.dist\qtermwidget\ -ErrorAction SilentlyContinue
 
-      - name: Build installer
-        run: iscc installer.iss
+      - name: Package as zip
+        run: |
+          Compress-Archive -Path deploy\cube-shell.dist\* -DestinationPath cube-shell-windows-X86_64.zip -Force
+          Write-Host "Zip created: $((Get-Item cube-shell-windows-X86_64.zip).Length / 1MB) MB"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cubeShell-installer
-          path: Output/
+          name: cubeShell-windows-X86_64
+          path: cube-shell-windows-X86_64.zip
           retention-days: 30
