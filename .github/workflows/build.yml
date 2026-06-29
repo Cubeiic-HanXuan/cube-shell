@@ -3,8 +3,6 @@ name: Build Windows Installer
 on:
   push:
     branches: [master]
-    tags:
-      - 'v*'
   workflow_dispatch:
 
 jobs:
@@ -20,80 +18,59 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Python dependencies
-        run: |
-          pip install --no-cache-dir pyyaml keyring prompt_toolkit pywin32
-          pip install --no-cache-dir pygments paramiko deepdiff
-          pip install --no-cache-dir qdarktheme
-          pip install --no-cache-dir nuitka pyside6 --timeout=600
+      - name: Install dependencies
+        run: pip install --no-cache-dir nuitka pyside6 qdarktheme deepdiff pygments paramiko pyyaml keyring prompt_toolkit pywin32
 
       - name: Install Inno Setup
-        run: |
-          choco install innosetup -y --no-progress
+        run: choco install innosetup -y --no-progress
 
       - name: Build with Nuitka
         run: |
-          nuitka --windows-console-mode=disable --windows-icon-from-ico=icons/logo.ico `
-            --follow-imports `
-            --remove-output `
-            --jobs=4 `
-            --python-flag=no_site `
-            --lto=yes `
-            --output-dir=deploy `
-            --standalone `
-            --enable-plugin=pyside6 `
-            --include-module=qdarktheme `
-            --include-module=deepdiff `
-            --include-module=pygments `
-            --include-module=paramiko `
-            --include-module=yaml `
-            --include-module=openai `
-            --include-module=keyring `
-            --include-module=prompt_toolkit `
-            --include-package=unicrypto `
-            --include-module=pygments.formatters.html `
-            --include-module=pygments.lexers.shell `
-            --include-package=qtermwidget,core,function,style,ui,icons `
-            --include-data-dir=conf=conf `
-            --company-name=HanXuan `
-            --product-name=cubeShell `
-            --file-version=2.7.0.0 `
-            --product-version=2.7.0 `
-            --file-description="A powerful shell application" `
-            cube-shell.py
+          nuitka --windows-console-mode=disable --windows-icon-from-ico=icons/logo.ico --follow-imports --remove-output --jobs=4 --python-flag=no_site --output-dir=deploy --standalone --enable-plugin=pyside6 --include-module=qdarktheme --include-module=deepdiff --include-module=pygments --include-module=paramiko --include-module=yaml --include-module=openai --include-module=keyring --include-module=prompt_toolkit --include-package=unicrypto --include-module=pygments.formatters.html --include-module=pygments.lexers.shell --include-data-dir=conf=conf --company-name=HanXuan --product-name=cubeShell --file-version=2.7.0.0 --product-version=2.7.0 --file-description="cubeShell" cube-shell.py
 
-      - name: Create tunnel.json
+      - name: Check Nuitka output
+        run: |
+          if (Test-Path deploy\cube-shell.dist) {
+            Write-Host "Nuitka output found"
+            Get-ChildItem deploy\cube-shell.dist -Recurse | Measure-Object -Property Length -Sum | ForEach-Object { Write-Host "Total size: $($_.Sum / 1MB) MB" }
+            Get-ChildItem deploy\cube-shell.dist -Filter "*.exe" | ForEach-Object { Write-Host "Exe: $($_.Name) - $($_.Length / 1MB) MB" }
+          } else {
+            Write-Host "ERROR: deploy\cube-shell.dist not found"
+            Get-ChildItem deploy -ErrorAction SilentlyContinue
+          }
+
+      - name: Create directories
         run: |
           New-Item -ItemType Directory -Path deploy\cube-shell.dist\conf -Force
-          "{}" | Out-File deploy\cube-shell.dist\conf\tunnel.json
-
-      - name: Clean config.dat
-        run: Remove-Item -Force deploy\cube-shell.dist\conf\config.dat -ErrorAction SilentlyContinue
-
-      - name: Copy qtermwidget files
-        run: |
           New-Item -ItemType Directory -Path deploy\cube-shell.dist\qtermwidget\color-schemes -Force
           New-Item -ItemType Directory -Path deploy\cube-shell.dist\qtermwidget\kb-layouts -Force
           New-Item -ItemType Directory -Path deploy\cube-shell.dist\qtermwidget\translations -Force
+
+      - name: Create tunnel.json
+        run: |
+          $null | Out-File deploy\cube-shell.dist\conf\tunnel.json
+
+      - name: Copy qtermwidget files
+        run: |
           Copy-Item qtermwidget\color-schemes\* deploy\cube-shell.dist\qtermwidget\color-schemes\ -Recurse -Force -ErrorAction SilentlyContinue
           Copy-Item qtermwidget\kb-layouts\* deploy\cube-shell.dist\qtermwidget\kb-layouts\ -Recurse -Force -ErrorAction SilentlyContinue
           Copy-Item qtermwidget\translations\* deploy\cube-shell.dist\qtermwidget\translations\ -Recurse -Force -ErrorAction SilentlyContinue
           Copy-Item qtermwidget\default.keytab deploy\cube-shell.dist\qtermwidget\
 
-      - name: Build installer with Inno Setup
+      - name: Build installer
         run: iscc installer.iss
+
+      - name: Check Output
+        run: |
+          if (Test-Path Output) {
+            Get-ChildItem Output
+          } else {
+            Write-Host "ERROR: Output directory not found"
+          }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: cubeShell-installer
-          path: Output/*.exe
+          path: Output/
           retention-days: 30
-
-      - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v1
-        with:
-          files: Output/*.exe
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
