@@ -1,0 +1,435 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cube-shell-release-${{ github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.12'
+  NUITKA_COMMON_ARGS: >-
+    --standalone --enable-plugin=pyside6 --follow-imports --remove-output
+    --lto=yes --python-flag=no_site --output-dir=deploy
+    --include-module=qdarktheme --include-module=deepdiff
+    --include-module=pygments --include-module=paramiko --include-module=yaml
+    --include-module=openai --include-module=keyring --include-module=prompt_toolkit
+    --include-package=unicrypto
+    --include-module=pygments.formatters.html --include-module=pygments.lexers.shell
+    --include-package=qtermwidget,core,function,style,ui,icons
+    --include-data-dir=conf=conf
+    --company-name=HanXuan --product-name=cubeShell
+    --file-description="A powerful shell application"
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }}-${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.job-timeout || 60 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-13
+            arch: x86_64
+            platform: macos
+          - os: macos-14
+            arch: arm64
+            platform: macos
+          - os: windows-latest
+            arch: x86_64
+            platform: windows
+          - os: windows-11-arm
+            arch: arm64
+            platform: windows
+            job-timeout: 90
+          - os: ubuntu-22.04
+            arch: x86_64
+            platform: linux
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            platform: linux
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version
+        shell: bash
+        run: |
+          if [ -n "${GITHUB_REF_NAME:-}" ] && [[ "${GITHUB_REF_NAME}" == v* ]]; then
+            APP_VERSION="${GITHUB_REF_NAME#v}"
+          else
+            APP_VERSION="0.0.0"
+          fi
+          echo "APP_VERSION=${APP_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          pip install -r requirements.txt
+          pip install nuitka
+
+      # ──────────────────────────────────────────────────────────────
+      # 平台系统依赖
+      # ──────────────────────────────────────────────────────────────
+
+      - name: Install macOS system dependencies
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: brew install create-dmg
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential patchelf ccache python3-dev libffi-dev libssl-dev \
+            libxcb-cursor0 libxkbcommon-x11-0 libegl1 libgl1
+
+      - name: Install Inno Setup (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Install pywinpty (Windows x86_64)
+        if: runner.os == 'Windows' && matrix.arch != 'arm64'
+        run: pip install pywinpty
+
+      - name: Install pywinpty (Windows ARM64)
+        if: runner.os == 'Windows' && matrix.arch == 'arm64'
+        shell: pwsh
+        run: |
+          pip install pywinpty
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Standard install failed, trying source build..."
+            pip install pywinpty==2.0.14 --no-binary pywinpty --no-cache-dir
+            if ($LASTEXITCODE -ne 0) {
+              Write-Warning "Failed to install pywinpty from source, continuing without it (code uses try/except import)"
+            }
+          }
+
+      # ──────────────────────────────────────────────────────────────
+      # Nuitka 编译
+      # ──────────────────────────────────────────────────────────────
+
+      - name: Build with Nuitka (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          max_attempts=3
+          for attempt in $(seq 1 "$max_attempts"); do
+            echo "=== Build attempt ${attempt}/${max_attempts} ==="
+            if nuitka ${{ env.NUITKA_COMMON_ARGS }} \
+              --macos-create-app-bundle \
+              --static-libpython=no \
+              --macos-app-icon=icons/logo.icns \
+              --file-version=${{ env.APP_VERSION }}.0 \
+              --product-version=${{ env.APP_VERSION }} \
+              --jobs=4 \
+              cube-shell.py; then
+              echo "Build succeeded"
+              exit 0
+            fi
+            if [ "$attempt" -eq "$max_attempts" ]; then
+              echo "Build failed after ${max_attempts} attempts"
+              exit 1
+            fi
+            sleep_seconds=$((attempt * 60))
+            echo "Retrying in ${sleep_seconds}s..."
+            sleep "$sleep_seconds"
+          done
+
+      - name: Build with Nuitka (Windows x86_64)
+        if: runner.os == 'Windows' && matrix.arch != 'arm64'
+        shell: cmd
+        run: >-
+          nuitka ${{ env.NUITKA_COMMON_ARGS }}
+          --windows-console-mode=disable
+          --windows-icon-from-ico=icons/logo.ico
+          --file-version=${{ env.APP_VERSION }}.0
+          --product-version=${{ env.APP_VERSION }}
+          --jobs=4
+          cube-shell.py
+
+      - name: Build with Nuitka (Windows ARM64)
+        if: runner.os == 'Windows' && matrix.arch == 'arm64'
+        shell: cmd
+        timeout-minutes: 90
+        run: |
+          set VSLANG=1033
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" arm64
+          nuitka ${{ env.NUITKA_COMMON_ARGS }} --msvc=latest --windows-console-mode=disable --windows-icon-from-ico=icons/logo.ico --file-version=${{ env.APP_VERSION }}.0 --product-version=${{ env.APP_VERSION }} --jobs=4 cube-shell.py
+
+      - name: Build with Nuitka (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          max_attempts=3
+          for attempt in $(seq 1 "$max_attempts"); do
+            echo "=== Build attempt ${attempt}/${max_attempts} ==="
+            if nuitka ${{ env.NUITKA_COMMON_ARGS }} \
+              --linux-icon=icons/logo.ico \
+              --file-version=${{ env.APP_VERSION }}.0 \
+              --product-version=${{ env.APP_VERSION }} \
+              --jobs=4 \
+              cube-shell.py; then
+              echo "Build succeeded"
+              exit 0
+            fi
+            if [ "$attempt" -eq "$max_attempts" ]; then
+              echo "Build failed after ${max_attempts} attempts"
+              exit 1
+            fi
+            sleep_seconds=$((attempt * 60))
+            echo "Retrying in ${sleep_seconds}s..."
+            sleep "$sleep_seconds"
+          done
+
+      # ──────────────────────────────────────────────────────────────
+      # 后处理与打包
+      # ──────────────────────────────────────────────────────────────
+
+      - name: Post-process and package (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="deploy/cube-shell.app"
+          MACOS_DIR="${APP}/Contents/MacOS"
+
+          # Clean sensitive data
+          echo "{}" > "${MACOS_DIR}/conf/tunnel.json"
+          rm -f "${MACOS_DIR}/conf/config.dat"
+
+          # Copy qtermwidget resources (flat structure to MacOS/)
+          cp -r qtermwidget/color-schemes "${MACOS_DIR}/"
+          cp -r qtermwidget/kb-layouts "${MACOS_DIR}/"
+          cp -r qtermwidget/translations "${MACOS_DIR}/"
+          cp qtermwidget/default.keytab "${MACOS_DIR}/"
+
+          # Register URL Scheme
+          bash tools/register_url_scheme.sh "${APP}"
+
+          # Ad-hoc signing
+          codesign -s - --force --deep "${APP}"
+
+          # Create DMG
+          mkdir -p deploy
+          create-dmg --volname "Cube Shell" --window-size 800 400 \
+            --app-drop-link 400 200 \
+            "deploy/cube-shell-${{ env.APP_VERSION }}-macos-${{ matrix.arch }}.dmg" \
+            "${APP}"
+
+      - name: Post-process and package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dist = "deploy\cube-shell.dist"
+
+          # Clean sensitive data
+          New-Item -ItemType Directory -Force -Path "$dist\conf" | Out-Null
+          Set-Content -Path "$dist\conf\tunnel.json" -Value "{}" -NoNewline
+          Remove-Item "$dist\conf\config.dat" -ErrorAction SilentlyContinue
+
+          # Copy qtermwidget resources (subdirectory structure)
+          New-Item -ItemType Directory -Force -Path "$dist\qtermwidget" | Out-Null
+          Copy-Item qtermwidget\color-schemes "$dist\qtermwidget\" -Recurse -Force
+          Copy-Item qtermwidget\kb-layouts "$dist\qtermwidget\" -Recurse -Force
+          Copy-Item qtermwidget\translations "$dist\qtermwidget\" -Recurse -Force
+          Copy-Item qtermwidget\default.keytab "$dist\qtermwidget\" -Force
+
+          # Self-signed code signing
+          if (-not (Get-ChildItem Cert:\CurrentUser\My | Where-Object {$_.Subject -eq 'CN=CubeShell'})) {
+            New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=CubeShell' -CertStoreLocation Cert:\CurrentUser\My
+          }
+          $thumb = (Get-ChildItem Cert:\CurrentUser\My | Where-Object {$_.Subject -eq 'CN=CubeShell'}).Thumbprint
+          if ($thumb) {
+            $exePath = "$dist\cube-shell.exe"
+            if (Test-Path $exePath) {
+              signtool sign /fd SHA256 /sha1 $thumb /t http://timestamp.digicert.com $exePath
+              Write-Host "Signed successfully."
+            }
+          }
+
+          # Inno Setup packaging (pass version from git tag)
+          iscc /DMyAppVersion="${{ env.APP_VERSION }}" installer.iss
+
+          # Rename output (installer.iss outputs to Output/cube-shell.exe)
+          $arch = "${{ matrix.arch }}"
+          $src = "Output\cube-shell.exe"
+          if (-not (Test-Path $src)) { $src = "deploy\Output\cube-shell.exe" }
+          if (Test-Path $src) {
+            $dest = "deploy\cube-shell-${{ env.APP_VERSION }}-windows-${arch}.exe"
+            Move-Item $src $dest -Force
+            Write-Host "Installer renamed to: $dest"
+          } else {
+            throw "Inno Setup output not found at expected path"
+          }
+
+      - name: Post-process and package (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIST="deploy/cube-shell.dist"
+
+          # Clean sensitive data
+          mkdir -p "${DIST}/conf"
+          echo "{}" > "${DIST}/conf/tunnel.json"
+          rm -f "${DIST}/conf/config.dat"
+
+          # Copy qtermwidget resources (flat structure to dist root)
+          cp -r qtermwidget/color-schemes "${DIST}/"
+          cp -r qtermwidget/kb-layouts "${DIST}/"
+          cp -r qtermwidget/translations "${DIST}/"
+          cp qtermwidget/default.keytab "${DIST}/"
+
+          # Copy icon
+          cp icons/logo.png "${DIST}/"
+
+          # Ensure binary is executable
+          chmod +x "${DIST}/cube-shell.bin" 2>/dev/null || true
+
+          # Create .desktop file
+          cat > "${DIST}/cube-shell.desktop" <<'DESKTOP'
+          [Desktop Entry]
+          Type=Application
+          Name=Cube Shell
+          Comment=A powerful shell application
+          Exec=cube-shell.bin
+          Icon=logo.png
+          Terminal=false
+          Categories=Development;System;Utility;
+          StartupNotify=true
+          StartupWMClass=cubeShell
+          DESKTOP
+          chmod +x "${DIST}/cube-shell.desktop"
+
+          # Create launch script
+          cat > "${DIST}/cube-shell.sh" <<'SCRIPT'
+          #!/bin/bash
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          DESKTOP="${DIR}/cube-shell.desktop"
+          if [ -f "${DESKTOP}" ]; then
+            sed -i "s|^Exec=.*|Exec=${DIR}/cube-shell.bin|" "${DESKTOP}"
+            sed -i "s|^Icon=.*|Icon=${DIR}/logo.png|" "${DESKTOP}"
+          fi
+          exec "${DIR}/cube-shell.bin" "$@"
+          SCRIPT
+          chmod +x "${DIST}/cube-shell.sh"
+
+          # Create tarball
+          tar -czf "deploy/cube-shell-${{ env.APP_VERSION }}-linux-${{ matrix.arch }}.tar.gz" -C deploy cube-shell.dist
+
+      # ──────────────────────────────────────────────────────────────
+      # 安全验证
+      # ──────────────────────────────────────────────────────────────
+
+      - name: Security verification
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Checking for sensitive files in build output..."
+          
+          # Check for ai_key
+          found_ai_key=$(find deploy -name "ai_key" -type f 2>/dev/null || true)
+          if [ -n "$found_ai_key" ]; then
+            echo "ERROR: ai_key found in build output: $found_ai_key"
+            exit 1
+          fi
+          
+          # Check for config.dat
+          found_config=$(find deploy -name "config.dat" -type f 2>/dev/null || true)
+          if [ -n "$found_config" ]; then
+            echo "ERROR: config.dat found in build output: $found_config"
+            exit 1
+          fi
+          
+          # Verify tunnel.json is sanitized
+          for tunnel in $(find deploy -name "tunnel.json" -type f 2>/dev/null); do
+            content=$(cat "$tunnel")
+            if [ "$content" != "{}" ]; then
+              echo "ERROR: tunnel.json not sanitized at: $tunnel (expected '{}')"
+              exit 1
+            fi
+          done
+          
+          echo "Security verification passed."
+
+      # ──────────────────────────────────────────────────────────────
+      # 产物上传
+      # ──────────────────────────────────────────────────────────────
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cube-shell-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            deploy/*.dmg
+            deploy/*.exe
+            deploy/*.tar.gz
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-22.04
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cube-shell-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: List artifacts
+        shell: bash
+        run: ls -la release-assets/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Cube Shell ${{ github.ref_name }}
+          generate_release_notes: true
+          body: |
+            ## Cube Shell ${{ github.ref_name }}
+
+            智能运维终端
+
+            ### 下载
+
+            - **macOS (Intel)**: `cube-shell-*-macos-x86_64.dmg`
+            - **macOS (Apple Silicon)**: `cube-shell-*-macos-arm64.dmg`
+            - **Windows (x86_64)**: `cube-shell-*-windows-x86_64.exe`
+            - **Windows (ARM64)**: `cube-shell-*-windows-arm64.exe`
+            - **Linux (x86_64)**: `cube-shell-*-linux-x86_64.tar.gz`
+            - **Linux (ARM64)**: `cube-shell-*-linux-arm64.tar.gz`
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
