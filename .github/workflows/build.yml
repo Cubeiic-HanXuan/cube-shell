@@ -18,6 +18,14 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install dependencies
+        run: |
+          pip install --no-cache-dir pyyaml keyring prompt_toolkit pywin32 toml appdirs
+          pip install --no-cache-dir pygments paramiko deepdiff setuptools
+          pip install --no-cache-dir pyqtdarktheme-fork
+          pip install --no-cache-dir pyside6
+          pip install --no-cache-dir openai aardwolf
+
       - name: Install Nuitka
         run: pip install --no-cache-dir nuitka
 
