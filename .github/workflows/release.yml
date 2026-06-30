@@ -18,6 +18,7 @@ env:
   NUITKA_COMMON_ARGS: >-
     --standalone --enable-plugin=pyside6 --follow-imports --remove-output
     --lto=yes --python-flag=no_site --output-dir=deploy
+    --assume-yes-for-downloads
     --include-module=qdarktheme --include-module=deepdiff
     --include-module=pygments --include-module=paramiko --include-module=yaml
     --include-module=openai --include-module=keyring --include-module=prompt_toolkit

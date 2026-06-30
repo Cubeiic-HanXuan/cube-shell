@@ -2,7 +2,10 @@
 
 [Setup]
 AppName=cube-shell
-AppVersion=2.7.0
+#ifndef MyAppVersion
+  #define MyAppVersion "2.7.0"
+#endif
+AppVersion={#MyAppVersion}
 DefaultDirName={commonpf}\cube-shell
 DefaultGroupName=寒暄
 OutputDir=Output
