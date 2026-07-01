@@ -2,6 +2,7 @@
 """Hermes Agent 部署状态模块 - 显示版本、安装和运行状态，提供快速操作按钮"""
 
 import subprocess
+import sys
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QLabel, QPushButton, QTextEdit, QFrame)
@@ -42,7 +43,7 @@ class PipUpgradeWorker(QThread):
                 import subprocess as _sp
                 kwargs['creationflags'] = _sp.CREATE_NO_WINDOW
             result = subprocess.run(
-                ["pip", "install", "--upgrade", "hermes-agent"],
+                [sys.executable, "-m", "pip", "install", "--upgrade", "hermes-agent"],
                 **kwargs
             )
             output = result.stdout or result.stderr or ""
