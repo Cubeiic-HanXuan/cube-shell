@@ -965,13 +965,29 @@ class MainDialog(QMainWindow):
                     f"channel '{tab_name}' closed within grace period, "
                     f"keeping tab open so the user can read server output"
                 )
+                # 即使保留 tab,也要把状态圆点变红,告诉用户会话已断开
+                self._mark_tab_disconnected(tab_name)
                 return
             for i in range(self.ui.ShellTab.count()):
                 if self.ui.ShellTab.tabText(i) == tab_name:
+                    # 关闭前先把圆点变红(off 会销毁 widget,这是最后一次机会)
+                    self._mark_tab_disconnected(tab_name)
                     self.off(i, tab_name)
                     return
         except Exception as e:
             util.logger.error(f"channel closed handler error: {e}")
+
+    def _mark_tab_disconnected(self, tab_name):
+        """找到 tab_name 对应的 tab,把状态圆点变红表示已断开。"""
+        try:
+            for i in range(self.ui.ShellTab.count()):
+                if self.ui.ShellTab.tabText(i) == tab_name:
+                    dot = self.ui.ShellTab.tabBar().tabButton(i, QTabBar.LeftSide)
+                    if dot is not None and hasattr(dot, 'setConnected'):
+                        dot.setConnected(False)
+                    return
+        except Exception as e:
+            util.logger.debug(f"mark tab disconnected failed: {e}")
 
     # ──────────────────────────────────────────────────────────────
     # 工具对话框懒加载方法
@@ -3072,6 +3088,22 @@ class MainDialog(QMainWindow):
     # 选择文件夹
     def cd(self):
         if self.isConnected:
+            # 关键:已连接时双击设备列表中的设备节点,语义是"开新 tab"
+            # 而不是"在当前 tab 切目录"。原代码无条件走"目录切换"分支,
+            # 导致用户开过本机终端后再开其他设备被卡死。
+            # 识别设备节点后,先关掉当前 tab,再递归调 cd() 走"开新"流程。
+            current_item = self.ui.treeWidget.currentItem()
+            if current_item is not None:
+                item_type = current_item.data(0, Qt.UserRole)
+                if item_type in ("device", "rdp_device", "localhost"):
+                    current_index = self.ui.ShellTab.currentIndex()
+                    if current_index > 0:
+                        tab_name = self.ui.ShellTab.tabText(current_index)
+                        self._off(tab_name)
+                    # _off() 把 isConnected 设回 False,递归后走"开新"分支
+                    self.cd()
+                    return
+
             ssh_conn = self.ssh()
 
             # 关键安全检查：
@@ -4057,7 +4089,11 @@ class MainDialog(QMainWindow):
             # 合法性校验：远程 pwd 必须是绝对路径。
             # 命令执行失败时（如 KoKo 返回 "ssh: handshake failed..."），
             # 错误文本会被当作 pwd，绝不能让它进入路径框
-            if pwd and not pwd.startswith('/'):
+            # 本机模式（Windows/macOS/Linux）由 getDirNow 走 _get_local_dir_now 分支，
+            # pwd 是 os.path.abspath 的本地绝对路径（Windows: "C:\..."、Unix: "/..."），
+            # 不应以 startswith('/') 作为唯一判据
+            is_local = getattr(ssh_conn, 'is_local', False)
+            if pwd and not is_local and not pwd.startswith('/'):
                 util.logger.warning(f"refreshDirs: invalid pwd output, skip update: {pwd[:120]!r}")
                 # JMS 代理到 MFA 目标机时，每次 exec 都注定认证失败：
                 # 标记不可用避免反复重试，并通知 UI 显示提示
