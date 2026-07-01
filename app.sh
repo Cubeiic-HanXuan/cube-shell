@@ -4,6 +4,28 @@
 source venv/bin/activate
 mkdir deploy
 
+APP_DIR="cube-shell.app/Contents/MacOS"
+
+strip_app_binary() {
+  local binary_path="$APP_DIR/cube-shell"
+  if [ -f "$binary_path" ]; then
+    echo "7: Stripping main binary..."
+    strip -x "$binary_path"
+  fi
+}
+
+remove_unused_qt_modules() {
+  echo "8: Removing unused Qt modules..."
+  local unused_files=(
+    "$APP_DIR/QtPdf"
+  )
+
+  local path
+  for path in "${unused_files[@]}"; do
+    rm -f "$path"
+  done
+}
+
 echo "1: Installing Nuitka..."
 pip install nuitka
 echo "2: Installing create-dmg..."
@@ -16,6 +38,7 @@ nuitka \
   --enable-plugin=pyside6 \
   --follow-imports \
   --macos-app-icon=icons/logo.icns \
+  --nofollow-import-to=PySide6.QtPdf,PySide6.QtDBus,PySide6.QtConcurrent,PySide6.QtSvg \
   --include-module=qdarktheme \
   --include-module=pygments \
   --include-module=paramiko \
@@ -47,11 +70,14 @@ cp qtermwidget/default.keytab cube-shell.app/Contents/MacOS
 echo "6: Registering URL schemes..."
 bash tools/register_url_scheme.sh cube-shell.app
 
-# Step 7: Ad-hoc codesign
-echo "7: Ad-hoc signing..."
+strip_app_binary
+#remove_unused_qt_modules
+
+# Step 9: Ad-hoc codesign
+echo "9: Ad-hoc signing..."
 codesign -s - --force --deep cube-shell.app
 
-echo "8: create-dmg..."
+echo "10: create-dmg..."
 create-dmg --volname "Cube Shell" \
   --window-size 800 400 \
   --app-drop-link 400 200 \

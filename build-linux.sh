@@ -19,7 +19,7 @@ set -o pipefail
 # 项目 / 版本信息
 # ---------------------------------------------------------------------------
 APP_NAME="cube-shell"
-APP_VERSION="2.7.0"
+APP_VERSION="2.8.0"
 COMPANY_NAME="HanXuan"
 PRODUCT_NAME="cubeShell"
 FILE_DESC="A powerful shell application"
@@ -102,6 +102,7 @@ nuitka \
   --lto=yes \
   --output-dir="${DEPLOY_DIR}" \
   --linux-icon=icons/logo.ico \
+  --nofollow-import-to=PySide6.QtPdf,PySide6.QtDBus,PySide6.QtConcurrent,PySide6.QtSvg \
   --include-module=qdarktheme \
   --include-module=pygments \
   --include-module=paramiko \

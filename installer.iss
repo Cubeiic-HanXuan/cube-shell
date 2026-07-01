@@ -3,7 +3,7 @@
 [Setup]
 AppName=cube-shell
 #ifndef MyAppVersion
-  #define MyAppVersion "2.7.0"
+  #define MyAppVersion "2.8.0"
 #endif
 AppVersion={#MyAppVersion}
 DefaultDirName={commonpf}\cube-shell

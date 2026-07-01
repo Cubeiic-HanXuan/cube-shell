@@ -21,7 +21,7 @@ from .github_api import AssetInfo
 # (system, arch) -> (平台关键词列表, 扩展名候选元组(按优先级), 架构关键词列表)
 # 扩展名按优先级排列:首选格式排前面,评分时给首选加分。
 # 统一约定:macOS 与 Windows 都下载 .zip,Linux 下载 .tar.xz。
-# 实际产物命名(见 GitHub V2.7.0 release):
+# 实际产物命名(见 GitHub V2.8.0 release):
 #   Windows = cube-shell-windows-X86_64.zip / cube-shell-windows-arm64.zip(也可能是未来的 Inno .exe)
 #   macOS   = cube-shell-macOS-arm64.zip / .dmg
 #   Linux   = cube-shell-linux-x86_64.tar.xz / cube-shell-linux-arm64.tar.xz
