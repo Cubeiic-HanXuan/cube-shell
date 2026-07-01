@@ -189,6 +189,8 @@
     <message><source>分组内的设备将移至未分组</source><translation>Devices in this group will be moved to Ungrouped</translation></message>
     <message><source>分组已存在</source><translation>Group already exists</translation></message>
     <message><source>警告</source><translation>Warning</translation></message>
+    <message><source>跟随终端目录</source><translation>Follow Terminal Folder</translation></message>
+    <message><source>远程监控</source><translation>Remote Monitoring</translation></message>
 </context>
 <context>
     <name>TextEditorDialog</name>

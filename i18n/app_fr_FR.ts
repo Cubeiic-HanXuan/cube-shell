@@ -178,6 +178,8 @@
     <message><source>已应用字体: {}, 大小: {}</source><translation>Police appliquée: {}, Taille: {}</translation></message>
     <message><source>错误</source><translation>Erreur</translation></message>
     <message><source>应用字体失败: {}</source><translation>Échec d'application de la police: {}</translation></message>
+    <message><source>跟随终端目录</source><translation>Suivre le dossier du terminal</translation></message>
+    <message><source>远程监控</source><translation>Surveillance à distance</translation></message>
 </context>
 <context>
     <name>TextEditorDialog</name>

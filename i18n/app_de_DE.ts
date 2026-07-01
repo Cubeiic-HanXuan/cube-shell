@@ -178,6 +178,8 @@
     <message><source>已应用字体: {}, 大小: {}</source><translation>Schriftart angewendet: {}, Größe: {}</translation></message>
     <message><source>错误</source><translation>Fehler</translation></message>
     <message><source>应用字体失败: {}</source><translation>Schriftart konnte nicht angewendet werden: {}</translation></message>
+    <message><source>跟随终端目录</source><translation>Terminalordner folgen</translation></message>
+    <message><source>远程监控</source><translation>Fernüberwachung</translation></message>
 </context>
 <context>
     <name>TextEditorDialog</name>

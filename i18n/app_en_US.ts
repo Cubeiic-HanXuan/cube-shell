@@ -734,6 +734,14 @@
         <translation>Group already exists</translation>
     </message>
     <message>
+        <source>跟随终端目录</source>
+        <translation>Follow Terminal Folder</translation>
+    </message>
+    <message>
+        <source>远程监控</source>
+        <translation>Remote Monitoring</translation>
+    </message>
+    <message>
         <source>警告</source>
         <translation>Warning</translation>
     </message>

@@ -178,6 +178,8 @@
     <message><source>已应用字体: {}, 大小: {}</source><translation>Применен шрифт: {}, Размер: {}</translation></message>
     <message><source>错误</source><translation>Ошибка</translation></message>
     <message><source>应用字体失败: {}</source><translation>Не удалось применить шрифт: {}</translation></message>
+    <message><source>跟随终端目录</source><translation>Следовать за папкой терминала</translation></message>
+    <message><source>远程监控</source><translation>Удалённый мониторинг</translation></message>
 </context>
 <context>
     <name>TextEditorDialog</name>

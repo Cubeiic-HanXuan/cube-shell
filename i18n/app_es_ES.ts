@@ -178,6 +178,8 @@
     <message><source>已应用字体: {}, 大小: {}</source><translation>Fuente aplicada: {}, Tamaño: {}</translation></message>
     <message><source>错误</source><translation>Error</translation></message>
     <message><source>应用字体失败: {}</source><translation>Error al aplicar fuente: {}</translation></message>
+    <message><source>跟随终端目录</source><translation>Seguir carpeta del terminal</translation></message>
+    <message><source>远程监控</source><translation>Monitorización remota</translation></message>
 </context>
 <context>
     <name>TextEditorDialog</name>

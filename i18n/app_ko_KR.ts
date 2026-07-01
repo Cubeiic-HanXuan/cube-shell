@@ -178,6 +178,8 @@
     <message><source>已应用字体: {}, 大小: {}</source><translation>적용된 폰트: {}, 크기: {}</translation></message>
     <message><source>错误</source><translation>오류</translation></message>
     <message><source>应用字体失败: {}</source><translation>폰트 적용 실패: {}</translation></message>
+    <message><source>跟随终端目录</source><translation>터미널 폴더 따라가기</translation></message>
+    <message><source>远程监控</source><translation>원격 모니터링</translation></message>
 </context>
 <context>
     <name>TextEditorDialog</name>

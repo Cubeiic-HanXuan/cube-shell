@@ -693,6 +693,58 @@
         <source>应用字体失败: {}</source>
         <translation>Не вдалося застосувати шрифт: {}</translation>
     </message>
+    <message>
+        <source>未分组</source>
+        <translation>Ungrouped</translation>
+    </message>
+    <message>
+        <source>新建分组</source>
+        <translation>New Group</translation>
+    </message>
+    <message>
+        <source>重命名分组</source>
+        <translation>Rename Group</translation>
+    </message>
+    <message>
+        <source>删除分组</source>
+        <translation>Delete Group</translation>
+    </message>
+    <message>
+        <source>移到分组</source>
+        <translation>Move to Group</translation>
+    </message>
+    <message>
+        <source>移出分组</source>
+        <translation>Remove from Group</translation>
+    </message>
+    <message>
+        <source>请输入分组名称</source>
+        <translation>Please enter group name</translation>
+    </message>
+    <message>
+        <source>确定要删除分组吗？</source>
+        <translation>Are you sure to delete this group?</translation>
+    </message>
+    <message>
+        <source>分组内的设备将移至未分组</source>
+        <translation>Devices in this group will be moved to Ungrouped</translation>
+    </message>
+    <message>
+        <source>分组已存在</source>
+        <translation>Group already exists</translation>
+    </message>
+    <message>
+        <source>跟随终端目录</source>
+        <translation>Слідувати за папкою терміналу</translation>
+    </message>
+    <message>
+        <source>远程监控</source>
+        <translation>Віддалений моніторинг</translation>
+    </message>
+    <message>
+        <source>警告</source>
+        <translation>Попередження</translation>
+    </message>
 </context>
 <context>
     <name>TextEditorDialog</name>

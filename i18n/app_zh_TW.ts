@@ -178,6 +178,8 @@
     <message><source>已应用字体: {}, 大小: {}</source><translation>已套用字型: {}, 大小: {}</translation></message>
     <message><source>错误</source><translation>錯誤</translation></message>
     <message><source>应用字体失败: {}</source><translation>套用字型失敗: {}</translation></message>
+    <message><source>跟随终端目录</source><translation>跟隨終端目錄</translation></message>
+    <message><source>远程监控</source><translation>遠端監控</translation></message>
 </context>
 <context>
     <name>TextEditorDialog</name>

@@ -693,6 +693,14 @@
         <source>应用字体失败: {}</source>
         <translation>Failed to apply font: {}</translation>
     </message>
+    <message>
+        <source>跟随终端目录</source>
+        <translation>Ακολούθηση φακέλου τερματικού</translation>
+    </message>
+    <message>
+        <source>远程监控</source>
+        <translation>Απομακρυσμένη παρακολούθηση</translation>
+    </message>
 </context>
 <context>
     <name>TextEditorDialog</name>

@@ -1,4 +1,3 @@
-import glob
 import json
 import logging
 import os
@@ -47,7 +46,6 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QDialog, QMessag
     QInputDialog, QFileDialog, QTreeWidget, QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QTableWidgetItem, \
     QHeaderView, QTabBar, QTextBrowser, QLineEdit, QScrollArea, QGridLayout, QProgressBar, QProgressDialog, \
     QDockWidget, QCheckBox, QFrame, QListWidget, QListWidgetItem, QStyledItemDelegate, QSizePolicy, QComboBox
-from deepdiff import DeepDiff
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import BashLexer
@@ -57,7 +55,7 @@ from core.forwarder import ForwarderManager
 from core.frequently_used_commands import TreeSearchApp
 from core.uploader.progress_adapter import ProgressAdapter
 from core.uploader.sftp_uploader_core import SFTPUploaderCore
-from core.vars import ICONS, CONF_FILE, CMDS, KEYS
+from core.vars import ICONS, CMDS, KEYS
 from core.rdp.rdp_client import RDPWidget, RDPClientConsoleSettings, build_rdp_url
 from function import util, about, theme, traversal
 from function.util import device_protocol
@@ -65,7 +63,7 @@ from function.ssh_func import SshClient
 from function.util import format_file_size, has_valid_suffix
 from qtermwidget.filter import HighlightFilter, PermissionHighlightFilter
 from qtermwidget.qtermwidget import QTermWidget
-from style.style import updateColor, InstalledButtonStyle, InstallButtonStyle
+from style.style import InstalledButtonStyle, InstallButtonStyle
 from ui import add_config, text_editor, confirm, main, docker_install, auth
 from ui.add_tunnel_config import Ui_AddTunnelConfig
 from ui.tunnel import Ui_Tunnel
@@ -946,6 +944,10 @@ class MainDialog(QMainWindow):
         if hasattr(self.ui, 'follow_folder'):
             self.ui.follow_folder.stateChanged.connect(self._on_follow_folder_changed)
             self.ui.follow_folder.hide()  # 无连接时隐藏
+        # remote_monitoring 复选框逻辑
+        if hasattr(self.ui, 'remote_monitoring'):
+            self.ui.remote_monitoring.stateChanged.connect(self._on_remote_monitoring_changed)
+            self.ui.remote_monitoring.hide()  # 无连接时隐藏
         # 设置选择模式为多选模式
         self.ui.treeWidget.setSelectionMode(QTreeWidget.ExtendedSelection)
         # 优化左侧图标显示间距
@@ -1056,24 +1058,7 @@ class MainDialog(QMainWindow):
         """创建向后兼容的 widget 存根，替代已从 ui/main.py 移除的组件。
         这些 stub widget 不会显示在 UI 中，仅作为数据持有者供现有代码引用。
         """
-        from PySide6.QtWidgets import QProgressBar, QLabel as _QLabel, QPushButton, QGridLayout
-        # 进度条存根（监控数据载体，连接到 RingGauge 等）
-        for name in ('cpuRate', 'memRate', 'diskRate'):
-            bar = QProgressBar()
-            bar.setRange(0, 100)
-            bar.setValue(0)
-            bar.hide()
-            setattr(self.ui, name, bar)
-        # 文本标签存根
-        for name in ('networkUpload', 'networkDownload', 'operatingSystem', 'kernelVersion', 'kernel'):
-            lbl = _QLabel()
-            lbl.hide()
-            setattr(self.ui, name, lbl)
-        # 按鈕存根（discButton / theme）
-        for name in ('discButton', 'theme'):
-            btn = QPushButton()
-            btn.hide()
-            setattr(self.ui, name, btn)
+        from PySide6.QtWidgets import QGridLayout
         # gridLayout_7 存根（常用容器展示）
         _stub_widget = __import__('PySide6.QtWidgets', fromlist=['QWidget']).QWidget()
         _stub_widget.hide()
@@ -1166,6 +1151,40 @@ class MainDialog(QMainWindow):
         """当 'Follow terminal folder' 状态改变时触发。"""
         if state and self.isConnected:
             self.refreshDirs()
+
+    def _on_remote_monitoring_changed(self, state):
+        """当 'Remote monitoring' 状态改变时触发。"""
+        ssh_conn = self.ssh()
+        if not ssh_conn or not self.isConnected:
+            return
+        if getattr(ssh_conn, "is_local", False):
+            return
+        if getattr(ssh_conn, 'is_jumpserver_proxy', False):
+            return
+
+        if state:  # 勾选：启动监控
+            # 显示底部状态栏
+            self.statusBar().show()
+            # 重置停止信号（关键！否则新线程会立即退出）
+            ssh_conn.close_sig = 1
+            # 启动监控线程
+            if not hasattr(ssh_conn, 'flush_sys_info_thread') or not ssh_conn.flush_sys_info_thread.is_alive():
+                ssh_conn.flush_sys_info_thread = threading.Thread(
+                    target=ssh_conn.get_datas,
+                    args=(ssh_conn,),
+                    daemon=True
+                )
+                ssh_conn.flush_sys_info_thread.start()
+                self.flushSysInfo()
+        else:  # 取消勾选：停止监控
+            # 停止 UI 定时刷新
+            if self.update_timer and self.update_timer.isActive():
+                self.update_timer.stop()
+            # 隐藏底部状态栏
+            self.statusBar().hide()
+            # 停止后台监控线程
+            if hasattr(ssh_conn, 'flush_sys_info_thread') and ssh_conn.flush_sys_info_thread.is_alive():
+                ssh_conn.close_sig = 0  # 设置停止信号让监控循环退出
 
     def _on_cwd_changed(self, ssh_conn, new_pwd):
         """Shell 通过 OSC 7 报告工作目录变更 → 联动文件树。"""
@@ -1992,6 +2011,7 @@ class MainDialog(QMainWindow):
             if this and this in self.ssh_clients:
                 ssh_conn = self.ssh_clients[this]
                 if current_text == self.tr("首页"):
+                    # 切换到首页：隐藏所有远程连接相关 UI
                     if ssh_conn:
                         ssh_conn.close_sig = 0
                     self.isConnected = False
@@ -2001,15 +2021,53 @@ class MainDialog(QMainWindow):
                     self.ui.treeWidget.clear()
                     self.refreshConf()
                     self.statusBar().hide()
-
+                    if hasattr(self.ui, 'follow_folder'):
+                        self.ui.follow_folder.hide()
+                    if hasattr(self.ui, 'remote_monitoring'):
+                        self.ui.remote_monitoring.hide()
                 else:
                     if self.ssh_clients:
-                        ssh_conn.close_sig = 1
-                        self.isConnected = True
-                        self.refreshDirs()
-                        self.processInitUI()
-                        self.statusBar().show()
+                        # 检查是否是本机终端
+                        if getattr(ssh_conn, 'is_local', False):
+                            # 本机终端：隐藏远程相关控件
+                            self.isConnected = True
+                            self.refreshDirs()
+                            self.statusBar().hide()
+                            if hasattr(self.ui, 'follow_folder'):
+                                self.ui.follow_folder.hide()
+                            if hasattr(self.ui, 'remote_monitoring'):
+                                self.ui.remote_monitoring.hide()
+                        else:
+                            # 切换到远程连接 Tab
+                            self.isConnected = True
+                            self.refreshDirs()
+                            self.processInitUI()
+                            # 显示复选框
+                            if hasattr(self.ui, 'follow_folder'):
+                                self.ui.follow_folder.show()
+                            if hasattr(self.ui, 'remote_monitoring'):
+                                self.ui.remote_monitoring.show()
+                            # 监控相关：如果已勾选 remote_monitoring
+                            if hasattr(self.ui, 'remote_monitoring') and self.ui.remote_monitoring.isChecked():
+                                # 确保当前 Tab 的监控线程在运行
+                                ssh_conn.close_sig = 1
+                                if not hasattr(ssh_conn, 'flush_sys_info_thread') or not ssh_conn.flush_sys_info_thread.is_alive():
+                                    ssh_conn.flush_sys_info_thread = threading.Thread(
+                                        target=ssh_conn.get_datas,
+                                        args=(ssh_conn,),
+                                        daemon=True
+                                    )
+                                    ssh_conn.flush_sys_info_thread.start()
+                                # 确保 UI 定时刷新器在运行
+                                self.flushSysInfo()
+                                self.statusBar().show()
+                                # 立即刷新一次显示当前 Tab 的数据
+                                self.refreshSysInfo()
+                            else:
+                                ssh_conn.close_sig = 1  # 保持连接活跃但不启动监控
+                                self.statusBar().hide()
             else:
+                # Tab 没有对应的 SSH 连接（本地终端或未连接的 Tab）
                 if current_text == self.tr("首页"):
                     self.isConnected = False
                     self.ui.treeWidget.setColumnCount(1)
@@ -2017,7 +2075,19 @@ class MainDialog(QMainWindow):
                     self.remove_last_line_edit()
                     self.ui.treeWidget.clear()
                     self.refreshConf()
-                    self.statusBar().hide()
+                self.statusBar().hide()
+                if hasattr(self.ui, 'follow_folder'):
+                    self.ui.follow_folder.hide()
+                if hasattr(self.ui, 'remote_monitoring'):
+                    self.ui.remote_monitoring.hide()
+
+        else:
+            # 没有任何 SSH 连接
+            self.statusBar().hide()
+            if hasattr(self.ui, 'follow_folder'):
+                self.ui.follow_folder.hide()
+            if hasattr(self.ui, 'remote_monitoring'):
+                self.ui.remote_monitoring.hide()
 
         # 切换 Tab 时始终同步 AI 面板的终端绑定（不论 AI 面板是否可见），
         # 避免 AI 面板在隐藏后重新显示时 agent 仍指向旧 Tab 的终端。
@@ -2480,7 +2550,7 @@ class MainDialog(QMainWindow):
         about_action.triggered.connect(self.about)
 
         # 创建"检查更新"动作
-        check_update_action = QAction(QIcon(":Download.png"), self.tr("&检查更新"), self)
+        check_update_action = QAction(self.tr("&检查更新"), self)
         check_update_action.setIconVisibleInMenu(True)
         check_update_action.setMenuRole(QAction.MenuRole.NoRole)
         check_update_action.setShortcut("Shift+Ctrl+U")
@@ -3166,11 +3236,17 @@ class MainDialog(QMainWindow):
         # 清理 pending 状态
         self._pending_terminal = None
 
-        # 更新状态栏主机名和用户名，并确保状态栏可见
+        # 更新状态栏主机名和用户名
         try:
-            self.statusBar().show()
+            # 仅当 Remote monitoring 已勾选时才显示状态栏
+            if hasattr(self.ui, 'remote_monitoring') and self.ui.remote_monitoring.isChecked():
+                self.statusBar().show()
+            else:
+                self.statusBar().hide()
             if hasattr(self.ui, 'follow_folder'):
                 self.ui.follow_folder.show()
+            if hasattr(self.ui, 'remote_monitoring'):
+                self.ui.remote_monitoring.show()
             if hasattr(self, '_status_hostname'):
                 host = getattr(ssh_conn, 'host', '') or getattr(ssh_conn, 'hostname', '')
                 self._status_hostname.setText(host or '—')
@@ -3209,12 +3285,8 @@ class MainDialog(QMainWindow):
             return
 
         self.isConnected = True
-        if hasattr(self.ui, 'discButton'):
-            self.ui.discButton.setEnabled(True)
         if hasattr(self.ui, 'result'):
             self.ui.result.setEnabled(True)
-        if hasattr(self.ui, 'theme'):
-            self.ui.theme.setEnabled(True)
 
         self.refreshDirs()
         if getattr(ssh_conn, "is_local", False):
@@ -3232,10 +3304,12 @@ class MainDialog(QMainWindow):
                     widget.hide()
             return
 
-        if not hasattr(ssh_conn, 'flush_sys_info_thread') or not ssh_conn.flush_sys_info_thread.is_alive():
-            ssh_conn.flush_sys_info_thread = threading.Thread(target=ssh_conn.get_datas, args=(ssh_conn,), daemon=True)
-            ssh_conn.flush_sys_info_thread.start()
-            self.flushSysInfo()
+        # 仅当 Remote monitoring 复选框被勾选时才启动监控
+        if hasattr(self.ui, 'remote_monitoring') and self.ui.remote_monitoring.isChecked():
+            if not hasattr(ssh_conn, 'flush_sys_info_thread') or not ssh_conn.flush_sys_info_thread.is_alive():
+                ssh_conn.flush_sys_info_thread = threading.Thread(target=ssh_conn.get_datas, args=(ssh_conn,), daemon=True)
+                ssh_conn.flush_sys_info_thread.start()
+                self.flushSysInfo()
 
     def on_initSftpSignal(self):
         self.initSftp()
@@ -3417,11 +3491,6 @@ class MainDialog(QMainWindow):
 
         self.isConnected = False
         self.ssh_username, self.ssh_password, self.ssh_ip, self.key_type, self.key_file = None, None, None, None, None
-        self.ui.networkUpload.setText('')
-        self.ui.networkDownload.setText('')
-        self.ui.operatingSystem.setText('')
-        self.ui.kernel.setText('')
-        self.ui.kernelVersion.setText('')
 
         self.ui.treeWidget.setColumnCount(1)
         self.ui.treeWidget.setHeaderLabels([self.tr("设备列表")])
@@ -3441,15 +3510,14 @@ class MainDialog(QMainWindow):
         except RuntimeError:
             pass  # C++ 对象已被回收，忽略
 
-        self.ui.cpuRate.setValue(0)
-        self.ui.diskRate.setValue(0)
-        self.ui.memRate.setValue(0)
-
         # 无活跃连接时隐藏状态栏
         if not self.ssh_clients:
             self.statusBar().hide()
             if hasattr(self.ui, 'follow_folder'):
                 self.ui.follow_folder.hide()
+            if hasattr(self.ui, 'remote_monitoring'):
+                self.ui.remote_monitoring.hide()
+                self.ui.remote_monitoring.setChecked(False)
 
         # 重置左侧路径栏
 
@@ -3573,37 +3641,6 @@ class MainDialog(QMainWindow):
                 except Exception:
                     pass
 
-            """
-            该函数处理窗口关闭事件，主要功能包括：
-            遍历所有隧道（tunnel）并收集其配置信息。
-            检查收集到的配置与原始数据是否有差异。
-            如果有差异，则备份当前配置文件，并将新配置写入。
-            限制备份文件数量不超过10个，多余备份将被删除。
-            最终接受关闭事件。
-            :param event:
-            :return:
-            """
-            data = {}
-            for tunnel in self.tunnels:
-                name = tunnel.ui.name.text()
-                data[name] = tunnel.tunnelconfig.as_dict()
-
-            # DeepDiff 库用于比较两个复杂数据结构（如字典、列表、集合等）之间的差异，
-            # 能够识别并报告添加、删除或修改的数据项。
-            # 它支持多级嵌套结构的深度比较，适用于调试或数据同步场景。
-            changed = DeepDiff(self.data, data, ignore_order=True)
-            if changed:
-                timestamp = int(time.time())
-                tunnel_json_path = abspath(CONF_FILE)
-                shutil.copy(tunnel_json_path, F"{tunnel_json_path}-{timestamp}")
-                with open(tunnel_json_path, "w") as fp:
-                    json.dump(data, fp)
-
-                # 清理过多的备份
-                backup_configs = glob.glob(F"{tunnel_json_path}-*")
-                if len(backup_configs) > 10:
-                    for config in sorted(backup_configs, reverse=True)[10:]:
-                        os.remove(config)
         except Exception as e:
             util.logger.error(f"Error during close: {e}")
         finally:
@@ -4809,22 +4846,6 @@ class MainDialog(QMainWindow):
                 # 下行
                 receive_speed = getattr(ssh_conn, "receive_speed", 0)
 
-                self.ui.cpuRate.setValue(cpu_use)
-                self.ui.cpuRate.setStyleSheet(updateColor(cpu_use))
-                self.ui.memRate.setValue(mem_use)
-                self.ui.memRate.setStyleSheet(updateColor(mem_use))
-                self.ui.diskRate.setValue(dissk_use)
-                self.ui.diskRate.setStyleSheet(updateColor(dissk_use))
-                # 自定义显示格式
-                self.ui.networkUpload.setText(util.format_speed(transmit_speed))
-                self.ui.networkDownload.setText(util.format_speed(receive_speed))
-                self.ui.operatingSystem.setText(system_info_dict.get('Operating System', ''))
-                self.ui.kernelVersion.setText(system_info_dict.get('Kernel', ''))
-                if 'Firmware Version' in system_info_dict:
-                    self.ui.kernel.setText(system_info_dict['Firmware Version'])
-                else:
-                    self.ui.kernel.setText(self.tr("无"))
-
                 # 更新底部状态栏
                 try:
                     if hasattr(self, '_status_cpu'):
@@ -4874,19 +4895,6 @@ class MainDialog(QMainWindow):
                     pass
 
         else:
-            self.ui.cpuRate.setValue(0)
-            self.ui.memRate.setValue(0)
-            self.ui.diskRate.setValue(0)
-            if hasattr(self.ui, "networkUploadSparkline"):
-                try:
-                    self.ui.networkUploadSparkline.addPoint(0)
-                except Exception:
-                    pass
-            if hasattr(self.ui, "networkDownloadSparkline"):
-                try:
-                    self.ui.networkDownloadSparkline.addPoint(0)
-                except Exception:
-                    pass
             # 重置底部状态栏
             try:
                 if hasattr(self, '_status_cpu'):

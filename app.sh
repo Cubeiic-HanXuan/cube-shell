@@ -17,7 +17,6 @@ nuitka \
   --follow-imports \
   --macos-app-icon=icons/logo.icns \
   --include-module=qdarktheme \
-  --include-module=deepdiff \
   --include-module=pygments \
   --include-module=paramiko \
   --include-module=yaml \

@@ -178,6 +178,8 @@
     <message><source>已应用字体: {}, 大小: {}</source><translation>適用されたフォント: {}, サイズ: {}</translation></message>
     <message><source>错误</source><translation>エラー</translation></message>
     <message><source>应用字体失败: {}</source><translation>フォントの適用に失敗: {}</translation></message>
+    <message><source>跟随终端目录</source><translation>ターミナルフォルダーに追従</translation></message>
+    <message><source>远程监控</source><translation>リモートモニタリング</translation></message>
 </context>
 <context>
     <name>TextEditorDialog</name>

@@ -3,7 +3,7 @@ from PySide6 import QtWidgets, QtCore, QtGui
 from PySide6.QtCore import (QCoreApplication, QMetaObject,
                             QSize, Qt)
 from PySide6.QtGui import (QCursor)
-from PySide6.QtWidgets import (QCheckBox, QGridLayout,
+from PySide6.QtWidgets import (QCheckBox, QGridLayout, QHBoxLayout,
                                QLabel,
                                QProgressBar,
                                QSplitter, QTabWidget,
@@ -71,14 +71,27 @@ class Ui_MainWindow(object):
 
         self.gridLayout.addLayout(self.download_with_resume, 2, 0, 1, 1)
 
-        # 行 3：跟随终端文件夹复选框
+        # 行 3：跟随终端文件夹复选框 + 远程监控复选框（水平布局）
         self.follow_folder = QCheckBox(self.gridLayoutWidget)
         self.follow_folder.setObjectName("follow_folder")
         self.follow_folder.setCursor(QCursor(Qt.ArrowCursor))
-        self.follow_folder.setText("Follow terminal folder")
+        self.follow_folder.setText("")
         self.follow_folder.setChecked(False)
 
-        self.gridLayout.addWidget(self.follow_folder, 3, 0, 1, 1)
+        self.remote_monitoring = QCheckBox(self.gridLayoutWidget)
+        self.remote_monitoring.setObjectName("remote_monitoring")
+        self.remote_monitoring.setCursor(QCursor(Qt.ArrowCursor))
+        self.remote_monitoring.setText("")
+        self.remote_monitoring.setChecked(False)
+
+        self.checkbox_row_layout = QHBoxLayout()
+        self.checkbox_row_layout.setContentsMargins(0, 0, 0, 0)
+        self.checkbox_row_layout.setSpacing(15)
+        self.checkbox_row_layout.addWidget(self.follow_folder)
+        self.checkbox_row_layout.addWidget(self.remote_monitoring)
+        self.checkbox_row_layout.addStretch()
+
+        self.gridLayout.addLayout(self.checkbox_row_layout, 3, 0, 1, 1)
 
         self.splitter_3.addWidget(self.gridLayoutWidget)
 
@@ -174,6 +187,8 @@ class Ui_MainWindow(object):
         MainWindow.setWindowTitle("")
         ___qtreewidgetitem = self.treeWidget.headerItem()
         ___qtreewidgetitem.setText(0, QCoreApplication.translate("MainWindow", u"\u8bbe\u5907\u5217\u8868", None));
+        self.follow_folder.setText(QCoreApplication.translate("MainWindow", u"\u8ddf\u968f\u7ec8\u7aef\u76ee\u5f55", None))
+        self.remote_monitoring.setText(QCoreApplication.translate("MainWindow", u"\u8fdc\u7a0b\u76d1\u63a7", None))
         self.label_11.setText(QCoreApplication.translate("MainWindow", u"\u5e2e\u52a9 Shift+Command+P", None))
         self.label_13.setText(
             QCoreApplication.translate("MainWindow", u"\u67e5\u627e\u547d\u4ee4\u884c Shift+Command+C", None))
