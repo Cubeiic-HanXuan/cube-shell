@@ -138,3 +138,4 @@ dmypy.json
 cython_debug/
 /config.dat
 /conf/config.dat
+.vscode
