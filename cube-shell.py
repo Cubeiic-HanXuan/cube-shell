@@ -553,7 +553,7 @@ class StatusBoxItem(QFrame):
 
 
 # 主界面逻辑
-class TabStatusDot(QLabel):
+class TabStatusDot(QWidget):
     """
     Tab 标题左侧的连接状态圆点
     - 绿色表示已连接
@@ -561,13 +561,18 @@ class TabStatusDot(QLabel):
     """
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedSize(10, 10)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(3, 0, 0, 0)
+        layout.setSpacing(0)
+        self._dot = QLabel(self)
+        self._dot.setFixedSize(10, 10)
+        layout.addWidget(self._dot)
         self.setConnected(True)
 
     def setConnected(self, connected):
         """设置连接状态"""
         color = "#4CAF50" if connected else "#f44336"
-        self.setStyleSheet(
+        self._dot.setStyleSheet(
             "QLabel { background-color: %s; border-radius: 5px; }" % color
         )
 
