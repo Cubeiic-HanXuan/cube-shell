@@ -553,112 +553,63 @@ class StatusBoxItem(QFrame):
 
 
 # 主界面逻辑
+class TabStatusDot(QLabel):
+    """
+    Tab 标题左侧的连接状态圆点
+    - 绿色表示已连接
+    - 红色表示未连接
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(10, 10)
+        self.setConnected(True)
+
+    def setConnected(self, connected):
+        """设置连接状态"""
+        color = "#4CAF50" if connected else "#f44336"
+        self.setStyleSheet(
+            "QLabel { background-color: %s; border-radius: 5px; }" % color
+        )
+
+
 class TabCloseButton(QWidget):
     """
-    自定义Tab关闭按钮组件
-    - 默认显示绿色圆点（表示终端正常连接）
-    - 鼠标悬浮到tab时显示关闭按钮（叉叉）
+    自定义 Tab 关闭按钮组件
+    - 始终显示在 tab 标题右侧
+    - 鼠标悬浮时👉（只在 16x16 QLabel 上变红）
+    - 整体 widget 25x16:右 9px 透明 margin，让✕ 距 tab 右边有缓冲
     """
     clicked = Signal()
 
-    def __init__(self, parent=None, tab_bar=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedSize(18, 18)
-        self.tab_bar = tab_bar
-        self._is_hovered = False
+        # widget 整体 25x16:QTabBar 按 sizeHint 给 25x16 区域
+        # (比 ✕ 字符 16x16 多 9px 右 margin，让✕ 距 tab 右边有缓冲)
+        self.setFixedSize(25, 16)
 
-        # 创建布局
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        # 绿色圆点标签
-        self.status_dot = QLabel(self)
-        self.status_dot.setFixedSize(10, 10)
-        self.status_dot.setStyleSheet("""
-            QLabel {
-                background-color: #4CAF50;
-                border-radius: 5px;
-            }
-        """)
-
-        # 关闭按钮 - 使用QLabel显示叉号，更清晰
+        # ✕ 字符放在 widget 内 (0,0)，16x16
         self.close_btn = QLabel(self)
         self.close_btn.setFixedSize(16, 16)
-        self.close_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self.close_btn.move(0, 0)
         self.close_btn.setAlignment(Qt.AlignCenter)
         self.close_btn.setText("✕")
+        self.close_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        # 红色 hover 只在 16x16 QLabel 上，不会画到右 9px 透明 margin
         self.close_btn.setStyleSheet("""
             QLabel {
                 background-color: transparent;
                 color: #888;
                 font-size: 14px;
                 font-weight: bold;
+                border-radius: 3px;
             }
             QLabel:hover {
                 background-color: #e81123;
                 color: white;
-                border-radius: 3px;
             }
         """)
-        # 为QLabel添加点击事件
+        # 点击事件转发到 close_btn
         self.close_btn.mousePressEvent = lambda e: self.clicked.emit()
-
-        layout.addWidget(self.status_dot, 0, Qt.AlignCenter)
-        layout.addWidget(self.close_btn, 0, Qt.AlignCenter)
-
-        # 默认显示绿色圆点，隐藏关闭按钮
-        self.close_btn.hide()
-        self.status_dot.show()
-
-        # 安装事件过滤器到tab_bar
-        if self.tab_bar:
-            self.tab_bar.installEventFilter(self)
-            self.tab_bar.setMouseTracking(True)
-
-    def getCurrentTabIndex(self):
-        """动态获取当前TabCloseButton所在的tab索引"""
-        if not self.tab_bar:
-            return -1
-        # 遍历所有tab，查找当前按钮对应的tab
-        for i in range(self.tab_bar.count()):
-            if self.tab_bar.tabButton(i, QTabBar.LeftSide) == self:
-                return i
-        return -1
-
-    def eventFilter(self, obj, event):
-        """监听tab bar的鼠标事件"""
-        if obj == self.tab_bar:
-            if event.type() == QEvent.MouseMove:
-                # 获取鼠标所在的tab索引
-                pos = event.pos()
-                hovered_index = self.tab_bar.tabAt(pos)
-                # 动态获取当前按钮所在的tab索引
-                my_index = self.getCurrentTabIndex()
-                if hovered_index == my_index and my_index >= 0:
-                    if not self._is_hovered:
-                        self._is_hovered = True
-                        self.showCloseButton()
-                else:
-                    if self._is_hovered:
-                        self._is_hovered = False
-                        self.showStatusDot()
-            elif event.type() == QEvent.Leave:
-                # 鼠标离开tab bar
-                if self._is_hovered:
-                    self._is_hovered = False
-                    self.showStatusDot()
-        return super().eventFilter(obj, event)
-
-    def showCloseButton(self):
-        """显示关闭按钮"""
-        self.status_dot.hide()
-        self.close_btn.show()
-
-    def showStatusDot(self):
-        """显示状态圆点"""
-        self.close_btn.hide()
-        self.status_dot.show()
 
 
 class MainDialog(QMainWindow):
@@ -1234,9 +1185,11 @@ class MainDialog(QMainWindow):
         if tab_index > 0:
             from PySide6.QtWidgets import QTabBar
             tab_bar = self.ui.ShellTab.tabBar()
-            close_button = TabCloseButton(self, tab_bar=tab_bar)
+            status_dot = TabStatusDot(self)
+            close_button = TabCloseButton(self)
             close_button.clicked.connect(lambda: self._close_hermes_tab(tab_index, tab_name))
-            tab_bar.setTabButton(tab_index, QTabBar.LeftSide, close_button)
+            tab_bar.setTabButton(tab_index, QTabBar.LeftSide, status_dot)
+            tab_bar.setTabButton(tab_index, QTabBar.RightSide, close_button)
 
     def _close_hermes_tab(self, index, name):
         """关闭 Hermes 管理面板 Tab"""
@@ -1293,9 +1246,11 @@ class MainDialog(QMainWindow):
         if tab_index > 0:
             from PySide6.QtWidgets import QTabBar
             tab_bar = self.ui.ShellTab.tabBar()
-            close_button = TabCloseButton(self, tab_bar=tab_bar)
+            status_dot = TabStatusDot(self)
+            close_button = TabCloseButton(self)
             close_button.clicked.connect(lambda: self._close_claude_tab())
-            tab_bar.setTabButton(tab_index, QTabBar.LeftSide, close_button)
+            tab_bar.setTabButton(tab_index, QTabBar.LeftSide, status_dot)
+            tab_bar.setTabButton(tab_index, QTabBar.RightSide, close_button)
 
     @staticmethod
     def _claude_tab_name(command):
@@ -1589,11 +1544,15 @@ class MainDialog(QMainWindow):
 
         if tab_index > 0:
             tab_bar = self.ui.ShellTab.tabBar()
-            close_button = TabCloseButton(self, tab_bar=tab_bar)
+            status_dot = TabStatusDot(self)
+            close_button = TabCloseButton(self)
             close_button.clicked.connect(lambda: self.off(tab_index, tab_name))
-            tab_bar.setTabButton(tab_index, QTabBar.LeftSide, close_button)
+            tab_bar.setTabButton(tab_index, QTabBar.LeftSide, status_dot)
+            tab_bar.setTabButton(tab_index, QTabBar.RightSide, close_button)
         else:
-            self.ui.ShellTab.tabBar().setTabButton(tab_index, QTabBar.LeftSide, None)
+            tab_bar0 = self.ui.ShellTab.tabBar()
+            tab_bar0.setTabButton(tab_index, QTabBar.LeftSide, None)
+            tab_bar0.setTabButton(tab_index, QTabBar.RightSide, None)
 
         return tab_index, self.Shell
 
@@ -1613,9 +1572,11 @@ class MainDialog(QMainWindow):
 
         if tab_index > 0:
             tab_bar = self.ui.ShellTab.tabBar()
-            close_button = TabCloseButton(self, tab_bar=tab_bar)
+            status_dot = TabStatusDot(self)
+            close_button = TabCloseButton(self)
             close_button.clicked.connect(lambda: self.off_rdp(tab_name))
-            tab_bar.setTabButton(tab_index, QTabBar.LeftSide, close_button)
+            tab_bar.setTabButton(tab_index, QTabBar.LeftSide, status_dot)
+            tab_bar.setTabButton(tab_index, QTabBar.RightSide, close_button)
 
         return tab_index, tab_name
 

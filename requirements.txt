@@ -11,3 +11,4 @@ keyring>=25.7.0
 prompt_toolkit>=3.0.52
 pytest>=9.0.3
 aardwolf>=0.2.13
+pywinpty>=2.0.0   # qtermwidget 在 Windows 上启动 shell 必需
