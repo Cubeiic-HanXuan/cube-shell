@@ -1686,7 +1686,9 @@ class Screen:
                 return ""
             
             characters = self.history.getCells(line, start, count)
-            return ''.join(chr(char.character) for char in characters)
+            # 跳过宽字符的 NULL 占位符列(chr(0)),否则 setText() 会被
+            # C 字符串 NULL 截断,导致复制只能拿到第一个汉字就被截断
+            return ''.join(chr(c.character) for c in characters if c.character != 0)
         else:
             # 从屏幕获取
             screen_line = line - self.history.getLines()
@@ -1702,7 +1704,9 @@ class Screen:
             
             end_pos = min(start + count, len(line_data))
             characters = line_data[start:end_pos]
-            return ''.join(chr(char.character) for char in characters)
+            # 跳过宽字符的 NULL 占位符列(chr(0)),否则 setText() 会被
+            # C 字符串 NULL 截断,导致复制只能拿到第一个汉字就被截断
+            return ''.join(chr(c.character) for c in characters if c.character != 0)
     
     def writeSelectionToStream(self, decoder: TerminalCharacterDecoder, 
                                 preserveLineBreaks: bool = True):
