@@ -104,7 +104,6 @@
 |  paramiko   |  3.4.0   |  是python的操作ssh协议和sftp协议的第三方库   |
 |  Pygments   |   2.18.0  |  是python代码高亮的常用库   |
 |  pyqtdarktheme   |   2.1.0  |  是Qt现代主题库   |
-|  deepdiff   |   8.0.1  |  python深度文件比对库   |
 |  openai   |   2.37.0  |  AI大模型SDK   |
 |  pyte   |   0.8.2  |  Linux终端数据流框架   |
 |  frp   |   0.61.0  |  内网穿透套件   |

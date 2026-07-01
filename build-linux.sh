@@ -103,7 +103,6 @@ nuitka \
   --output-dir="${DEPLOY_DIR}" \
   --linux-icon=icons/logo.ico \
   --include-module=qdarktheme \
-  --include-module=deepdiff \
   --include-module=pygments \
   --include-module=paramiko \
   --include-module=yaml \

@@ -110,7 +110,6 @@ Key technologies used:
 | paramiko | 3.4.0 | Python library for SSH and SFTP protocol operations |
 | Pygments | 2.18.0 | Popular Python library for code syntax highlighting |
 | pyqtdarktheme | 2.1.0 | Modern theme library for Qt |
-| deepdiff | 8.0.1 | Python deep file comparison library |
 | openai | 2.37.0 | AI large language model SDK |
 | pyte | 0.8.2 | Linux terminal data stream framework |
 | frp | 0.61.0 | Intranet penetration toolkit |

@@ -21,7 +21,6 @@ nuitka --windows-console-mode=disable --windows-icon-from-ico=icons/logo.ico ^
   --standalone ^
   --enable-plugin=pyside6 ^
   --include-module=qdarktheme ^
-  --include-module=deepdiff ^
   --include-module=pygments ^
   --include-module=paramiko ^
   --include-module=yaml ^
