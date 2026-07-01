@@ -325,189 +325,6 @@ class DockerOperationThread(QThread):
             self.operation_finished.emit(False, self.operation, {})
 
 
-class FRPInstallThread(QThread):
-    """后台下载和安装 FRP 的线程"""
-    progress_updated = Signal(int)  # 进度百分比
-    status_updated = Signal(str)  # 状态消息
-    finished_signal = Signal(bool, str)  # (成功与否, 错误消息)
-
-    def __init__(self, frp_manager, ssh_conn=None, sftp=None, install_client=True, install_server=False):
-        super().__init__()
-        self.frp_manager = frp_manager
-        self.ssh_conn = ssh_conn
-        self.sftp = sftp
-        self.install_client = install_client
-        self.install_server = install_server
-
-    def run(self):
-        try:
-            # 安装客户端
-            if self.install_client and not self.frp_manager.is_frpc_ready():
-                self.status_updated.emit("正在下载 FRP 客户端...")
-
-                def update_progress(downloaded, total):
-                    if total > 0:
-                        percent = int(downloaded * 100 / total)
-                        self.progress_updated.emit(percent)
-
-                def update_status(msg):
-                    self.status_updated.emit(msg)
-
-                success = self.frp_manager.ensure_frpc(
-                    progress_callback=update_progress,
-                    status_callback=update_status
-                )
-
-                if not success:
-                    self.finished_signal.emit(False, "FRP 客户端下载失败，请检查网络连接后重试。")
-                    return
-
-            # 安装服务端
-            if self.install_server and self.ssh_conn and self.sftp:
-                self.status_updated.emit("正在部署 FRP 服务端...")
-                self.progress_updated.emit(0)
-
-                def update_progress(downloaded, total):
-                    if total > 0:
-                        percent = int(downloaded * 100 / total)
-                        self.progress_updated.emit(percent)
-
-                def update_status(msg):
-                    self.status_updated.emit(msg)
-
-                success = self.frp_manager.ensure_frps_on_server(
-                    self.ssh_conn, self.sftp,
-                    progress_callback=update_progress,
-                    status_callback=update_status
-                )
-
-                if not success:
-                    self.finished_signal.emit(False, "FRP 服务端部署失败，请检查网络连接后重试。")
-                    return
-
-            self.finished_signal.emit(True, "")
-
-        except Exception as e:
-            self.finished_signal.emit(False, str(e))
-
-
-class FRPServiceThread(QThread):
-    """后台启动/停止 FRP 服务的线程"""
-    status_updated = Signal(str)  # 状态消息
-    finished_signal = Signal(bool, str)  # (成功与否, 错误消息)
-
-    def __init__(self, ssh_conn, host, token, ant_type, local_port, server_prot, frp_manager, action='start'):
-        super().__init__()
-        self.ssh_conn = ssh_conn
-        self.host = host
-        self.token = token
-        self.ant_type = ant_type
-        self.local_port = local_port
-        self.server_prot = server_prot
-        self.frp_manager = frp_manager
-        self.action = action  # 'start' or 'stop'
-
-    def run(self):
-        try:
-            if self.action == 'start':
-                self._start_services()
-            else:
-                self._stop_services()
-        except Exception as e:
-            self.finished_signal.emit(False, str(e))
-
-    def _start_services(self):
-        # 检查服务端代理端口权限
-        server_port = int(self.server_prot)
-        if server_port <= 1024:
-            try:
-                whoami_result = self.ssh_conn.exec(cmd="whoami", pty=False)
-                remote_user = whoami_result.strip() if whoami_result else ""
-                if remote_user != "root":
-                    self.finished_signal.emit(
-                        False,
-                        f"服务端代理端口 {server_port} 需要 root 权限。\n"
-                        f"当前用户为: {remote_user}\n"
-                        f"请使用大于 1024 的端口（如 1080、8888 等）"
-                    )
-                    return
-            except:
-                pass
-
-        self.status_updated.emit("正在启动服务端...")
-
-        # 先彻底杀死所有 frps 进程
-        self.ssh_conn.conn.exec_command(timeout=2, command="killall -9 frps 2>/dev/null; pkill -9 frps 2>/dev/null",
-                                        get_pty=False)
-        time.sleep(2)  # 等待端口释放
-
-        # 写入配置并启动 frps（使用 $HOME/frp）
-        frps_config = traversal.frps(self.token, self.ant_type, self.server_prot)
-        self.ssh_conn.exec(cmd=f"cat > $HOME/frp/frps.toml << 'EOF'\n{frps_config}\nEOF", pty=False)
-
-        cmd1 = f"cd $HOME/frp && nohup ./frps -c frps.toml &> frps.log &"
-        self.ssh_conn.conn.exec_command(timeout=1, command=cmd1, get_pty=False)
-        time.sleep(2)
-
-        # 检查 frps 是否启动成功
-        check_result = self.ssh_conn.exec(cmd="pgrep -x frps", pty=False)
-        if not check_result or not check_result.strip():
-            self.finished_signal.emit(False, "服务端 frps 启动失败，请检查服务器日志")
-            return
-
-        self.status_updated.emit("正在启动客户端...")
-
-        # 停止旧的 frpc
-        if platform.system() == 'Darwin' or platform.system() == 'Linux':
-            os.system("pkill -9 frpc 2>/dev/null")
-        elif platform.system() == 'Windows':
-            subprocess.run(['taskkill', '/f', '/im', 'frpc.exe'], capture_output=True, text=True)
-        time.sleep(0.5)
-
-        # 写入 frpc 配置
-        frp_host, _ = util.parse_host_port(self.host)
-        frpc = traversal.frpc(frp_host, self.token, self.ant_type, self.local_port, self.server_prot)
-        with open(abspath('frpc.toml'), 'w') as file:
-            file.write(frpc)
-
-        util.logger.info(
-            f"FRP 配置: 服务器={frp_host}, 服务端端口={self.server_prot}, 本地端口={self.local_port}")
-
-        # 启动 frpc
-        frpc_path = str(self.frp_manager.frpc_path)
-        frp_log_dir = str(self.frp_manager.frpc_path.parent)
-        frpc_config_path = abspath('frpc.toml')
-
-        if platform.system() == 'Darwin' or platform.system() == 'Linux':
-            cmd_u = f'cd "{frp_log_dir}" && nohup "{frpc_path}" -c "{frpc_config_path}" > frpc.log 2>&1 &'
-            os.system(cmd_u)
-        elif platform.system() == 'Windows':
-            subprocess.Popen(
-                [frpc_path, "-c", frpc_config_path],
-                stdout=open(os.path.join(frp_log_dir, "frpc.log"), "a"),
-                stderr=subprocess.STDOUT,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-
-        time.sleep(2)
-
-        self.ssh_conn.close()
-        self.finished_signal.emit(True, "")
-
-    def _stop_services(self):
-        self.status_updated.emit("正在停止服务...")
-
-        self.ssh_conn.conn.exec_command(timeout=1, command="pkill -9 frps", get_pty=False)
-
-        if platform.system() == 'Darwin' or platform.system() == 'Linux':
-            os.system("pkill -9 frpc")
-        elif platform.system() == 'Windows':
-            subprocess.run(['taskkill', '/f', '/im', 'frpc.exe'], capture_output=True, text=True)
-
-        self.ssh_conn.close()
-        self.finished_signal.emit(True, "")
-
-
 class FRPConnectThread(QThread):
     """后台处理整个 FRP 连接流程的线程"""
     status_updated = Signal(str)
@@ -843,23 +660,6 @@ class TabCloseButton(QWidget):
         self.close_btn.hide()
         self.status_dot.show()
 
-    def setConnected(self, connected):
-        """设置连接状态"""
-        if connected:
-            self.status_dot.setStyleSheet("""
-                QLabel {
-                    background-color: #4CAF50;
-                    border-radius: 5px;
-                }
-            """)
-        else:
-            self.status_dot.setStyleSheet("""
-                QLabel {
-                    background-color: #f44336;
-                    border-radius: 5px;
-                }
-            """)
-
 
 class MainDialog(QMainWindow):
     initSftpSignal = Signal()
@@ -984,7 +784,7 @@ class MainDialog(QMainWindow):
 
         self.NAT = False
         try:
-            self.NAT_lod()
+            self.nat_lod()
         except Exception:
             pass
 
@@ -1409,9 +1209,9 @@ class MainDialog(QMainWindow):
             except Exception as e:
                 util.logger.warning(f"nat_traversal failed: {e}")
             try:
-                self.NAT_lod()  # 加载上次保存的 frpc 配置
+                self.nat_lod()  # 加载上次保存的 frpc 配置
             except Exception as e:
-                util.logger.warning(f"NAT_lod failed: {e}")
+                util.logger.warning(f"nat_lod failed: {e}")
         return self._nat_dialog
 
     def showHermesPanel(self):
@@ -1616,12 +1416,6 @@ class MainDialog(QMainWindow):
         dlg.raise_()
         dlg.activateWindow()
 
-    def _move_monitor_and_process_to_bottom_tabs(self):
-        """已废弃。原用于将监控和进程管理组件迁移到底部标签页。
-        现在由 setupLeftToolbar/setupToolDialogs 代替。
-        """
-        return  # 底部 tabWidget 已移除，此方法不再执行
-
     def on_NAT_traversal(self):
         device = self.ui.comboBox.currentText()
         server_prot = self.ui.lineEdit_3.text()
@@ -1703,7 +1497,7 @@ class MainDialog(QMainWindow):
                 self.ui.pushButton.setIcon(icon1)
             self.NAT = True
             try:
-                self.NAT_lod()
+                self.nat_lod()
             except Exception:
                 pass
             QMessageBox.information(self, self.tr("完成"), self.tr("FRP 内网穿透已成功启动！"))
@@ -1715,12 +1509,12 @@ class MainDialog(QMainWindow):
                 self.ui.pushButton.setIcon(icon1)
             self.NAT = False
             try:
-                self.NAT_lod()
+                self.nat_lod()
             except Exception:
                 pass
 
     # 刷新内网穿透页面
-    def NAT_lod(self):
+    def nat_lod(self):
         with open(abspath('frpc.toml'), 'r') as file:
             config = toml.load(file)
         if 'auth' in config:
@@ -1734,32 +1528,6 @@ class MainDialog(QMainWindow):
                 if 'remotePort' in proxy:
                     self.ui.lineEdit_3.setText(str(proxy['remotePort']))
                 break
-
-    # 删除标签页
-    def _delete_tab(self):  # 删除标签页
-        current_index = self.ui.ShellTab.currentIndex()
-        current_index1 = self.ui.ShellTab.tabText(current_index)
-        if current_index1 != self.tr("首页"):
-            # 1. 获取并关闭终端组件
-            shell = self.get_text_browser_from_tab(current_index)
-            if shell:
-                try:
-                    shell.close()
-                    # 关键：处理挂起的事件，确保closeEvent被完整执行，进程被清理
-                    QApplication.processEvents()
-                except Exception as e:
-                    util.logger.error(f"Failed to delete tab: {e}")
-                    pass
-
-            # 2. 获取 Widget 引用
-            widget = self.ui.ShellTab.widget(current_index)
-
-            # 3. 移除标签页
-            self.ui.ShellTab.removeTab(current_index)
-
-            # 4. 显式销毁 Widget
-            if widget:
-                widget.deleteLater()
 
     # 根据标签页名字删除标签页
     def _remove_tab_by_name(self, name):
@@ -3329,26 +3097,6 @@ class MainDialog(QMainWindow):
             util.logger.error(f"Failed to get data: {e}")
             return 'error'
 
-    def on_tab_changed(self, index):
-        """标签切换事件处理"""
-        try:
-            ssh_conn = self.ssh()
-            if ssh_conn and getattr(ssh_conn, "is_local", False):
-                return
-        except Exception:
-            return
-        if index == 0:
-            # self.handle_tab1()
-            self.refreshDokerInfo()
-        elif index == 1:
-            self.refresh_docker_common_containers()
-        elif index == 2:
-            print("")
-
-    def start_async_task(self, cmd):
-        thread = threading.Thread(target=self.getData2, args=(cmd,))
-        thread.start()
-
     def _set_connecting_ui(self, connecting: bool):
         try:
             self.ui.treeWidget.setEnabled(not connecting)
@@ -4912,49 +4660,6 @@ class MainDialog(QMainWindow):
             except Exception:
                 pass
 
-    # 获取容器列表
-    def compose_container_list(self):
-        ssh_conn = self.ssh()
-        groups = defaultdict(list)
-        # 获取 compose 项目和配置文件列表
-        ls = ssh_conn.exec("docker compose ls -a")
-        lines = ls.strip().splitlines()
-
-        # 获取compose 项目下的所有容器
-        for compose_ls in lines[1:]:
-            # 从右边开始分割，比如 rsplit，只分割最后一次空格
-            # 这样最后一列可以拿出来
-            parts = compose_ls.rsplit(None, 1)  # 从右边切一次空白字符
-            config = parts[-1]
-            ps_cmd = f"docker compose --file {config} ps -a --format '{{{{json .}}}}'"
-            # 执行docker compose ps
-            conn_exec = ssh_conn.exec(ps_cmd)
-            container_list = []
-            for ps in conn_exec.strip().splitlines():
-                if ps.strip():
-                    data = json.loads(ps)
-                    container_list.append(data)
-
-            for item in container_list:
-                # 使用项目进行分组
-                project_name = item.get('Project', '未知')  # 取值，如果没有则使用'未知'
-                groups[project_name].append(item)
-
-        return groups
-
-    # 获取docker容器列表
-    # compose 获取不到数据的时候使用此方法获取容器数据
-    def docker_container_list(self):
-        ssh_conn = self.ssh()
-        conn_exec = ssh_conn.exec("docker ps -a --format '{{json .}}'")
-        container_list = []
-        for ps in conn_exec.strip().splitlines():
-            if ps.strip():
-                data = json.loads(ps)
-                container_list.append(data)
-
-        return container_list
-
     def refreshDokerInfo(self):
         # 如果 Docker 对话框尚未创建，直接返回
         if not hasattr(self.ui, 'treeWidgetDocker') or self.ui.treeWidgetDocker is None:
@@ -5067,16 +4772,6 @@ class MainDialog(QMainWindow):
             parent_item.addChild(container_item)
         else:
             self.ui.treeWidgetDocker.addTopLevelItem(container_item)
-
-    def cleanup_thread(self, thread_name):
-        """清理线程资源"""
-        # 这个方法现在主要用于强制清理，不再自动连接到 finished 信号
-        if hasattr(self, thread_name):
-            thread = getattr(self, thread_name)
-            if thread and thread.isRunning():
-                thread.quit()
-                thread.wait()
-            setattr(self, thread_name, None)
 
     # 刷新docker常用容器信息
     def refresh_docker_common_containers(self):
@@ -5817,14 +5512,6 @@ class MainDialog(QMainWindow):
             return
         self.setDarkTheme()
         self.themeChanged.emit(True)
-
-    def toggleTheme(self):
-        data = util.read_json(abspath("theme.json"))
-        appearance = str(data.get("appearance") or "dark").lower()
-        data["appearance"] = "light" if appearance != "light" else "dark"
-        util.write_json(abspath("theme.json"), data)
-        util.THEME = data
-        self.applyAppearance(data["appearance"])
 
     def _reapply_all_terminal_themes(self):
         for index in range(self.ui.ShellTab.count()):
@@ -6736,57 +6423,9 @@ class CustomWidget(QWidget):
             }
             """)
 
-    def show_install_docker_window(self, item, ssh_conn):
-        """
-        点击安装按钮，展示安装docker窗口
-        : param
-        item: 数据对象
-        :param
-        ssh_conn: ssh
-        连接对象
-        :
-    return:
-    """
-
-        self.docker = InstallDocker(item, ssh_conn)
-        self.docker.dial.lineEdit_containerName.setText(item['containerName'])
-        self.docker.dial.lineEdit_Image.setText(item['image'])
-
-        volumes = ""
-        environment_variables = ""
-        labels = ""
-        ports = ""
-        for port in item['ports']:
-            ports += "-p " + port['source'] + ":" + port['destination'] + " "
-        self.docker.dial.lineEdit_ports.setText(ports)
-
-        for bind in item['volumes']:
-            volumes += "-v " + bind.get('destination') + ":" + bind.get('source') + " "
-        self.docker.dial.lineEdit_volumes.setText(volumes)
-
-        for env in item['environmentVariables']:
-            environment_variables += "-e " + env.get('name') + "=" + env.get('value') + " "
-        self.docker.dial.lineEdit_environmentVariables.setText(environment_variables)
-
-        for label in item['labels']:
-            labels += "--" + label.get('name') + "=" + label.get('value') + " "
-        self.docker.dial.lineEdit_labels.setText(labels)
-
-        if item['containerName']:
-            self.docker.dial.checkBox_privileged.setChecked(True)
-
-        self.docker.communicate.refresh_parent.connect(lambda: self.refresh(item, ssh_conn))
-        self.docker.show()
-
     def container_orchestration(self, ssh_conn):
         compose = DockerComposeEditor(ssh=ssh_conn)
         compose.show()
-
-    def refresh(self, item, ssh_conn):
-        # 安装按钮
-        self.install_button.setText(self.tr("已安装"))
-        self.install_button.setStyleSheet("background-color: rgb(102, 221, 121);")
-        self.install_button.setDisabled(True)
 
 
 # docker容器安装
