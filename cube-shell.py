@@ -73,7 +73,7 @@ from core.frp_manager import get_frp_manager
 from ui.tunnel_config import Ui_TunnelConfig
 from ui.code_editor import CodeEditor, Highlighter
 from function.ssh_prompt_client import load_linux_commands
-from core.ai import AISettingsDialog
+from core.ai import AISettingsDialog, load_ai_prefs
 from core.ai.ai_panel import AIChatPanel
 from core.ai.ssh_agent import SSHAIAgent
 from core.ai.confirm_dialog import CommandConfirmDialog
@@ -2437,11 +2437,20 @@ class MainDialog(QMainWindow):
     def show_ai_settings(self):
         dialog = AISettingsDialog(self)
         dialog.exec()
-        # 配置对话框关闭后，同步刷新 AI 面板顶部状态栏中的模型名称显示
+        # 配置对话框关闭后，同步刷新 AI 面板顶部状态栏中的模型名称显示，
+        # 并把所有已缓存的 SSHAIAgent 的 _prefs 重新从磁盘加载，使新设置
+        # （模型、提供商、Base URL、API Key 等）无需重启立即生效
         try:
             if hasattr(self, "ai_panel") and self.ai_panel is not None:
                 if hasattr(self.ai_panel, "refresh_model_label"):
                     self.ai_panel.refresh_model_label()
+        except Exception:
+            pass
+        try:
+            fresh_prefs = load_ai_prefs()
+            for agent in getattr(self, "_ai_agents", {}).values():
+                if agent is not None:
+                    agent._prefs = fresh_prefs
         except Exception:
             pass
 
