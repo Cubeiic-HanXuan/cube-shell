@@ -154,9 +154,7 @@ class AISettingsDialog(QDialog):
         preset = get_provider_preset(provider_key)
 
         # base_url
-        if provider_key == "custom":
-            self.base_url_edit.clear()
-        else:
+        if provider_key != "custom":
             self.base_url_edit.setText(preset["base_url"])
 
         # 模型列表
