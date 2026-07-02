@@ -2,7 +2,7 @@
 
 # 激活虚拟环境
 source venv/bin/activate
-mkdir deploy
+mkdir -p deploy
 
 APP_DIR="cube-shell.app/Contents/MacOS"
 
@@ -71,7 +71,7 @@ echo "6: Registering URL schemes..."
 bash tools/register_url_scheme.sh cube-shell.app
 
 strip_app_binary
-#remove_unused_qt_modules
+remove_unused_qt_modules
 
 # Step 9: Ad-hoc codesign
 echo "9: Ad-hoc signing..."
