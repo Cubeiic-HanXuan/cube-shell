@@ -3336,33 +3336,43 @@ class TerminalDisplay(QWidget):
                 self._drag_info['state'] = DragState.diPending
                 self._drag_info['start'] = ev.pos()
             else:
-                # Start new selection
-                self._drag_info['state'] = DragState.diNone
-
-                self._preserve_line_breaks = not (
-                        (ev.modifiers() & Qt.KeyboardModifier.ControlModifier) and
-                        not (ev.modifiers() & Qt.KeyboardModifier.AltModifier)
-                )
-                self._column_selection_mode = (
-                        (ev.modifiers() & Qt.KeyboardModifier.AltModifier) and
-                        (ev.modifiers() & Qt.KeyboardModifier.ControlModifier)
-                )
-
-                if self._mouse_marks or (ev.modifiers() & Qt.KeyboardModifier.ShiftModifier):
-                    # 修复：只清除选择，不立即重绘
-                    if self._screenWindow:
-                        self._screenWindow.clearSelection()
-
-                    pos.setY(pos.y() + self._scroll_bar.value())
-                    self._i_pnt_sel = self._pnt_sel = pos
-                    self._act_sel = 1  # Left button pressed
+                # Check if we should extend selection via Shift-Click
+                if (ev.modifiers() & Qt.KeyboardModifier.ShiftModifier) and self._i_pnt_sel != QPoint():
+                    self._act_sel = 2
+                    self._extend_selection(ev.pos())
+                    self._drag_info['state'] = DragState.diNone
                 else:
-                    # 修复：非选择模式时清除选择
-                    if self._screenWindow:
-                        self._screenWindow.clearSelection()
+                    # Start new selection or normal click
+                    self._drag_info['state'] = DragState.diNone
 
-                    self.mouseSignal.emit(0, char_column + 1,
-                                          char_line + 1 + self._scroll_bar.value() - self._scroll_bar.maximum(), 0)
+                    self._preserve_line_breaks = not (
+                            (ev.modifiers() & Qt.KeyboardModifier.ControlModifier) and
+                            not (ev.modifiers() & Qt.KeyboardModifier.AltModifier)
+                    )
+                    self._column_selection_mode = (
+                            (ev.modifiers() & Qt.KeyboardModifier.AltModifier) and
+                            (ev.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                    )
+
+                    if self._mouse_marks or (ev.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+                        # 修复：只清除选择，不立即重绘
+                        if self._screenWindow:
+                            self._screenWindow.clearSelection()
+
+                        pos.setY(pos.y() + self._scroll_bar.value())
+                        self._i_pnt_sel = self._pnt_sel = pos
+                        self._act_sel = 1  # Left button pressed
+                    else:
+                        # 修复：非选择模式时清除选择
+                        if self._screenWindow:
+                            self._screenWindow.clearSelection()
+
+                        self.mouseSignal.emit(0, char_column + 1,
+                                              char_line + 1 + self._scroll_bar.value() - self._scroll_bar.maximum(), 0)
+
+                        pos.setY(pos.y() + self._scroll_bar.value())
+                        self._i_pnt_sel = self._pnt_sel = pos
+                        self._act_sel = 0
 
                 # Handle hotspot activation
                 hotspot = self._filter_chain.hotSpotAt(char_line, char_column)
