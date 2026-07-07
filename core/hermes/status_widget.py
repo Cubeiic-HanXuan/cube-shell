@@ -27,10 +27,18 @@ class CommandWorker(QThread):
         self.finished.emit(' '.join(self._args), result)
 
 
-class PipUpgradeWorker(QThread):
-    """后台线程执行 pip upgrade 命令"""
+class PipInstallWorker(QThread):
+    """后台线程执行 pip 安装/升级 hermes-agent。
+
+    upgrade=True  -> pip install --upgrade hermes-agent（更新已装的 Hermes）
+    upgrade=False -> pip install hermes-agent（首次安装）
+    """
     finished = Signal(str)  # output
     error = Signal(str)
+
+    def __init__(self, upgrade: bool = True):
+        super().__init__()
+        self._upgrade = upgrade
 
     def run(self):
         try:
@@ -42,10 +50,11 @@ class PipUpgradeWorker(QThread):
             if os.name == 'nt':
                 import subprocess as _sp
                 kwargs['creationflags'] = _sp.CREATE_NO_WINDOW
-            result = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "--upgrade", "hermes-agent"],
-                **kwargs
-            )
+            args = [sys.executable, "-m", "pip", "install"]
+            if self._upgrade:
+                args.append("--upgrade")
+            args.append("hermes-agent")
+            result = subprocess.run(args, **kwargs)
             output = result.stdout or result.stderr or ""
             self.finished.emit(output.strip())
         except Exception as e:
@@ -59,7 +68,7 @@ class StatusWidget(QWidget):
         super().__init__(parent)
         self._backend = None
         self._workers = []  # 持有 worker 引用，防止 GC
-        self._update_worker: PipUpgradeWorker | None = None
+        self._update_worker: PipInstallWorker | None = None
         self._init_ui()
 
     def _init_ui(self):
@@ -92,18 +101,23 @@ class StatusWidget(QWidget):
         self._btn_stop_gw = QPushButton(self.tr("停止网关"))
         self._btn_doctor = QPushButton(self.tr("检查修复"))
         self._btn_update = QPushButton(self.tr("更新 Hermes"))
+        # 安装按钮：仅在检测到未安装 Hermes 时显示（见 _update_install_button_visibility）
+        self._btn_install = QPushButton(self.tr("安装 Hermes"))
+        self._btn_install.setVisible(False)
 
         self._btn_refresh.clicked.connect(self.refresh_status)
         self._btn_start_gw.clicked.connect(self._start_gateway)
         self._btn_stop_gw.clicked.connect(self._stop_gateway)
         self._btn_doctor.clicked.connect(self._run_doctor)
         self._btn_update.clicked.connect(self._on_update)
+        self._btn_install.clicked.connect(self._on_install)
 
         btn_layout.addWidget(self._btn_refresh)
         btn_layout.addWidget(self._btn_start_gw)
         btn_layout.addWidget(self._btn_stop_gw)
         btn_layout.addWidget(self._btn_doctor)
         btn_layout.addWidget(self._btn_update)
+        btn_layout.addWidget(self._btn_install)
         btn_layout.addStretch()
 
         main_layout.addLayout(btn_layout)
@@ -171,7 +185,24 @@ class StatusWidget(QWidget):
         timestamp = QDateTime.currentDateTime().toString("HH:mm:ss")
         self._log_output.append(f"[{timestamp}] {self.tr('正在更新 Hermes...')}")
 
-        self._update_worker = PipUpgradeWorker()
+        self._update_worker = PipInstallWorker(upgrade=True)
+        self._update_worker.finished.connect(self._on_update_finished)
+        self._update_worker.error.connect(self._on_update_error)
+        self._update_worker.start()
+
+    def _on_install(self):
+        """执行 pip install hermes-agent 安装 Hermes Agent。
+
+        安装不依赖 backend（未安装时正是 backend 可能不可用的时刻），
+        直接用当前 Python 环境的 pip 安装，与"更新 Hermes"走同一套环境。
+        """
+        if self._update_worker and self._update_worker.isRunning():
+            return
+        self._set_buttons_enabled(False)
+        timestamp = QDateTime.currentDateTime().toString("HH:mm:ss")
+        self._log_output.append(f"[{timestamp}] {self.tr('正在安装 Hermes...')}")
+
+        self._update_worker = PipInstallWorker(upgrade=False)
         self._update_worker.finished.connect(self._on_update_finished)
         self._update_worker.error.connect(self._on_update_error)
         self._update_worker.start()
@@ -224,10 +255,13 @@ class StatusWidget(QWidget):
         version = output.strip() if output and output.strip() else self.tr("未安装")
         self._card_version["value"].setText(version)
         # 判断安装状态
-        if output and output.strip() and "not found" not in output.lower():
+        installed = bool(output and output.strip() and "not found" not in output.lower())
+        if installed:
             self._set_card_status(self._card_install, self.tr("已安装"), "#27ae60")
         else:
             self._set_card_status(self._card_install, self.tr("未安装"), "#e74c3c")
+        # 未安装时显示"安装 Hermes"按钮，已安装则隐藏
+        self._update_install_button_visibility(installed)
 
     def _on_status_result(self, description, output):
         """解析 status 命令输出，判断网关和 API Server 状态"""
@@ -296,3 +330,13 @@ class StatusWidget(QWidget):
         self._btn_stop_gw.setEnabled(enabled)
         self._btn_doctor.setEnabled(enabled)
         self._btn_update.setEnabled(enabled)
+        self._btn_install.setEnabled(enabled)
+
+    def _update_install_button_visibility(self, installed: bool):
+        """根据是否已安装 Hermes 切换按钮显隐。
+
+        已安装：隐藏"安装 Hermes"、显示"更新 Hermes"；
+        未安装：显示"安装 Hermes"、隐藏"更新 Hermes"（未装无从更新）。
+        """
+        self._btn_install.setVisible(not installed)
+        self._btn_update.setVisible(installed)

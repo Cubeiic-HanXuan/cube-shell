@@ -36,6 +36,22 @@ def build_cd_command(cwd: str, command: str) -> str:
     return f"cd {shlex.quote(str(cwd))} && {command}"
 
 
+def build_install_command() -> str:
+    """构造安装 Claude Code 的终端命令字符串，按平台选择官方安装方式。
+
+    - POSIX (macOS/Linux/WSL): 官方原生安装脚本
+      ``curl -fsSL https://claude.ai/install.sh | bash``
+    - Windows PowerShell: 官方原生安装脚本
+      ``irm https://claude.ai/install.ps1 | iex``
+
+    安装在真实终端里交互执行（而非后台子进程），便于用户查看进度、
+    处理权限提示，并在安装后立即使用。
+    """
+    if os.name == "nt":
+        return "irm https://claude.ai/install.ps1 | iex"
+    return "curl -fsSL https://claude.ai/install.sh | bash"
+
+
 # 缓存登录 shell 的 PATH，避免重复 fork shell（GUI 启动时会被多次调用）
 _login_path_cache = None
 

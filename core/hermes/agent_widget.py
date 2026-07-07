@@ -1,13 +1,18 @@
 # -*- coding: utf-8 -*-
 """Hermes Agent Profile 管理模块 - 支持 Profile 列表/创建/删除/重命名，一键从 Profile 打开终端"""
 
+import yaml
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
                                 QListWidget, QListWidgetItem, QLabel, QPushButton,
                                 QLineEdit, QFrame, QMessageBox, QInputDialog,
                                 QToolBar, QGridLayout, QStyledItemDelegate,
-                                QStyleOptionViewItem, QStyle)
+                                QStyleOptionViewItem, QStyle, QDialog, QTabWidget,
+                                QPlainTextEdit, QDialogButtonBox)
 from PySide6.QtCore import Qt, QThread, Signal, QSize, QRect
 from PySide6.QtGui import QFont, QIcon, QPen, QBrush, QColor, QPainter
+
+from function.util import logger
+from core.hermes.config_highlighter import YamlHighlighter, DotenvHighlighter
 
 
 class ProfileItemDelegate(QStyledItemDelegate):
@@ -159,6 +164,228 @@ class ProfileWorker(QThread):
         return profiles
 
 
+class ProfileConfigLoader(QThread):
+    """后台加载 Profile 的 config.yaml 与 .env 文本"""
+    loaded = Signal(str, str)   # (config_yaml, dotenv)
+    error = Signal(str)
+
+    def __init__(self, backend, config_path, env_path):
+        super().__init__()
+        self._backend = backend
+        self._config_path = config_path
+        self._env_path = env_path
+
+    def run(self):
+        try:
+            config_text = self._backend.read_file(self._config_path) or ""
+            env_text = ""
+            # .env 可能不存在，读取失败不应中断整体加载
+            if self._backend.file_exists(self._env_path):
+                env_text = self._backend.read_file(self._env_path) or ""
+            self.loaded.emit(config_text, env_text)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class ProfileConfigSaver(QThread):
+    """后台写入 Profile 的 config.yaml / .env（只写有改动的文件）"""
+    finished = Signal(list)  # 已保存文件名列表
+    error = Signal(str)
+
+    def __init__(self, backend, writes):
+        super().__init__()
+        self._backend = backend
+        self._writes = writes  # [(path, content, label)]
+
+    def run(self):
+        try:
+            saved = []
+            for path, content, label in self._writes:
+                self._backend.write_file(path, content)
+                saved.append(label)
+            self.finished.emit(saved)
+        except Exception as e:
+            logger.error(f"保存 Profile 配置失败: {e}")
+            self.error.emit(str(e))
+
+
+class ProfileConfigDialog(QDialog):
+    """Profile 配置编辑对话框：编辑 config.yaml 与 .env（带语法高亮、YAML 校验）"""
+
+    def __init__(self, backend, profile_name, config_path, env_path, parent=None):
+        super().__init__(parent)
+        self._backend = backend
+        self._profile_name = profile_name
+        self._config_path = config_path
+        self._env_path = env_path
+        self._loaded_config = ""
+        self._loaded_env = ""
+        self._env_existed = False
+        self._loader = None
+        self._saver = None
+        self._init_ui()
+        self._load()
+
+    def _init_ui(self):
+        self.setWindowTitle(self.tr("编辑配置 - {}").format(self._profile_name))
+        self.resize(720, 620)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(10, 10, 10, 10)
+        v.setSpacing(8)
+
+        path_lbl = QLabel(self._config_path)
+        path_lbl.setStyleSheet("color: #888888;")
+        path_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        v.addWidget(path_lbl)
+
+        mono = self._mono_font()
+
+        self._tabs = QTabWidget()
+
+        # config.yaml
+        self._yaml_edit = QPlainTextEdit()
+        self._yaml_edit.setFont(mono)
+        self._yaml_edit.setTabStopDistance(
+            self._yaml_edit.fontMetrics().horizontalAdvance(' ') * 2)
+        # 高亮器需持有引用，否则被 GC
+        self._yaml_hl = YamlHighlighter(self._yaml_edit.document())
+        self._tabs.addTab(self._yaml_edit, "config.yaml")
+
+        # .env
+        self._env_edit = QPlainTextEdit()
+        self._env_edit.setFont(mono)
+        self._env_hl = DotenvHighlighter(self._env_edit.document())
+        self._tabs.addTab(self._env_edit, ".env")
+
+        v.addWidget(self._tabs)
+
+        self._status_lbl = QLabel(self.tr("加载中..."))
+        self._status_lbl.setStyleSheet("color: #888888;")
+        v.addWidget(self._status_lbl)
+
+        # 按钮：保存 / 重新加载 / 关闭
+        btn_box = QDialogButtonBox()
+        self._save_btn = btn_box.addButton(
+            self.tr("保存"), QDialogButtonBox.AcceptRole)
+        self._reload_btn = btn_box.addButton(
+            self.tr("重新加载"), QDialogButtonBox.ResetRole)
+        self._close_btn = btn_box.addButton(
+            self.tr("关闭"), QDialogButtonBox.RejectRole)
+        self._save_btn.clicked.connect(self._on_save)
+        self._reload_btn.clicked.connect(self._load)
+        self._close_btn.clicked.connect(self.reject)
+        v.addWidget(btn_box)
+
+    def _set_editing_enabled(self, enabled):
+        self._yaml_edit.setReadOnly(not enabled)
+        self._env_edit.setReadOnly(not enabled)
+        self._save_btn.setEnabled(enabled)
+        self._reload_btn.setEnabled(enabled)
+
+    # ── 加载 ──
+
+    def _load(self):
+        if not self._backend:
+            self._status_lbl.setText(self.tr("未连接后端"))
+            return
+        if self._loader and self._loader.isRunning():
+            return
+        self._set_editing_enabled(False)
+        self._status_lbl.setText(self.tr("加载中..."))
+        self._loader = ProfileConfigLoader(
+            self._backend, self._config_path, self._env_path)
+        self._loader.loaded.connect(self._on_loaded)
+        self._loader.error.connect(self._on_load_error)
+        self._loader.start()
+
+    def _on_loaded(self, config_text, env_text):
+        self._loaded_config = config_text
+        self._loaded_env = env_text
+        self._env_existed = bool(env_text)
+        self._yaml_edit.setPlainText(config_text)
+        self._env_edit.setPlainText(env_text)
+        self._set_editing_enabled(True)
+        if not config_text:
+            self._status_lbl.setText(
+                self.tr("未找到 config.yaml，保存后将新建"))
+        else:
+            self._status_lbl.setText(self.tr("就绪"))
+
+    def _on_load_error(self, msg):
+        self._set_editing_enabled(True)
+        self._status_lbl.setText(self.tr("加载失败: {}").format(msg))
+
+    # ── 保存 ──
+
+    def _on_save(self):
+        if not self._backend:
+            QMessageBox.warning(self, self.tr("警告"), self.tr("未连接后端"))
+            return
+        if self._saver and self._saver.isRunning():
+            return
+
+        config_text = self._yaml_edit.toPlainText()
+        env_text = self._env_edit.toPlainText()
+
+        # 收集有改动的文件
+        writes = []
+        if config_text != self._loaded_config:
+            # YAML 语法校验：解析失败拒绝写入，避免写坏配置
+            try:
+                yaml.safe_load(config_text)
+            except yaml.YAMLError as e:
+                self._tabs.setCurrentIndex(0)
+                QMessageBox.critical(
+                    self, self.tr("YAML 语法错误"),
+                    self.tr("config.yaml 无法保存，请修正后重试：\n{}").format(str(e)))
+                return
+            writes.append((self._config_path, config_text, "config.yaml"))
+        # .env：原本存在或用户填了内容才写，避免为一个空文件平白创建 .env
+        if env_text != self._loaded_env and (env_text.strip() or self._env_existed):
+            writes.append((self._env_path, env_text, ".env"))
+
+        if not writes:
+            QMessageBox.information(
+                self, self.tr("提示"), self.tr("没有需要保存的改动"))
+            return
+
+        self._set_editing_enabled(False)
+        self._status_lbl.setText(self.tr("保存中..."))
+        self._saver = ProfileConfigSaver(self._backend, writes)
+        self._saver.finished.connect(self._on_saved)
+        self._saver.error.connect(self._on_save_error)
+        self._saver.start()
+
+    def _on_saved(self, saved_labels):
+        # 更新基准值，避免重复写入
+        self._loaded_config = self._yaml_edit.toPlainText()
+        self._loaded_env = self._env_edit.toPlainText()
+        if self._loaded_env.strip():
+            self._env_existed = True
+        self._set_editing_enabled(True)
+        self._status_lbl.setText(
+            self.tr("已保存: {}").format("、".join(saved_labels)))
+        QMessageBox.information(
+            self, self.tr("成功"),
+            self.tr("已保存: {}").format("、".join(saved_labels)))
+
+    def _on_save_error(self, msg):
+        self._set_editing_enabled(True)
+        self._status_lbl.setText(self.tr("保存失败: {}").format(msg))
+        QMessageBox.critical(
+            self, self.tr("错误"), self.tr("保存失败: {}").format(msg))
+
+    @staticmethod
+    def _mono_font():
+        font = QFont()
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        font.setFamilies(["Consolas", "Menlo", "DejaVu Sans Mono",
+                          "Courier New", "monospace"])
+        font.setFixedPitch(True)
+        font.setPointSize(15)
+        return font
+
+
 class AgentWidget(QWidget):
     """Hermes Agent Profile 管理面板"""
 
@@ -193,9 +420,9 @@ class AgentWidget(QWidget):
         self._btn_rename.clicked.connect(self._rename_profile)
         toolbar_layout.addWidget(self._btn_rename)
 
-        # self._btn_delete = QPushButton(self.tr("删除"))
-        # self._btn_delete.clicked.connect(self._delete_profile)
-        # toolbar_layout.addWidget(self._btn_delete)
+        self._btn_delete = QPushButton(self.tr("删除"))
+        self._btn_delete.clicked.connect(self._delete_profile)
+        toolbar_layout.addWidget(self._btn_delete)
 
         toolbar_layout.addStretch()
         main_layout.addLayout(toolbar_layout)
@@ -309,6 +536,9 @@ class AgentWidget(QWidget):
         right_layout.addLayout(actions_layout)
         right_layout.addStretch()
 
+        # 初始无选中：右侧操作按钮全部禁用，待选中 Profile 后按状态启用
+        self._update_action_buttons(None)
+
         splitter.addWidget(right_widget)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 2)
@@ -335,8 +565,13 @@ class AgentWidget(QWidget):
 
     def _render_profile_list(self):
         """渲染 Profile 列表到 QListWidget"""
+        # 记住当前选中项，刷新后尽量保持选中，避免跳回第一项
+        current = self._profile_list.currentItem()
+        selected_name = current.data(Qt.UserRole) if current else None
+
         self._profile_list.clear()
         filter_text = self._search_input.text().strip().lower()
+        target_row = -1
         for p in self._profiles:
             if filter_text and filter_text not in p["name"].lower():
                 continue
@@ -344,8 +579,12 @@ class AgentWidget(QWidget):
             item.setData(Qt.UserRole, p["name"])
             item.setData(Qt.UserRole + 1, p)
             self._profile_list.addItem(item)
-        # 自动选中第一项
-        if self._profile_list.count() > 0:
+            if p["name"] == selected_name:
+                target_row = self._profile_list.count() - 1
+        # 恢复之前的选中项；找不到（首次加载/被过滤/已删除）则回退到第一项
+        if target_row >= 0:
+            self._profile_list.setCurrentRow(target_row)
+        elif self._profile_list.count() > 0:
             self._profile_list.setCurrentRow(0)
 
     def _filter_profiles(self, text):
@@ -367,6 +606,7 @@ class AgentWidget(QWidget):
         self._lbl_alias.setText(profile.get("alias", "—"))
         self._lbl_distribution.setText(profile.get("distribution", "—"))
         self._lbl_active.setText(self.tr("当前活跃") if profile["active"] else self.tr("非活跃"))
+        self._update_action_buttons(profile)
 
     def _clear_detail(self):
         """清空详情面板"""
@@ -376,6 +616,37 @@ class AgentWidget(QWidget):
         self._lbl_alias.setText("—")
         self._lbl_distribution.setText("—")
         self._lbl_active.setText("—")
+        self._update_action_buttons(None)
+
+    def _update_action_buttons(self, profile):
+        """根据选中 Profile 的状态切换各操作按钮可用性。
+
+        - 在终端中打开 / 停止网关：仅网关 running 时可用
+        - 启动网关：仅网关 stopped 时可用
+        - 编辑配置：任意状态均可用（有选中即可）
+        - 设为默认 / 删除：仅当 Profile 非默认（非活跃）时可用
+        """
+        if not profile:
+            # 无选中：除刷新/新建等工具栏按钮外，右侧操作按钮全部禁用
+            self._btn_open_terminal.setEnabled(False)
+            self._btn_stop_gateway.setEnabled(False)
+            self._btn_start_gateway.setEnabled(False)
+            self._btn_edit_config.setEnabled(False)
+            self._btn_set_default.setEnabled(False)
+            self._btn_delete.setEnabled(False)
+            return
+
+        is_running = str(profile.get("gateway", "")).lower() == "running"
+        is_stopped = str(profile.get("gateway", "")).lower() == "stopped"
+        is_default = bool(profile.get("active", False))
+
+        self._btn_open_terminal.setEnabled(is_running)
+        self._btn_stop_gateway.setEnabled(is_running)
+        self._btn_start_gateway.setEnabled(is_stopped)
+        self._btn_edit_config.setEnabled(True)
+        self._btn_set_default.setEnabled(not is_default)
+        # 默认 Profile 不允许删除
+        self._btn_delete.setEnabled(not is_default)
 
     def _open_in_terminal(self):
         """在新 Terminal Tab 中打开选中的 Profile"""
@@ -413,13 +684,28 @@ class AgentWidget(QWidget):
         profile_name = current.data(Qt.UserRole)
         if not profile_name:
             return
+        profile = current.data(Qt.UserRole + 1) or {}
+        # 默认（活跃）Profile 不允许删除，避免删掉当前正在使用的配置
+        if profile.get("active", False):
+            QMessageBox.warning(
+                self, self.tr("无法删除"),
+                self.tr("「{}」是当前默认 Profile，请先切换到其他 Profile 再删除。")
+                .format(profile_name))
+            return
+        # 网关运行中先停止再删，避免残留进程
+        if str(profile.get("gateway", "")).lower() == "running":
+            QMessageBox.warning(
+                self, self.tr("无法删除"),
+                self.tr("「{}」的网关正在运行，请先停止网关再删除。")
+                .format(profile_name))
+            return
         reply = QMessageBox.question(
             self, self.tr("确认删除"),
             self.tr("确定要删除 Profile「{}」吗？此操作不可撤销。").format(profile_name),
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            self._run_command(["profile", "delete", profile_name],
+            self._run_command(["profile", "delete", profile_name, "-y"],
                              self.tr("删除 Profile: ") + profile_name)
 
     def _rename_profile(self):
@@ -437,21 +723,22 @@ class AgentWidget(QWidget):
                              self.tr("重命名 Profile: {} → {}").format(old_name, new_name.strip()))
 
     def _edit_config(self):
-        """编辑 Profile 配置（使用 hermes profile show）"""
+        """编辑选中 Profile 的 config.yaml / .env"""
         current = self._profile_list.currentItem()
         if not current:
             return
         profile_name = current.data(Qt.UserRole)
         if not profile_name or not self._backend:
             return
-        # 获取 profile 配置路径并打开
         hermes_home = self._backend.get_hermes_home()
-        config_path = f"{hermes_home}/profiles/{profile_name}/config.toml"
-        # 通知用户 config 路径（后续可以集成编辑器）
-        QMessageBox.information(
-            self, self.tr("编辑配置"),
-            self.tr("Profile 配置文件路径:\n{}").format(config_path)
-        )
+        profile_dir = f"{hermes_home}/profiles/{profile_name}"
+        config_path = f"{profile_dir}/config.yaml"
+        env_path = f"{profile_dir}/.env"
+        dlg = ProfileConfigDialog(
+            self._backend, profile_name, config_path, env_path, self)
+        dlg.exec()
+        # 配置可能影响列表展示（如模型），关闭后刷新
+        self.refresh()
 
     def _start_gateway(self):
         """启动网关"""

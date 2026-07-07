@@ -112,16 +112,21 @@ class StatusWidget(QWidget):
         self._btn_open_terminal = QPushButton(self.tr("打开终端"))
         self._btn_agent_view = QPushButton(self.tr("Agent View"))
         self._btn_update = QPushButton(self.tr("更新 Claude"))
+        # 安装按钮：仅在检测到未安装 Claude Code 时显示（见 _update_install_button_visibility）
+        self._btn_install = QPushButton(self.tr("安装 Claude Code"))
+        self._btn_install.setVisible(False)
 
         self._btn_refresh.clicked.connect(self.refresh)
         self._btn_open_terminal.clicked.connect(self._on_open_terminal)
         self._btn_agent_view.clicked.connect(self._on_agent_view)
         self._btn_update.clicked.connect(self._on_update)
+        self._btn_install.clicked.connect(self._on_install)
 
         btn_layout.addWidget(self._btn_refresh)
         btn_layout.addWidget(self._btn_open_terminal)
         btn_layout.addWidget(self._btn_agent_view)
         btn_layout.addWidget(self._btn_update)
+        btn_layout.addWidget(self._btn_install)
         btn_layout.addStretch()
 
         main_layout.addLayout(btn_layout)
@@ -196,6 +201,17 @@ class StatusWidget(QWidget):
         self._update_worker.error.connect(self._on_update_error)
         self._update_worker.start()
 
+    def _on_install(self):
+        """在终端中执行官方安装脚本安装 Claude Code。
+
+        安装走真实终端（而非后台子进程），便于用户查看进度、处理权限提示；
+        安装完成后用户可点击"刷新状态"重新检测。
+        """
+        from core.claude_code.backend import build_install_command
+        cmd = build_install_command()
+        self._log_append(self.tr("正在打开终端安装 Claude Code，安装完成后请点击\"刷新状态\"..."))
+        self.open_terminal_requested.emit(cmd)
+
     def _on_update_finished(self, output: str):
         """更新命令完成"""
         timestamp = QDateTime.currentDateTime().toString("HH:mm:ss")
@@ -225,6 +241,8 @@ class StatusWidget(QWidget):
             self._set_card_status(self._card_version, version, "#27ae60")
         else:
             self._set_card_status(self._card_version, self.tr("未安装"), "#e74c3c")
+        # 未安装（version 为空）时显示"安装 Claude Code"按钮，已安装则隐藏
+        self._update_install_button_visibility(installed=bool(version))
 
         # 认证状态
         # 真实 JSON 形如：{"loggedIn": true, "authMethod": "oauth_token",
@@ -336,6 +354,16 @@ class StatusWidget(QWidget):
         self._btn_open_terminal.setEnabled(enabled)
         self._btn_agent_view.setEnabled(enabled)
         self._btn_update.setEnabled(enabled)
+        self._btn_install.setEnabled(enabled)
+
+    def _update_install_button_visibility(self, installed: bool):
+        """根据是否已安装 Claude Code 切换按钮显隐。
+
+        已安装：隐藏"安装 Claude Code"、显示"更新 Claude"；
+        未安装：显示"安装 Claude Code"、隐藏"更新 Claude"（未装无从更新）。
+        """
+        self._btn_install.setVisible(not installed)
+        self._btn_update.setVisible(installed)
 
     def _log_append(self, message: str):
         """追加日志到日志区域"""

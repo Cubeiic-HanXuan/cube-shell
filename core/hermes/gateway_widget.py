@@ -104,26 +104,101 @@ class GatewayWorker(QThread):
         self.config_loaded.emit(gateway_cfg)
 
     def _do_check_status(self):
-        output = self._backend.exec_cli(["gateway", "status"])
-        if output:
-            lower = output.lower()
-            # hermes gateway status 输出中包含 PID 或 "is loaded" 表示正在运行
-            is_running = ("pid" in lower and "=" in output) or "is loaded" in lower
-        else:
-            is_running = False
+        is_running = self._detect_running()
         self.status_checked.emit(is_running)
+
+    def _detect_running(self) -> bool:
+        """判断网关是否运行。
+
+        主判据：`hermes profile list` 中活跃(默认)Profile 的 Gateway 列——
+        这是 hermes 自己报告的状态（含进程存活校验），与其他页面显示一致。
+        回退：gateway_state.json 状态文件，再回退到 `gateway status` 文本解析。
+        纯文本解析对输出格式（launchd/独立进程/远程）敏感，故不作为首选，
+        避免误报「已停止」。
+        """
+        # 1) 主判据：profile list 活跃行的 Gateway 列
+        gw = self._active_profile_gateway()
+        if gw:
+            running = gw == "running"
+            self.command_done.emit("检查网关状态", f"profile list: gateway={gw}")
+            return running
+
+        hermes_home = self._backend.get_hermes_home()
+
+        # 2) 回退：gateway_state.json（守护进程写入）
+        state_content = self._backend.read_file(f"{hermes_home}/gateway_state.json")
+        if state_content:
+            try:
+                data = json.loads(state_content)
+                state = str(data.get("gateway_state", "")).strip().lower()
+                if state:
+                    self.command_done.emit(
+                        "检查网关状态", f"gateway_state.json: {state}")
+                    return state == "running"
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # 3) 回退：解析 CLI 文本输出（放宽匹配，兼容多种格式）
+        output = self._backend.exec_cli(["gateway", "status"]) or ""
         self.command_done.emit("检查网关状态", output or "(无输出)")
+        if not output:
+            return False
+        lower = output.lower()
+        # 明确的停止标记优先，避免 "not running" 里含 "running" 被误判
+        if any(m in lower for m in ("not loaded", "not running", "inactive")):
+            return False
+        if any(m in lower for m in ("is loaded", "is running", "active (running)")):
+            return True
+        # 兜底：出现 PID 数字通常意味着进程存在
+        return "pid" in lower
+
+    def _active_profile_gateway(self) -> str:
+        """解析 `hermes profile list`，返回活跃(默认)Profile 的 Gateway 列值(小写)。
+
+        解析失败或未找到活跃行时返回 ""（交由调用方回退到其他判据）。
+        """
+        output = self._backend.exec_cli(["profile", "list"]) or ""
+        if not output:
+            return ""
+        for line in output.splitlines():
+            raw = line.strip()
+            if not raw or '─' in raw or raw.startswith('Profile'):
+                continue
+            active = raw.startswith('◆')
+            if not active:
+                continue
+            body = raw[1:] if active else raw
+            parts = body.split()
+            # 形如: <name> <model> <gateway> ...
+            if len(parts) >= 3:
+                return parts[2].strip().lower()
+        return ""
 
     def _do_start(self):
         output = self._backend.exec_cli(["gateway", "start"])
         self.command_done.emit("启动网关", output or "(无输出)")
-        # 启动后重新检查状态
-        self._do_check_status()
+        # 网关启动是异步的：start 返回时守护进程可能尚未就绪、
+        # profile list / 状态文件还是旧的 stopped。轮询几次直到running或超时，
+        # 避免立即检查读到过期状态导致状态栏不刷新。
+        is_running = False
+        for _ in range(10):  # 最多约 10 秒
+            self.msleep(1000)
+            if self._detect_running():
+                is_running = True
+                break
+        self.status_checked.emit(is_running)
 
     def _do_stop(self):
         output = self._backend.exec_cli(["gateway", "stop"])
         self.command_done.emit("停止网关", output or "(无输出)")
-        self.status_checked.emit(False)
+        # 停止同样异步：轮询直到确认已停止或超时
+        is_running = True
+        for _ in range(10):
+            self.msleep(1000)
+            if not self._detect_running():
+                is_running = False
+                break
+        self.status_checked.emit(is_running)
 
     def _do_test(self):
         platform_id = self._kwargs.get("platform_id", "")
@@ -358,6 +433,7 @@ class GatewayWidget(QWidget):
         if not self._backend:
             return
         self._append_log(self.tr("正在启动网关..."))
+        self._set_status_pending(self.tr("网关状态：启动中..."))
         self._run_worker("start")
 
     def _stop_gateway(self):
@@ -365,7 +441,15 @@ class GatewayWidget(QWidget):
         if not self._backend:
             return
         self._append_log(self.tr("正在停止网关..."))
+        self._set_status_pending(self.tr("网关状态：停止中..."))
         self._run_worker("stop")
+
+    def _set_status_pending(self, text):
+        """启停过程中显示过渡状态，并禁用启停按钮避免重复操作"""
+        self._status_label.setText(text)
+        self._status_label.setStyleSheet("font-weight: bold; color: #e0a800;")
+        self._start_btn.setEnabled(False)
+        self._stop_btn.setEnabled(False)
 
     def _toggle_platform(self, platform_id, enabled):
         """启用/禁用平台"""
@@ -443,6 +527,9 @@ class GatewayWidget(QWidget):
         else:
             self._status_label.setText(self.tr("网关状态：已停止"))
             self._status_label.setStyleSheet("font-weight: bold; color: red;")
+        # 运行中：仅允许停止；已停止：仅允许启动
+        self._start_btn.setEnabled(not is_running)
+        self._stop_btn.setEnabled(is_running)
 
     def _on_command_done(self, description, output):
         """命令执行完成"""
@@ -452,6 +539,8 @@ class GatewayWidget(QWidget):
         """Worker 出错"""
         self._append_log(f"[错误] {error_msg}")
         logger.error(f"GatewayWorker 错误: {error_msg}")
+        # 出错后按真实状态恢复按钮，避免卡在过渡态或误开两个按钮
+        self._check_gateway_status()
 
     # ─── 辅助方法 ───
 

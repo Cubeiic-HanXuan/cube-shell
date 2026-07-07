@@ -269,6 +269,18 @@ class AIChatPanel(QWidget):
         self._current_ai_text: str = ""
         self._thinking_widget: Optional[_ThinkingWidget] = None
 
+        # ─ 流式渲染节流 ─
+        # 流式增量到达很快（每秒数十个 token），若每个增量都做
+        # "全文 Markdown 重解析 + setHtml 全量重绘 + setFixedHeight + 滚动"
+        # 会造成肉眼可见的闪烁与卡顿。用一个定时器把多次增量合并成
+        # 一次渲染（约 60ms / 最多 ~16fps），流结束时再强制 flush 一次。
+        self._render_dirty: bool = False
+        self._last_bubble_height: int = 0
+        self._render_timer = QTimer(self)
+        self._render_timer.setInterval(60)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._flush_ai_render)
+
         self._build_ui()
 
         # 语音输入管理器
@@ -425,9 +437,12 @@ class AIChatPanel(QWidget):
 
     def append_ai_message(self, text: str):
         """显示 AI 回复消息（支持 Markdown 渲染）"""
+        # 先结束上一轮可能仍在等待渲染的流式气泡，避免 pending flush 落到新气泡上
+        self._finalize_ai_render()
         bubble = self._create_bubble(text, is_user=False)
         self._current_ai_bubble = bubble
         self._current_ai_text = text
+        self._last_bubble_height = 0
         self._insert_widget(bubble)
         self._scroll_to_bottom()
 
@@ -444,11 +459,23 @@ class AIChatPanel(QWidget):
         if self._current_ai_bubble is None:
             # 创建新的 AI 气泡
             self._current_ai_text = ""
+            self._last_bubble_height = 0
             bubble = self._create_bubble("", is_user=False)
             self._current_ai_bubble = bubble
             self._insert_widget(bubble)
 
+        # 只累积文本，真正的渲染交给节流定时器合并处理，避免逐 token 全量重绘导致闪烁
         self._current_ai_text += content
+        self._render_dirty = True
+        if not self._render_timer.isActive():
+            self._render_timer.start()
+
+    def _flush_ai_render(self):
+        """把累积的流式文本一次性渲染到当前 AI 气泡（节流后调用）。"""
+        if not self._render_dirty or self._current_ai_bubble is None:
+            return
+        self._render_dirty = False
+
         html = self._render_markdown(self._current_ai_text)
         # 内联主题文字颜色
         text_color = self.palette().color(self.palette().ColorRole.Text).name()
@@ -456,15 +483,24 @@ class AIChatPanel(QWidget):
         # 更新文档宽度以适配当前面板尺寸
         available_width = self._get_bubble_available_width(is_user=False)
         self._current_ai_bubble.document().setTextWidth(available_width)
-        self._current_ai_bubble.setFixedHeight(
-            max(36, self._current_ai_bubble.document().size().toSize().height() + 16)
-        )
+        # 仅在高度真正变化时才调整固定高度，避免每次都触发父布局 reflow 抖动
+        new_height = max(36, self._current_ai_bubble.document().size().toSize().height() + 16)
+        if new_height != self._last_bubble_height:
+            self._last_bubble_height = new_height
+            self._current_ai_bubble.setFixedHeight(new_height)
         self._scroll_to_bottom()
+
+    def _finalize_ai_render(self):
+        """结束当前 AI 气泡前调用：停止节流定时器并强制渲染最后一段内容，防止尾部丢失。"""
+        self._render_timer.stop()
+        if self._render_dirty:
+            self._flush_ai_render()
 
     def append_command_card(self, cmd: str, description: str, risk_level: RiskLevel):
         """添加命令卡片组件"""
         card = CommandCard(cmd, description, risk_level, parent=self._chat_container)
         card.execute_clicked.connect(self.command_execute_requested.emit)
+        self._finalize_ai_render()
         self._insert_widget(card)
         self._current_ai_bubble = None
         self._scroll_to_bottom()
@@ -532,6 +568,7 @@ class AIChatPanel(QWidget):
             output_browser.setFixedHeight(doc_height)
             layout.addWidget(output_browser)
 
+        self._finalize_ai_render()
         self._insert_widget(frame)
         self._current_ai_bubble = None
         self._scroll_to_bottom()
@@ -558,6 +595,7 @@ class AIChatPanel(QWidget):
                 self._thinking_widget.stop()
                 # 不再删除组件，保留为可折叠的已完成状态
             self._stop_btn.setVisible(False)
+            self._finalize_ai_render()
             self._current_ai_bubble = None
             self._thinking_widget = None  # 释放引用，但组件保留在布局中
 
@@ -636,6 +674,7 @@ class AIChatPanel(QWidget):
         label.setWordWrap(True)
         layout.addWidget(label)
 
+        self._finalize_ai_render()
         self._insert_widget(frame)
         self._current_ai_bubble = None
         self._scroll_to_bottom()
@@ -650,6 +689,7 @@ class AIChatPanel(QWidget):
         """
         # 结束当前流式气泡
         if self._current_ai_bubble is not None:
+            self._finalize_ai_render()
             self._current_ai_bubble = None
             self._current_ai_text = ""
 
