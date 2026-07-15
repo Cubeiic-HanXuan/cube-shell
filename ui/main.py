@@ -6,8 +6,10 @@ from PySide6.QtGui import (QCursor)
 from PySide6.QtWidgets import (QCheckBox, QGridLayout, QHBoxLayout,
                                QLabel,
                                QProgressBar,
-                               QSplitter, QTabWidget,
+                               QSplitter,
                                QTreeWidget, QVBoxLayout, QWidget)
+
+from ui.terminal_tab_widget import TerminalTabWidget
 
 
 class Ui_MainWindow(object):
@@ -102,7 +104,7 @@ class Ui_MainWindow(object):
         self.gridLayout_right.setObjectName(u"gridLayout_right")
         self.gridLayout_right.setContentsMargins(0, 0, 0, 0)
 
-        self.ShellTab = QTabWidget(self.gridLayoutWidget_right)
+        self.ShellTab = TerminalTabWidget(self.gridLayoutWidget_right)
         # 允许标签可移动
         self.ShellTab.setMovable(True)
         self.ShellTab.setObjectName(u"ShellTab")

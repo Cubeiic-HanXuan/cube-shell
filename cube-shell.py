@@ -640,6 +640,7 @@ class MainDialog(QMainWindow):
         self.ui = main.Ui_MainWindow()
         self.ui.setupUi(self)
         self.setWindowIcon(QIcon(":logo.ico"))
+        self.ui.ShellTab.newLocalTerminalRequested.connect(self.open_local_terminal)
         self._setup_compat_stubs()  # 确保存根在任何业务代码前就绪
 
         # 连接异步信号
@@ -656,7 +657,7 @@ class MainDialog(QMainWindow):
         self.ssh_clients = {}
         # 存储 RDP 会话（RDPWidget），key 为 tab 的 tabWhatsThis
         self.rdp_clients = {}
-        icon = QIcon(":index.png")
+        icon = QIcon(":icons8-home-48")
         self.ui.ShellTab.tabBar().setTabIcon(0, icon)
 
         # 确保配置目录存在并迁移现有配置文件（仅首次运行时）
@@ -958,13 +959,21 @@ class MainDialog(QMainWindow):
         ssh_conn.pwd = new_pwd
         self.refreshDirs()
 
-    def _on_channel_closed(self, tab_name, opened_at=None):
+    def _on_channel_closed(self, tab_page, opened_at=None):
         """SSH channel 关闭（用户输入 exit）→ 自动关闭对应 tab。
 
         宽限期：若会话存活不足 10 秒即被关闭（通常是服务端踢掉，
         如 JumpServer MFA 失败），不自动删 tab，保留终端上的错误输出供用户查看。
         """
         try:
+            tab_index = self.ui.ShellTab.indexOf(tab_page)
+            if tab_index < 0:
+                # 用户主动关闭时会先把页面从标签栏摘除，再停止终端；
+                # 随后同步/异步到达的 finished 信号必须直接忽略。
+                return
+            if bool(tab_page.property("cubeShellTabClosing")):
+                return
+            tab_name = self.ui.ShellTab.tabText(tab_index)
             if opened_at is not None and time.monotonic() - opened_at < 10:
                 util.logger.warning(
                     f"channel '{tab_name}' closed within grace period, "
@@ -973,12 +982,9 @@ class MainDialog(QMainWindow):
                 # 即使保留 tab,也要把状态圆点变红,告诉用户会话已断开
                 self._mark_tab_disconnected(tab_name)
                 return
-            for i in range(self.ui.ShellTab.count()):
-                if self.ui.ShellTab.tabText(i) == tab_name:
-                    # 关闭前先把圆点变红(off 会销毁 widget,这是最后一次机会)
-                    self._mark_tab_disconnected(tab_name)
-                    self.off(i, tab_name)
-                    return
+            # 关闭前先把圆点变红(off 会销毁 widget,这是最后一次机会)
+            self._mark_tab_disconnected(tab_name)
+            self.off(tab_index, tab_name)
         except Exception as e:
             util.logger.error(f"channel closed handler error: {e}")
 
@@ -1509,8 +1515,15 @@ class MainDialog(QMainWindow):
     def _remove_tab_by_name(self, name):
         for i in range(self.ui.ShellTab.count()):
             if self.ui.ShellTab.tabText(i) == name:
-                # 1. 获取并关闭终端组件
+                # 1. 在页面仍可查询时获取终端组件
                 shell = self.get_text_browser_from_tab(i)
+
+                # 2. 必须先从标签栏摘除页面，再关闭终端。shell.close()
+                # 会同步发出 finished；如果仍保留在标签栏中，finished 回调
+                # 会递归进入 off()，外层随后继续使用旧索引并误删下一个标签。
+                widget = self.ui.ShellTab.takeTab(i)
+
+                # 3. 页面已经不可被 finished 回调命中，现在可以安全停止终端
                 if shell:
                     try:
                         shell.close()
@@ -1519,13 +1532,7 @@ class MainDialog(QMainWindow):
                         util.logger.error(f"Failed to delete tab: {e}")
                         pass
 
-                # 2. 获取 Widget 引用
-                widget = self.ui.ShellTab.widget(i)
-
-                # 3. 移除标签页
-                self.ui.ShellTab.removeTab(i)
-
-                # 4. 显式销毁 Widget
+                # 4. 显式销毁已摘除的页面
                 if widget:
                     widget.deleteLater()
                 break
@@ -1567,7 +1574,8 @@ class MainDialog(QMainWindow):
             tab_bar = self.ui.ShellTab.tabBar()
             status_dot = TabStatusDot(self)
             close_button = TabCloseButton(self)
-            close_button.clicked.connect(lambda: self.off(tab_index, tab_name))
+            tab_page = self.tab
+            close_button.clicked.connect(lambda page=tab_page: self.close_terminal_tab(page))
             tab_bar.setTabButton(tab_index, QTabBar.LeftSide, status_dot)
             tab_bar.setTabButton(tab_index, QTabBar.RightSide, close_button)
         else:
@@ -2693,6 +2701,15 @@ class MainDialog(QMainWindow):
                 item.setSelected(True)
 
     # 连接服务器
+    def open_local_terminal(self):
+        """从终端标签栏的 ``+`` 按钮新建一个本机终端。"""
+        tab_index, terminal = self.add_new_tab(self.tr("本机终端"))
+        if tab_index < 0 or terminal is None:
+            return -1
+
+        self.run(self.tr("本机终端"), terminal)
+        return tab_index
+
     def run(self, name=None, terminal=None) -> int:
         if name is None:
             focus = self.ui.treeWidget.currentIndex().row()
@@ -2814,9 +2831,9 @@ class MainDialog(QMainWindow):
         self.initSftpSignal.emit()
 
         # 连接 finished 信号 → 用户输入 exit 时自动关闭 tab
-        tab_name = self.ui.ShellTab.tabText(current_index)
+        tab_page = terminal.parentWidget()
         terminal.finished.connect(
-            lambda name=tab_name: self._on_channel_closed(name)
+            lambda page=tab_page: self._on_channel_closed(page)
         )
         try:
             self._release_connecting_state()
@@ -2924,11 +2941,10 @@ class MainDialog(QMainWindow):
                     bridge.inject_shell_integration()
 
                 # 连接 channelClosed 信号 → 用户输入 exit、logout、Ctrl+D 时自动关闭 tab
-                tab_index = self.ui.ShellTab.currentIndex()
-                tab_name = self.ui.ShellTab.tabText(tab_index)
+                tab_page = terminal.parentWidget()
                 bridge.channelClosed.connect(
-                    lambda name=tab_name, b=bridge: self._on_channel_closed(
-                        name, getattr(b, 'opened_at', None)
+                    lambda page=tab_page, b=bridge: self._on_channel_closed(
+                        page, getattr(b, 'opened_at', None)
                     )
                 )
 
@@ -3280,8 +3296,21 @@ class MainDialog(QMainWindow):
 
     # 断开服务器并删除tab
     def off(self, index, name):
-        self._off(name)
-        self._remove_tab_by_name(name)
+        tab_page = self.ui.ShellTab.widget(index)
+        if tab_page is not None and not self.ui.ShellTab.beginTabClose(tab_page):
+            return
+        try:
+            self._off(name)
+            self._remove_tab_by_name(name)
+        finally:
+            self.ui.ShellTab.finishTabClose(tab_page)
+
+    def close_terminal_tab(self, tab_page):
+        """关闭按钮入口：按页面对象解析点击发生时的真实索引。"""
+        index = self.ui.ShellTab.indexOf(tab_page)
+        if index <= 0:
+            return
+        self.off(index, self.ui.ShellTab.tabText(index))
 
     def send(self, data):
         """发送数据到终端 - 支持 QTermWidget"""
@@ -3914,20 +3943,10 @@ class MainDialog(QMainWindow):
             f.setBold(True)
             return f
 
-        # 1. 添加"本机终端"顶层项
-        local_item = QTreeWidgetItem(self.ui.treeWidget)
-        local_item.setFont(0, _make_device_font())
-        local_item.setText(0, self.tr("本机终端"))
-        local_item.setData(0, Qt.UserRole, "localhost")
-        try:
-            local_item.setIcon(0, QIcon(':Localhost.png'))
-        except Exception:
-            local_item.setIcon(0, QIcon(':icons8-linux-48.png'))
-
-        # 2. 获取分组结构
+        # 1. 获取分组结构
         grouped = get_grouped_devices(list(dic.keys()))
 
-        # 3. 遍历分组添加节点
+        # 2. 遍历分组添加节点
         for group_name, devices in grouped.items():
             if group_name == "__ungrouped__":
                 continue  # 未分组设备最后处理
@@ -3954,7 +3973,7 @@ class MainDialog(QMainWindow):
             # 默认展开分组
             group_item.setExpanded(True)
 
-        # 4. 处理未分组设备
+        # 3. 处理未分组设备
         ungrouped = grouped.get("__ungrouped__", [])
         if ungrouped:
             ungrouped_item = QTreeWidgetItem(self.ui.treeWidget)

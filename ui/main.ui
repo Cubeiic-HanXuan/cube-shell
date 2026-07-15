@@ -303,7 +303,7 @@
            <widget class="QWidget" name="verticalLayoutWidget">
             <layout class="QVBoxLayout" name="verticalLayout">
              <item>
-              <widget class="QTabWidget" name="ShellTab">
+              <widget class="TerminalTabWidget" name="ShellTab">
                <property name="maximumSize">
                 <size>
                  <width>16777215</width>
@@ -684,6 +684,14 @@
    </layout>
   </widget>
  </widget>
+ <customwidgets>
+  <customwidget>
+   <class>TerminalTabWidget</class>
+   <extends>QTabWidget</extends>
+   <header>ui.terminal_tab_widget</header>
+   <container>1</container>
+  </customwidget>
+ </customwidgets>
  <resources/>
  <connections/>
 </ui>
