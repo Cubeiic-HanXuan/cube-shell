@@ -97,6 +97,7 @@ class KPtyProcess(KProcess):
         self._win_input_filter_seq = "\x1b[2~"
         self._window_lines = 24
         self._window_cols = 80
+        self._applied_window_size = None
 
         # 关键修复：严格对应C++构造函数中的pty->open()调用
         # 对应C++: d->pty->open() 或 d->pty->open(ptyMasterFd)
@@ -197,16 +198,22 @@ class KPtyProcess(KProcess):
 
     def setWinSizeWindows(self, lines, cols):
         """Windows平台设置窗口大小"""
-        if IS_WINDOWS and self._winpty_process:
-            try:
-                if hasattr(self._winpty_process, "setwinsize"):
-                    self._winpty_process.setwinsize(lines, cols)
-                elif hasattr(self._winpty_process, "set_winsize"):
-                    self._winpty_process.set_winsize(lines, cols)
-                elif hasattr(self._winpty_process, "pty") and hasattr(self._winpty_process.pty, "set_size"):
-                    self._winpty_process.pty.set_size(cols, lines)
-            except Exception as e:
-                print(f"⚠️ 设置Windows PTY窗口大小失败: {e}")
+        if not (IS_WINDOWS and self._winpty_process):
+            return False
+
+        try:
+            if hasattr(self._winpty_process, "setwinsize"):
+                self._winpty_process.setwinsize(lines, cols)
+            elif hasattr(self._winpty_process, "set_winsize"):
+                self._winpty_process.set_winsize(lines, cols)
+            elif hasattr(self._winpty_process, "pty") and hasattr(self._winpty_process.pty, "set_size"):
+                self._winpty_process.pty.set_size(cols, lines)
+            else:
+                return False
+            return True
+        except Exception as e:
+            print(f"⚠️ 设置Windows PTY窗口大小失败: {e}")
+            return False
 
     def pty(self):
         """
@@ -284,6 +291,8 @@ class KPtyProcess(KProcess):
             return self._start_windows(program, arguments, environment)
 
         try:
+            self._applied_window_size = None
+
             # 创建PTY
             self._masterFd, self._slaveFd = pty.openpty()
 
@@ -697,10 +706,18 @@ class KPtyProcess(KProcess):
 
     def setWinSize(self, lines, cols):
         """设置窗口大小 - 关键：SSH连接需要正确的终端尺寸"""
-        self._window_lines = int(lines)
-        self._window_cols = int(cols)
+        lines = int(lines)
+        cols = int(cols)
+        self._window_lines = lines
+        self._window_cols = cols
+        size = (lines, cols)
+
+        if size == self._applied_window_size:
+            return
+
         if IS_WINDOWS:
-            self.setWinSizeWindows(lines, cols)
+            if self.setWinSizeWindows(lines, cols):
+                self._applied_window_size = size
             return
 
         if self._masterFd >= 0:
@@ -712,20 +729,10 @@ class KPtyProcess(KProcess):
                 # 使用TIOCSWINSZ ioctl设置窗口大小
                 win_size = struct.pack('HHHH', lines, cols, 0, 0)
                 fcntl.ioctl(self._masterFd, termios.TIOCSWINSZ, win_size)
-
-                # 如果有子进程，发送SIGWINCH信号通知尺寸变化
-                if self._childPid > 0:
-                    os.kill(self._childPid, signal.SIGWINCH)
+                self._applied_window_size = size
 
             except Exception as e:
                 print(f"⚠️ 设置PTY窗口大小失败: {e}")
-
-        # 同时更新pty对象（如果存在）
-        if self._pty:
-            try:
-                self._pty.setWinSize(lines, cols)
-            except Exception as e:
-                print(f"⚠️ 更新pty对象失败: {e}")
 
     def setErase(self, erase_char):
         """设置擦除字符"""
@@ -834,6 +841,7 @@ class KPtyProcess(KProcess):
             self._slaveFd = -1
 
         self._childPid = -1
+        self._applied_window_size = None
 
         if hasattr(self, '_subprocess'):
             del self._subprocess
@@ -948,6 +956,10 @@ class KPtyProcess(KProcess):
                 self._winpty_backend = "winpty/auto(fallback)"
 
             print(f"[cube-shell] Windows PTY 后端 = {self._winpty_backend}")
+
+            self._window_lines = 24
+            self._window_cols = 80
+            self._applied_window_size = (24, 80)
 
             self._childPid = 12345  # 假PID
 

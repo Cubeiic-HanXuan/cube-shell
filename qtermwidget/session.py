@@ -113,6 +113,7 @@ class Session(QObject):
 
     # 类变量 - 对应C++: static int lastSessionId
     lastSessionId = 0
+    TERMINAL_RESIZE_DEBOUNCE_MS = 80
 
     def __init__(self, parent: Optional[QObject] = None):
         """
@@ -185,6 +186,7 @@ class Session(QObject):
         self._initializeEmulation()
         self._connectSignals()
         self._setupMonitorTimer()
+        self._setupTerminalSizeTimer()
 
     def _initializeShellProcess(self):
         """初始化Shell进程 - 对应C++构造函数中的PTY创建"""
@@ -279,6 +281,15 @@ class Session(QObject):
         self._monitorTimer = QTimer(self)
         self._monitorTimer.setSingleShot(True)
         self._monitorTimer.timeout.connect(self.monitorTimerDone)
+
+    def _setupTerminalSizeTimer(self):
+        """合并连续的窗口变化，避免 shell 在拖动期间反复重绘输入行。"""
+        self._terminalSizeTimer = QTimer(self)
+        self._terminalSizeTimer.setSingleShot(True)
+        self._terminalSizeTimer.timeout.connect(self._applyPendingTerminalSize)
+        self._pendingTerminalSize = None
+        self._appliedTerminalSize = None
+        self._updatingTerminalImageSize = False
 
         # =============================================================================
 
@@ -941,6 +952,9 @@ class Session(QObject):
 
             # 延迟重连信号以确保进程启动后信号正常工作
             QTimer.singleShot(200, self._ensureSignalConnections)
+
+            # 新进程拥有新的 PTY，强制把当前尺寸同步给它。
+            self.invalidateTerminalSize()
             
             # 关键修复：延迟更新终端尺寸
             # 在进程启动后，视图可能还没有完全初始化，延迟确保尺寸正确同步到PTY
@@ -1187,6 +1201,8 @@ class Session(QObject):
     @Slot(int, int)
     def onViewSizeChange(self, height: int, width: int):
         """视图大小改变处理 - 对应C++: void onViewSizeChange(int, int)"""
+        if getattr(self, '_updatingTerminalImageSize', False):
+            return
         self.updateTerminalSize()
 
     @Slot(QSize)
@@ -1245,10 +1261,41 @@ class Session(QObject):
 
         # 后端模拟器必须至少有1列x1行的终端大小
         if min_lines > 0 and min_columns > 0:
+            size = (min_lines, min_columns)
+
             if hasattr(self._emulation, 'setImageSize'):
-                self._emulation.setImageSize(min_lines, min_columns)
-            if self._shellProcess and hasattr(self._shellProcess, 'setWindowSize'):
-                self._shellProcess.setWindowSize(min_lines, min_columns)
+                current_size = self._emulation.imageSize() if hasattr(self._emulation, 'imageSize') else QSize()
+                if current_size != QSize(min_columns, min_lines):
+                    self._updatingTerminalImageSize = True
+                    try:
+                        self._emulation.setImageSize(min_lines, min_columns)
+                    finally:
+                        self._updatingTerminalImageSize = False
+
+            self._pendingTerminalSize = size
+            if size == self._appliedTerminalSize:
+                self._pendingTerminalSize = None
+                self._terminalSizeTimer.stop()
+                return
+
+            self._terminalSizeTimer.start(self.TERMINAL_RESIZE_DEBOUNCE_MS)
+
+    @Slot()
+    def _applyPendingTerminalSize(self):
+        """仅把最后一个稳定尺寸同步到本地或远程 PTY。"""
+        size = self._pendingTerminalSize
+        self._pendingTerminalSize = None
+        if size is None or size == self._appliedTerminalSize:
+            return
+
+        if self._shellProcess and hasattr(self._shellProcess, 'setWindowSize'):
+            lines, columns = size
+            self._shellProcess.setWindowSize(lines, columns)
+            self._appliedTerminalSize = size
+
+    def invalidateTerminalSize(self):
+        """新 PTY 后端接管时强制下一次尺寸同步。"""
+        self._appliedTerminalSize = None
 
     def _ensureSignalConnections(self):
         """确保信号连接正常工作 - 延迟重连机制"""
