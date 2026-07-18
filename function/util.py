@@ -95,6 +95,10 @@ _EXT_ICON_MAP = {
     ".log": ':icons-log-48.png',
     ".toml": ':icons-toml-48.png',
     ".xml": ':xml-48.png',
+    ".swift": ':icons8-swift-48.png',
+    ".svg": ':icons8-svg-48.png',
+    ".db": ':icons8-db-48.png',
+    ".lock": ':icons8-lock-48.png',
 }
 
 # 文件名前缀（如 .env、.eslintrc）→ 图标路径：保留原 startswith 语义
