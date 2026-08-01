@@ -4240,6 +4240,8 @@ class MainDialog(QMainWindow):
                     if n[0] in ("-rwxr-xr-x", "-r-xr-xr-x", "-rwsr-xr-x", "-rwxr-xr-x.", "-r-xr-xr-x.", "-rwxr-x---."):
                         # 可执行文件图标
                         item.setIcon(0, QIcon(':icons8-exec-48.png'))
+                    if n[0] in "lrwxrwxrwx":
+                        item.setIcon(0, QIcon(':icons8-kj-48.png'))
                     else:
                         item.setIcon(0, util.get_default_file_icon(n[8]))
 
