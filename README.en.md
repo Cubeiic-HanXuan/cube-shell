@@ -15,6 +15,9 @@
 
 #### Introduction
 
+>Due to numerous limitations and difficulties in platform-specific compilation, this Python version has been fully refactored in C++. New features such as serial protocol connection and split-screen have been added. The Python version will no longer receive new features and will enter maintenance mode. For future downloads, please refer to the C++ version.
+Version URL: https://github.com/Cubeiic-HanXuan/cube-shell-cpp
+
 `cube-shell` is a remote operations and management tool for Linux servers. It can replace tools like Xshell, XSftp, and
 MobaXterm for server management. `cube-shell` is simple yet powerful. Most SSH client tools on the market are bloated
 with unnecessary menus and overly complex UIs, making them unfriendly to first-time users.
