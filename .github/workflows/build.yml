@@ -1,67 +1,505 @@
-name: Build Windows Installer
+# ===========================================================================
+# cube-shell (Python / PySide6 / Nuitka) 跨平台构建 / 打包 CI
+#
+# 用 GitHub 托管 Runner 编译 6 个平台（本地无需对应架构机器）：
+#   macOS   : Intel x86_64 (macos-15-intel)  + Apple Silicon ARM64 (macos-14)
+#   Windows : x64 (windows-2022)             + ARM64 (windows-11-vs2026-arm)
+#   Linux   : x86_64 (ubuntu-22.04)          + ARM64 (ubuntu-24.04-arm)
+#
+# 镜像版本对齐 cube-shell-cpp/.github/workflows/build.yml，仅 linux-x86_64 例外：
+# C++ 版在 rockylinux:8 容器里构建以压到 glibc 2.28，但 PySide6 的官方 x86_64 轮子是
+# manylinux_2_34（要 glibc ≥ 2.34），Rocky 8 装不上，故直接用 ubuntu-22.04（glibc 2.35）
+# 裸机构建。linux-arm64 与 C++ 版一致用 ubuntu-24.04-arm：PySide6 的 aarch64 轮子是
+# manylinux_2_39，只有 24.04（glibc 2.39）满足。
+#
+# 打包工具：Nuitka standalone（与本地 app.sh / build-exe*.bat / build-linux.sh 同一套
+# 参数），Nuitka 版本钉在 NUITKA_VERSION，避免上游改选项名导致某天 CI 突然失败。
+#
+# 依赖轮子实测结论（2026-08 查 PyPI）：requirements.txt 里的原生扩展在 6 个平台的轮子
+# 覆盖情况决定了下面 windows-arm64 的特殊处理：
+#   * PySide6 6.11.1：macos universal2 / manylinux_2_34_x86_64 / manylinux_2_39_aarch64
+#     / win_amd64 / win_arm64 —— 6 平台全覆盖，无需自己编 Qt。
+#   * cryptography（paramiko 依赖）：win_arm64 轮子只到 46.0.3，47.0.0 起停发。
+#     paramiko 5.0.0 只要求 cryptography>=3.3，故 windows-arm64 钉 46.0.3；否则 pip 会
+#     拉最新版并回退源码编译（需要 Rust 工具链，CI 上必炸）。
+#   * pywinpty：2.x 全系无 win_arm64 轮子，3.0.5+ 才有。好在 requirements.txt 写的是
+#     开区间 `pywinpty>=2.0.0`，pip 会直接取 3.x 的 win_arm64 轮子，无需干预；
+#     qtermwidget/kptyprocess.py 也已同时兼容 2.x / 3.x 的 Backend 枚举
+#     （3.x 起 Backend.ConPTY == 0），两个 Windows 平台都会装到 3.x。
+#   * bcrypt / PyNaCl / Pillow / pydantic-core / jiter 等均有 win_arm64 与 aarch64 轮子。
+#   * arc4（aardwolf 依赖，小型 C 扩展）：只有 macOS / manylinux-x86_64 / win_amd64 轮子，
+#     linux-arm64 与 windows-arm64 会现场源码编译。前者用系统 gcc、后者用 VS 的 MSVC
+#     ARM64 编译器，两个 Runner 都自带，无需额外安装。
+#
+# 触发：仅手动 workflow_dispatch（Actions → build → Run workflow）。
+#   打 v* tag 后在该 tag 上手动触发，可同时产出 GitHub Release。
+# 产物：每次构建上传 6 个 Artifact；当 ref 是 v* tag 时额外自动创建 GitHub Release。
+#
+# 注意：ARM64 托管 Runner（windows-11-vs2026-arm / ubuntu-24.04-arm）对【公开仓库】
+#       免费。若本仓库为私有，这些 label 会一直排队，需改用私有 Runner 或转公开。
+# ===========================================================================
+
+name: build
 
 on:
-  push:
-    branches: [master]
   workflow_dispatch:
+
+# 同一分支/tag 重复触发时取消旧 run，省 Runner 时间
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # 应用版本号（打包文件名 / 版本资源用）；发版时手动改这里，与 installer.iss 默认值一致
+  APP_VERSION: '2.8.0'
+  PYTHON_VERSION: '3.12'          # 与 Pipfile 的 python_version 一致
+  NUITKA_VERSION: '4.1.3'         # 钉版本：本地 venv 实测通过的同一版
 
 jobs:
   build:
-    runs-on: windows-latest
-    
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180          # 大单文件 + LTO，链接阶段较慢，给足余量
+    strategy:
+      fail-fast: false            # 一个平台失败不取消其余平台
+      matrix:
+        include:
+          # ------------------------------- macOS -------------------------------
+          # PySide6 的 macOS 轮子是 universal2（一个轮子覆盖两种架构），产物架构由
+          # Runner 自身架构决定；--macos-target-arch 显式写死做个断言。
+          - name: macos-x86_64
+            os: macos-15-intel        # Intel runner
+            platform: macos
+            macos_arch: x86_64
+
+          - name: macos-arm64
+            os: macos-14              # Apple Silicon runner
+            platform: macos
+            macos_arch: arm64
+
+          # ------------------------------ Windows ------------------------------
+          # x64 固定 windows-2022（VS2022，Nuitka --msvc=latest 能稳定命中）。
+          # 不用 windows-latest：它正灰度迁到 VS2026，工具链变动风险高。
+          - name: windows-x86_64
+            os: windows-2022
+            platform: windows
+
+          # ARM64 基础镜像 windows-11-arm 不带 Visual Studio，而 Nuitka 必须有 C 编译器
+          # （MinGW64 无 ARM64 版），故用带 VS2026 的 windows-11-vs2026-arm。
+          - name: windows-arm64
+            os: windows-11-vs2026-arm
+            platform: windows
+
+          # ------------------------------- Linux -------------------------------
+          - name: linux-x86_64
+            os: ubuntu-22.04          # glibc 2.35，满足 PySide6 manylinux_2_34 轮子
+            platform: linux
+
+          - name: linux-arm64
+            os: ubuntu-24.04-arm      # glibc 2.39，PySide6 aarch64 轮子的底线
+            platform: linux
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      # ------------------------------------------------------------ Python
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
 
-      - name: Install dependencies
-        run: pip install --no-cache-dir -r requirements.txt
+      # ------------------------------------------- Linux 构建期系统依赖
+      # patchelf：Nuitka standalone 在 Linux 上改 rpath 的硬依赖。
+      # 其余是 PySide6 在构建/自检时 import QtCore 及运行 pyside6 插件探测所需的
+      # XCB/GL/fontconfig 运行库（轮子自带 Qt，但仍链接这些系统库）。
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            patchelf ccache libffi-dev libssl-dev \
+            libgl1 libegl1 libxcb-cursor0 libxkbcommon-x11-0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-shm0 libxcb-sync1 \
+            libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libxcb-util1 \
+            libdbus-1-3 libfontconfig1
 
-      - name: Install Nuitka
-        run: pip install --no-cache-dir nuitka
+      # -------------------------------------------------- Python 依赖
+      # 生成 requirements.ci.txt：绝大多数平台就是 requirements.txt 原样，
+      # 只有 windows-arm64 需要追加一条 cryptography 钉版（原因见文件头）。
+      - name: Prepare requirements for this platform
+        shell: bash
+        run: |
+          set -e
+          cp requirements.txt requirements.ci.txt
+          if [ "${{ matrix.name }}" = "windows-arm64" ]; then
+            echo 'cryptography==46.0.3   # win_arm64 轮子末版，见 workflow 头部说明' >> requirements.ci.txt
+          fi
+          echo "=== requirements.ci.txt ==="
+          cat requirements.ci.txt
 
-      - name: Verify PySide6
-        run: python -c "from PySide6 import QtCore; print('PySide6 OK:', QtCore.__version__)"
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          set -e
+          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install -r requirements.ci.txt
+          python -m pip install "nuitka==${NUITKA_VERSION}"
 
+      # 早失败：装不上/装错架构的 PySide6 在这里就暴露，别等 Nuitka 编译半小时后才报错
+      - name: Verify toolchain
+        shell: bash
+        run: |
+          set -e
+          python -c "import platform,sys; print('python', sys.version.split()[0], platform.machine())"
+          python -c "import PySide6; from PySide6 import QtCore; print('PySide6', PySide6.__version__, '| Qt', QtCore.qVersion())"
+          python -c "import paramiko, cryptography; print('paramiko', paramiko.__version__, '| cryptography', cryptography.__version__)"
+          python -c "import aardwolf, arc4; print('aardwolf/arc4 OK')"
+          python -m nuitka --version | head -3
+
+      # Nuitka 的编译缓存（ccache / clcache 产物）跨 run 复用，重跑能省不少时间
+      - name: Cache Nuitka compilation cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/Nuitka
+            ~/AppData/Local/Nuitka/Nuitka/Cache
+          key: nuitka-${{ matrix.name }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('cube-shell.py', 'requirements.txt') }}
+          restore-keys: |
+            nuitka-${{ matrix.name }}-py${{ env.PYTHON_VERSION }}-
+
+      # ------------------------------------------------------------- Build
+      # 一个步骤覆盖三平台：公共参数照抄本地 build 脚本，平台差异塞进 extra 数组。
+      #   --assume-yes-for-downloads：CI 无人值守，Nuitka 需要拉 ccache/依赖扫描器时
+      #     不能停下来等交互输入（否则 job 会挂到超时）。
+      #   --include-data-files=i18n/*.qm：本地脚本漏了这个。cube-shell.py 用
+      #     os.path.dirname(__file__)/i18n 找翻译，standalone 下即 <dist>/i18n，
+      #     不随包则多语言界面全部回退英文。只带 .qm，不带 .ts 源文件。
+      #   不加 --linux-icon：该选项只对 onefile 模式有意义（Linux 图标走下面生成的
+      #     .desktop + logo.png）。
       - name: Build with Nuitka
+        shell: bash
+        env:
+          VSLANG: '1033'          # 逼 MSVC 输出英文，否则 Nuitka 解析不了中文报错信息
         run: |
-          nuitka --windows-console-mode=disable --windows-icon-from-ico=icons/logo.ico --follow-imports --remove-output --jobs=4 --output-dir=deploy --standalone --enable-plugin=pyside6 --include-module=qdarktheme --include-module=pygments --include-module=paramiko --include-module=yaml --include-module=openai --include-module=keyring --include-module=prompt_toolkit --include-package=unicrypto --include-module=pygments.formatters.html --include-module=pygments.lexers.shell --include-package=qtermwidget,core,function,style,ui,icons --include-data-dir=conf=conf --company-name=HanXuan --product-name=cubeShell --file-version=2.8.0.0 --product-version=2.8.0 --file-description="cubeShell" cube-shell.py
+          set -e
+          extra=()
+          case "${{ matrix.platform }}" in
+            macos)
+              extra+=( --macos-create-app-bundle
+                       --macos-app-icon=icons/logo.icns
+                       --macos-app-version="${APP_VERSION}"
+                       --macos-target-arch=${{ matrix.macos_arch }}
+                       --static-libpython=no )
+              ;;
+            windows)
+              extra+=( --windows-console-mode=disable
+                       --windows-icon-from-ico=icons/logo.ico
+                       --msvc=latest
+                       --python-flag=no_site )
+              ;;
+          esac
 
-      - name: Check deploy output
+          python -m nuitka \
+            --standalone \
+            --assume-yes-for-downloads \
+            --enable-plugin=pyside6 \
+            --follow-imports \
+            --remove-output \
+            --jobs=4 \
+            --lto=yes \
+            --output-dir=deploy \
+            --nofollow-import-to=PySide6.QtPdf,PySide6.QtDBus,PySide6.QtConcurrent,PySide6.QtSvg \
+            --include-module=qdarktheme \
+            --include-module=pygments \
+            --include-module=paramiko \
+            --include-module=yaml \
+            --include-module=openai \
+            --include-module=keyring \
+            --include-module=prompt_toolkit \
+            --include-package=unicrypto \
+            --include-module=pygments.formatters.html \
+            --include-module=pygments.lexers.shell \
+            --include-package=qtermwidget,core,function,style,ui,icons \
+            --include-data-dir=conf=conf \
+            "--include-data-files=i18n/*.qm=i18n/" \
+            --company-name="HanXuan" \
+            --product-name="cubeShell" \
+            --file-version="${APP_VERSION}.0" \
+            --product-version="${APP_VERSION}" \
+            --file-description="A powerful shell application" \
+            "${extra[@]}" \
+            cube-shell.py
+
+      # ------------------------------------------------------ Post-process
+      # 三平台共用：补 conf、删本机配置、放 qtermwidget 运行期资源。
+      #
+      # 资源要放【两处】：
+      #   1) <appdir>/            —— qtermwidget/tools.py 里 applicationDirPath() 的
+      #      兜底查找路径，但源码中该分支 `if sys.platform == 'darwin'`，只 macOS 生效；
+      #   2) <appdir>/qtermwidget/ —— tools.py 首选的 _package_dir（= 包目录），
+      #      Nuitka standalone 下就是 <appdir>/qtermwidget，Windows/Linux 只认这里。
+      # 本地 build-linux.sh 只拷了 (1)，Linux 上实际找不到配色方案；两处都放最稳。
+      - name: Post-process app resources
+        shell: bash
         run: |
-          if (Test-Path deploy\cube-shell.dist) {
-            $size = (Get-ChildItem deploy\cube-shell.dist -Recurse | Measure-Object -Property Length -Sum).Sum
-            Write-Host "Total size: $([math]::Round($size/1MB,1)) MB"
-            Get-ChildItem deploy\cube-shell.dist -Filter "*.exe" | ForEach-Object { Write-Host "Exe: $($_.Name) - $([math]::Round($_.Length/1MB,1)) MB" }
-          } else {
-            Write-Host "ERROR: deploy cube-shell.dist not found"
-            Get-ChildItem deploy -ErrorAction SilentlyContinue
+          set -e
+          if [ "${{ matrix.platform }}" = "macos" ]; then
+            APPDIR="deploy/cube-shell.app/Contents/MacOS"
+          else
+            APPDIR="deploy/cube-shell.dist"
+          fi
+          if [ ! -d "$APPDIR" ]; then
+            echo "ERROR: 未找到 Nuitka 产物目录 $APPDIR" >&2
+            ls -la deploy || true
             exit 1
+          fi
+          echo "APPDIR=$APPDIR" >> "$GITHUB_ENV"
+
+          # macOS bundle 的数据文件落点随 Nuitka 版本变过（Contents/MacOS 与
+          # Contents/Resources 都出现过）。运行期 cube-shell.py 是按
+          # os.path.dirname(__file__)（standalone 下 = Contents/MacOS）去找 conf/ 与
+          # i18n/ 的，所以这里统一回填到 Contents/MacOS，避免版本漂移导致读不到配置。
+          if [ "${{ matrix.platform }}" = "macos" ]; then
+            RES="deploy/cube-shell.app/Contents/Resources"
+            for d in conf i18n; do
+              if [ ! -d "$APPDIR/$d" ] && [ -d "$RES/$d" ]; then
+                echo "回填 $RES/$d → $APPDIR/$d"
+                cp -R "$RES/$d" "$APPDIR/"
+              fi
+            done
+          fi
+
+          # 空 tunnel.json + 删掉开发机的 config.dat（防把本机账号配置打进包）
+          mkdir -p "$APPDIR/conf"
+          echo '{}' > "$APPDIR/conf/tunnel.json"
+          rm -f "$APPDIR/conf/config.dat"
+
+          for dst in "$APPDIR" "$APPDIR/qtermwidget"; do
+            mkdir -p "$dst"
+            cp -R qtermwidget/color-schemes  "$dst/"
+            cp -R qtermwidget/kb-layouts     "$dst/"
+            cp -R qtermwidget/translations   "$dst/"
+            cp    qtermwidget/default.keytab "$dst/"
+          done
+
+          # 自检：关键资源缺失就直接失败，别产出一个能起但功能残缺的包
+          for f in "$APPDIR/conf/tunnel.json" \
+                   "$APPDIR/qtermwidget/color-schemes" \
+                   "$APPDIR/qtermwidget/default.keytab"; do
+            [ -e "$f" ] || { echo "ERROR: 缺少 $f" >&2; exit 1; }
+          done
+          ls "$APPDIR"/i18n/*.qm >/dev/null 2>&1 \
+            && echo "i18n 翻译已随包 ✓" \
+            || { echo "ERROR: i18n/*.qm 未随包，多语言会全部回退英文" >&2; exit 1; }
+          echo "=== 产物体积 ==="
+          du -sh "$APPDIR"
+
+      # --------------------------------------------------- Package (macOS)
+      # 流程：注册 URL Scheme → 瘦身 → ad-hoc 签名 → hdiutil 打 dmg。
+      #
+      # 为什么必须签名：Nuitka 生成/改写了 bundle 内的可执行文件与 Qt 框架但未签名，
+      # 用户从互联网下载（带 quarantine 属性）后 Gatekeeper 校验失败会误报
+      # 「cube-shell.app 已损坏，无法打开」。ad-hoc 签名（codesign -s -，无需开发者
+      # 证书）后校验通过（首次打开仍需右键→打开）。
+      #
+      # 签名必须是最后一步，之后不再触碰 .app —— 故用 hdiutil 而非 create-dmg：
+      # create-dmg 依赖 AppleScript 摆放 Finder 窗口，headless CI 上容易卡死/失败。
+      - name: Package macOS (.dmg)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -e
+          APP=deploy/cube-shell.app
+
+          # 1) 注册 jms:// / cubeshell:// URL Scheme（写 Info.plist）。
+          #    脚本末尾会调 lsregister 刷新 LaunchServices，CI 上可能返回非 0，
+          #    故容错执行，随后用 PlistBuddy 校验 plist 是否真的写进去了。
+          bash tools/register_url_scheme.sh "$APP" || \
+            echo "WARNING: register_url_scheme.sh 非 0 退出（通常是 lsregister），继续校验 plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleURLTypes:0:CFBundleURLSchemes:0" \
+            "$APP/Contents/Info.plist"
+
+          # 2) 瘦身：strip 主二进制 + 删掉 --nofollow-import-to 没能拦住的 QtPdf
+          strip -x "$APP/Contents/MacOS/cube-shell" || true
+          rm -f "$APP/Contents/MacOS/QtPdf"
+
+          # 3) ad-hoc 签名整个 bundle（--deep 递归签内嵌框架，--force 覆盖旧签名）
+          codesign -s - --force --deep "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+          # 4) 签名后打 dmg（不再改动 .app，保证签名不被破坏）
+          mkdir -p out
+          DMG="out/cube-shell-${APP_VERSION}-${{ matrix.name }}.dmg"
+          hdiutil create -volname "Cube Shell" -srcfolder "$APP" \
+            -ov -format UDZO "$DMG"
+          ls -lh out/
+
+      # ------------------------------------------------- Package (Windows)
+      # 产出两个文件：绿色版 zip + Inno Setup 安装包（复用仓库里的 installer.iss）。
+      #
+      # 不做代码签名：CI 里只能自签名（本地 build-exe.bat 那样），而自签名证书在用户
+      # 机器上同样不受信任，SmartScreen 该拦还是拦，白增一层无效步骤，故省掉。
+      - name: Package Windows (.zip + Inno Setup)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver  = $env:APP_VERSION
+          $name = '${{ matrix.name }}'
+          $dist = 'deploy\cube-shell.dist'
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+
+          # ---------- 1) 绿色版 zip（解压即用，顶层为 cube-shell.dist/） ----------
+          $zip = "out\cube-shell-$ver-$name.zip"
+          Compress-Archive -Path $dist -DestinationPath $zip
+          Get-Item $zip | Select-Object Name, Length
+
+          # ---------- 2) Inno Setup 安装包 ----------
+          function Find-ISCC {
+            $c = Get-Command iscc.exe -ErrorAction SilentlyContinue
+            if ($c) { return $c.Source }
+            foreach ($root in @(${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
+              if (-not $root) { continue }
+              $hit = Get-ChildItem -Path $root -Filter ISCC.exe -Recurse -Depth 2 `
+                       -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($hit) { return $hit.FullName }
+            }
+            return $null
           }
 
-      - name: Create tunnel.json
-        run: |
-          New-Item -ItemType Directory -Path deploy\cube-shell.dist\conf -Force -ErrorAction SilentlyContinue
-          $null | Out-File deploy\cube-shell.dist\conf\tunnel.json
-          Remove-Item deploy\cube-shell.dist\conf\config.dat -ErrorAction SilentlyContinue
+          $iscc = Find-ISCC
+          if (-not $iscc) {
+            # choco 在 windows-11-arm 镜像上不一定预装，探测后再用；失败不致命，
+            # 下面还有官网静默安装兜底。
+            if (Get-Command choco -ErrorAction SilentlyContinue) {
+              Write-Host '未预装 Inno Setup，尝试 choco 安装...'
+              try { choco install innosetup -y --no-progress } catch { Write-Host "choco 安装失败: $_" }
+              $iscc = Find-ISCC
+            }
+          }
+          if (-not $iscc) {
+            Write-Host 'choco 不可用或失败，从官网静默安装 Inno Setup...'
+            try {
+              Invoke-WebRequest -Uri 'https://jrsoftware.org/download.php/is.exe' -OutFile is.exe
+              Start-Process -Wait -FilePath .\is.exe `
+                -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-'
+            } catch { Write-Host "官网安装失败: $_" }
+            $iscc = Find-ISCC
+          }
+          if (-not $iscc) { throw '未能安装 Inno Setup（ISCC.exe）' }
+          Write-Host "ISCC: $iscc"
 
-      - name: Copy qtermwidget
-        run: |
-          New-Item -ItemType Directory -Path deploy\cube-shell.dist\qtermwidget\color-schemes -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path deploy\cube-shell.dist\qtermwidget\kb-layouts -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path deploy\cube-shell.dist\qtermwidget\translations -Force -ErrorAction SilentlyContinue
-          Copy-Item qtermwidget\color-schemes\* deploy\cube-shell.dist\qtermwidget\color-schemes\ -Recurse -Force -ErrorAction SilentlyContinue
-          Copy-Item qtermwidget\kb-layouts\* deploy\cube-shell.dist\qtermwidget\kb-layouts\ -Recurse -Force -ErrorAction SilentlyContinue
-          Copy-Item qtermwidget\translations\* deploy\cube-shell.dist\qtermwidget\translations\ -Recurse -Force -ErrorAction SilentlyContinue
-          Copy-Item qtermwidget\default.keytab deploy\cube-shell.dist\qtermwidget\ -ErrorAction SilentlyContinue
+          # installer.iss 没写架构定向指令，ARM64 上 {commonpf} 会落到
+          # "Program Files (x86)"（Inno 编译出的安装程序本身是 32 位）。这里生成一份
+          # 带架构指令的临时副本，不改动仓库里的原文件：把指令插到已有的 [Setup]
+          # 段首（而不是另起一个 [Setup] 段，省得依赖「同名段可重复」这一行为）。
+          $arch = if ($name -eq 'windows-arm64') { 'arm64' } else { 'x64compatible' }
+          $inject = "[Setup]`r`n" +
+                    "ArchitecturesAllowed=$arch`r`n" +
+                    "ArchitecturesInstallIn64BitMode=$arch`r`n" +
+                    "Compression=lzma2/fast"
+          $iss = Get-Content installer.iss -Raw
+          $patched = $iss -replace '(?m)^\[Setup\][ \t]*\r?$', $inject
+          if ($patched -eq $iss) { throw 'installer.iss 里没找到 [Setup] 段，注入架构指令失败' }
+          # 带 BOM 写出：Inno Setup 6 只有见到 UTF-8 BOM 才按 UTF-8 解析，
+          # 否则 DefaultGroupName 里的中文「寒暄」会变乱码。
+          Set-Content -Path installer.ci.iss -Value $patched -Encoding utf8BOM
 
+          $outDir = (Resolve-Path out).Path
+          & $iscc "/DMyAppVersion=$ver" "/O$outDir" "/Fcube-shell-$ver-$name-setup" installer.ci.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC 编译失败，退出码 $LASTEXITCODE" }
+          Get-ChildItem out | Select-Object Name, Length
+
+      # --------------------------------------------------- Package (Linux)
+      # PySide6 的 manylinux 轮子自带 Qt 运行库与插件，Nuitka 已把它们连同 $ORIGIN
+      # rpath 一起布进 dist，目标机无需另装 Qt6，因此不需要 C++ 版那套手工收集
+      # libQt6*/XCB 的逻辑。这里只补桌面集成文件再打 tar.gz。
+      - name: Package Linux (.tar.gz)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -e
+          APP=deploy/cube-shell.dist
+          chmod +x "$APP/cube-shell.bin"
+          cp icons/logo.png "$APP/"
+
+          # .desktop 里的路径先占位，由下面的启动脚本在首次运行时改成绝对路径
+          cat > "$APP/cube-shell.desktop" <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=Cube Shell
+          Comment=A powerful shell application
+          Exec=cube-shell.bin
+          Icon=logo.png
+          Terminal=false
+          Categories=Development;System;Utility;
+          StartupNotify=true
+          StartupWMClass=cubeShell
+          EOF
+
+          cat > "$APP/cube-shell.sh" <<'EOF'
+          #!/bin/bash
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+
+          # 每次运行都刷新 .desktop 里的绝对路径，移动目录后依然可用
+          DESKTOP="${DIR}/cube-shell.desktop"
+          if [ -f "${DESKTOP}" ]; then
+            sed -i "s|^Exec=.*|Exec=${DIR}/cube-shell.bin|" "${DESKTOP}"
+            sed -i "s|^Icon=.*|Icon=${DIR}/logo.png|" "${DESKTOP}"
+          fi
+
+          exec "${DIR}/cube-shell.bin" "$@"
+          EOF
+          chmod +x "$APP/cube-shell.sh" "$APP/cube-shell.desktop"
+
+          # 自检：清空 LD_LIBRARY_PATH 模拟目标机，纯靠二进制内的 rpath 解析依赖
+          echo "=== ldd self-check (no LD_LIBRARY_PATH) ==="
+          if env -u LD_LIBRARY_PATH ldd "$APP/cube-shell.bin" | grep -i "not found"; then
+            echo "ERROR: 主程序有未解析的依赖" >&2
+            exit 1
+          fi
+          echo "主程序依赖已自包含 ✓"
+
+          mkdir -p out
+          tar -czf "out/cube-shell-${APP_VERSION}-${{ matrix.name }}.tar.gz" \
+            -C deploy cube-shell.dist
+          ls -lh out/
+
+      # --------------------------------------------------------- Artifact
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cubeShell-windows-X86_64
-          path: deploy/cube-shell.dist/
-          retention-days: 30
+          name: cube-shell-${{ matrix.name }}
+          path: out/
+          if-no-files-found: error
+
+  # ============================================================ Release
+  # 在 v* tag 上手动触发时，等 6 个平台全部构建完成，把 artifact 传到该 tag 的 Release。
+  release:
+    name: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
